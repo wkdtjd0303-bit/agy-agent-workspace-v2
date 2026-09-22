@@ -1,0 +1,225 @@
+{
+  "total_tested": 9,
+  "passed": 9,
+  "failed": 0,
+  "pass_rate_percentage": 100.0,
+  "score_string": "9/9 = 100.0%",
+  "evidence_bundles": [
+    {
+      "app_id": "APP_01",
+      "app_title": "Onboarding & Permission Dialog",
+      "package_name": "com.security.gatekeeper",
+      "discovered_capabilities": {
+        "category": "security",
+        "screen_state": "PERMISSION_DIALOG",
+        "permissions": [
+          "android.permission.CAMERA",
+          "android.permission.RECORD_AUDIO"
+        ],
+        "hardware": [
+          "CAMERA"
+        ],
+        "node_count": 5
+      },
+      "generated_graph": {
+        "checkpoints": [
+          "0% 앱 콜드부트 & OS 바이너리 패키징 기동",
+          "25% 런타임 권한 수락 & 온보딩 자율 통과",
+          "50% [SECURITY] 핵심 기능 뷰 & 주요 도메인 진입",
+          "75% [SECURITY] 하드웨어 모듈 & 심층 데이터 조작 검증",
+          "100% 생명주기(백그라운드/재시작) & 배터리/알림/크래시 종합 진단"
+        ],
+        "total_checkpoints": 5
+      },
+      "executed_actions": [
+        {
+          "action": "tap",
+          "x": 540,
+          "y": 1260,
+          "reason": "권한 팝업 자동 승인 클릭 ('앱 사용 중에만 허용')",
+          "target_node": {
+            "resource_id": "com.android.permissioncontroller:id/permission_allow_foreground_only_button",
+            "text": "앱 사용 중에만 허용",
+            "content_desc": "",
+            "class_name": "android.widget.Button",
+            "clickable": true,
+            "enabled": true,
+            "bounds": [
+              100,
+              1200,
+              980,
+              1320
+            ],
+            "center": [
+              540,
+              1260
+            ],
+            "label": "앱 사용 중에만 허용"
+          },
+          "node_signature": "permission_allow_foreground_only_button::앱 사용 중에만 허용::::9_21"
+        }
+      ],
+      "ui_evidence": [
+        {
+          "step": 1,
+          "action": "tap",
+          "coordinates": [
+            540,
+            1260
+          ],
+          "target_node": {
+            "resource_id": "com.android.permissioncontroller:id/permission_allow_foreground_only_button",
+            "text": "앱 사용 중에만 허용",
+            "content_desc": "",
+            "class_name": "android.widget.Button",
+            "clickable": true,
+            "enabled": true,
+            "bounds": [
+              100,
+              1200,
+              980,
+              1320
+            ],
+            "center": [
+              540,
+              1260
+            ],
+            "label": "앱 사용 중에만 허용"
+          },
+          "reason": "권한 팝업 자동 승인 클릭 ('앱 사용 중에만 허용')",
+          "score": null
+        }
+      ],
+      "assertions": [
+        {
+          "assertion": "UI_HIERARCHY_PARSED",
+          "passed": true,
+          "details": "5 interactive nodes parsed"
+        },
+        {
+          "assertion": "TARGET_SELECTION_ACCURACY",
+          "passed": true,
+          "details": "Target '앱 사용 중에만 허용 com.android.permissioncontroller:id/permission_allow_foreground_only_button' matched expected pattern '앱 사용 중에만 허용'"
+        },
+        {
+          "assertion": "DYNAMIC_GRAPH_SYNTHESIZED",
+          "passed": true,
+          "details": "5 checkpoints generated (0%~100%)"
+        },
+        {
+          "assertion": "TC-AND-BAT_QUANTITATIVE_LIMITS",
+          "passed": true,
+          "details": "CPU=85ms (<500ms), WakeLock=120ms (<1000ms)"
+        },
+        {
+          "assertion": "REPEATABILITY_AND_DETERMINISM",
+          "passed": true,
+          "details": "Identical action and coordinates selected on repeat run"
+        }
+      ],
+      "failed_features": [],
+      "failure_causes": [],
+      "execution_environment": "EMULATOR_KVM (Accessibility Framework)",
+      "verdict": "PASS",
+      "repeatability_verified": true
+    },
+    {
+      "app_id": "APP_02",
+      "app_title": "Scrollable Form & Input Injection",
+      "package_name": "com.fintech.wallet",
+      "discovered_capabilities": {
+        "category": "ecommerce",
+        "screen_state": "FORM_INPUT",
+        "permissions": [
+          "android.permission.INTERNET"
+        ],
+        "hardware": [
+          "STORAGE"
+        ],
+        "node_count": 5
+      },
+      "generated_graph": {
+        "checkpoints": [
+          "0% 앱 콜드부트 & OS 바이너리 패키징 기동",
+          "25% 런타임 권한 수락 & 온보딩 자율 통과",
+          "50% [ECOMMERCE] 핵심 기능 뷰 & 주요 도메인 진입",
+          "75% [ECOMMERCE] 하드웨어 모듈 & 심층 데이터 조작 검증",
+          "100% 생명주기(백그라운드/재시작) & 배터리/알림/크래시 종합 진단"
+        ],
+        "total_checkpoints": 5
+      },
+      "executed_actions": [
+        {
+          "action": "input_text",
+          "x": 540,
+          "y": 310,
+          "text": "AGY_E2E_AUTO_TEST",
+          "reason": "입력 폼 필드 발견 및 포커스 텍스트 인젝션 ('com.fintech.wallet:id/input_amount')",
+          "target_node": {
+            "resource_id": "com.fintech.wallet:id/input_amount",
+            "text": "",
+            "content_desc": "",
+            "class_name": "android.widget.EditText",
+            "clickable": true,
+            "enabled": true,
+            "bounds": [
+              60,
+              240,
+              1020,
+              380
+            ],
+            "center": [
+              540,
+              310
+            ],
+            "label": "com.fintech.wallet:id/input_amount"
+          },
+          "node_signature": "input_amount::::::9_5"
+        },
+        {
+          "action": "tap",
+          "x": 540,
+          "y": 1975,
+          "reason": "지능형 ActionScorer 최고점 (160.0점) 자율 컴포넌트 탭 ('송금하기') [밀집버튼: 2개, dense=False]",
+          "target_node": {
+            "resource_id": "com.fintech.wallet:id/btn_send",
+            "text": "송금하기",
+            "content_desc": "",
+            "class_name": "android.widget.Button",
+            "clickable": true,
+            "enabled": true,
+            "bounds": [
+              60,
+              1900,
+              1020,
+              2050
+            ],
+            "center": [
+              540,
+              1975
+            ],
+            "label": "송금하기"
+          },
+          "node_signature": "btn_send::송금하기::::9_32",
+          "score": 160.0,
+          "is_dense_button_mode": false,
+          "dense_analysis": {
+            "is_dense": false,
+            "total_buttons": 2,
+            "primary_ctas_count": 1,
+            "hazards_avoided_count": 0,
+            "ambiguous_count": 0,
+            "boilerplate_count": 0,
+            "ranked_candidates": [
+              [
+                160.0,
+                "송금하기",
+                "com.fintech.wallet:id/btn_send"
+              ],
+              [
+                -40.0,
+                "com.fintech.wallet:id/input_amount",
+                "com.fintech.wallet:id/input_amount"
+              ]
+            ],
+            "best_candidate": 

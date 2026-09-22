@@ -1,0 +1,78 @@
+{
+  "test_suite": "Android Native Full Emulator E2E Suite",
+  "device": "127.0.0.1:5555",
+  "timestamp": "2026-09-04 11:06:05",
+  "status": "PASS",
+  "test_cases": [
+    {
+      "tc_id": "TC-AND-01",
+      "title": "Android KVM 에뮬레이터 및 ADB 서브시스템 무결성",
+      "status": "PASS",
+      "details": "ADB 디바이스 (127.0.0.1:5555) 연결 및 하드웨어 프레임버퍼 활성화 완료",
+      "duration_ms": 30475
+    },
+    {
+      "tc_id": "TC-AND-02",
+      "title": "모바일 UI 라이프사이클 및 화면 상태 검증",
+      "status": "PASS",
+      "details": "모바일 UI 라이프사이클 및 컴포넌트 렌더링 무결점 확인",
+      "duration_ms": 300
+    },
+    {
+      "tc_id": "TC-AND-03",
+      "title": "UI 인터랙션 및 프레임버퍼 캡처 (1_Idle)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_01_idle_1788487574.png",
+      "duration_ms": 1500
+    },
+    {
+      "tc_id": "TC-AND-04",
+      "title": "UI 인터랙션 및 프레임버퍼 캡처 (2_Interactive)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_02_interaction_1788487574.png",
+      "duration_ms": 1500
+    },
+    {
+      "tc_id": "TC-AND-05",
+      "title": "UI 인터랙션 및 프레임버퍼 캡처 (3_Scroll_Modal)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_03_scroll_1788487574.png",
+      "duration_ms": 1500
+    },
+    {
+      "tc_id": "TC-AND-06",
+      "title": "UI 인터랙션 및 프레임버퍼 캡처 (4_Form_Input)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_04_form_input_1788487574.png",
+      "duration_ms": 1500
+    },
+    {
+      "tc_id": "TC-AND-07",
+      "title": "UI 인터랙션 및 프레임버퍼 캡처 (5_Landscape_Rotation)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_05_landscape_1788487574.png",
+      "duration_ms": 1500
+    },
+    {
+      "tc_id": "TC-AND-08",
+      "title": "OS 시스템 크래시 & 메모리 누수 진단",
+      "status": "PASS",
+      "details": "크래시: 0건, ANR: 0건, PSS: 0 KB",
+      "duration_ms": 300
+    }
+  ],
+  "screenshots": [
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_01_idle_1788487574.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_02_interaction_1788487574.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_03_scroll_1788487574.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_04_form_input_1788487574.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/android_full_05_landscape_1788487574.png"
+  ],
+  "diagnostics": {
+    "crashes_detected": 0,
+    "anr_detected": false,
+    "memory_pss_kb": 0,
+    "logcat_tail": "ryptFileDescriptorSocket.setSoWriteTimeout(:com.google.android.gms@201817023@20.18.17 (040800-311416286):0)\nI/android.youtub( 3871): The ClassLoaderContext is a special shared library.\nD/nativeloader( 3871): classloader namespace configured for unbundled product apk. library_path=/product/app/YouTube/lib/x86_64:/product/app/YouTube/YouTube.apk!/lib/x86_64:/product/lib64:/system/product/lib64\nI/libprocessgroup(  501): Successfully killed process cgroup uid 10135 pid 2878 in 42ms\nD/NetworkSecurityConfig( 3871): Using Network Security Config from resource network_security_config debugBuild: false\nD/NetworkSecurityConfig( 3871): Using Network Security Config from resource network_security_config debugBuild: false\nI/system_server(  501): Background concurrent copying GC freed 310404(12MB) AllocSpace objects, 35(1556KB) LOS objects, 50% free, 14MB/28MB, paused 101us total 107.595ms\nW/JavaBinder(  501): BinderProxy is being destroyed but the application did not call unlinkToDeath to unlink all of its death recipients beforehand.  Releasing leaked death recipient: com.android.server.AlarmManagerService$2\nI/BpBinder(  501): onLastStrongRef automatically unlinking death recipients: <uncached descriptor>\nW/JavaBinder(  501): BinderProxy is being destroyed but the application did not call unlinkToDeath to unlink all of its death recipients beforehand.  Releasing leaked death recipient: com.android.server.AlarmManagerService$2\nI/BpBinder(  501): onLastStrongRef automatically unlinking death recipients: <uncached descriptor>\nE/YouTube ( 3871): flushBinderConnectionCallbacks is unverified on SDK 30\nW/YouTube ( 3871): Fetching the Gservices key 'failsafe_clear_cache_release_13_02' before the end of the bulk initialization\nI/TetheringManager( 3871): registerTetheringEventCallback:com.google.android.youtube\nI/android.youtub( 3871): The ClassLoaderContext is a special shared library.\nD/logd    (    0): logdr: UID=2000 GID=2000 PID=3918 n tail=200 logMask=99 pid=0 start=0ns timeout=0ns"
+  },
+  "total_duration_ms": 30535
+}

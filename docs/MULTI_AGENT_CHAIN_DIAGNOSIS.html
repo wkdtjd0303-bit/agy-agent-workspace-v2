@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>다중 협업 모드 Coder ➔ QA ➔ Auditor 연계 누락 원인 정밀 진단</title>
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --text-color: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-danger: #f87171;
+      --accent-warn: #fbbf24;
+      --accent-success: #34d399;
+      --border-color: #334155;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      line-height: 1.6;
+      margin: 0;
+      padding: 2rem 1rem;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.8rem;
+      color: var(--accent);
+      border-bottom: 2px solid var(--border-color);
+      padding-bottom: 0.8rem;
+      margin-bottom: 1.5rem;
+    }
+    h2 {
+      font-size: 1.3rem;
+      color: var(--text-color);
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+    }
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--accent-warn);
+      margin-bottom: 0.5rem;
+    }
+    .card-title.danger {
+      color: var(--accent-danger);
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background-color: #0369a1;
+      color: #e0f2fe;
+      margin-bottom: 0.5rem;
+    }
+    code {
+      background-color: #0f172a;
+      color: #38bdf8;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: "Courier New", Courier, monospace;
+    }
+    ul {
+      margin: 0.5rem 0;
+      padding-left: 1.5rem;
+    }
+    li {
+      margin-bottom: 0.4rem;
+    }
+    .solution-list li {
+      color: var(--accent-success);
+    }
+    .solution-list li span {
+      color: var(--text-color);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔍 다중 협업 모드(!mode 2, 2+) Coder ➔ QA ➔ Auditor 연계 누락 원인 정밀 진단</h1>
+    
+    <h2>📋 핵심 요약</h2>
+    <div class="card">
+      다중 협업 모드 세팅 시 Coder만 실행되고 QA나 Auditor로 연계되지 않는 현상은 <strong>단일 버그가 아닌 6가지 서로 다른 시스템 분기 및 차단 게이트</strong>에 의해 발생합니다. 특히 <strong>Coder 응답 내 이모지 오판정(Early Exit)</strong>, <strong>프롬프트의 ResearchRunner 오분류</strong>, <strong>Zero-Production-Diff 기계적 차단</strong>이 주원인입니다.
+    </div>
+
+    <h2>🚨 6대 핵심 원인 상세</h2>
+
+    <div class="card">
+      <div class="badge">원인 1 · 치명적 조기 종료</div>
+      <div class="card-title danger">Coder 응답 이모지(🚨, 🛑, ⚠️)에 의한 is_system_error() 오판정</div>
+      <ul>
+        <li><strong>발생 위치:</strong> <code>trio_agent_runner.py</code> Line 232, Line 925</li>
+        <li><strong>메커니즘:</strong> Coder 모델이 답변 작성 시 강조를 위해 <code>🚨 **[긴급 패치 내역]**</code> 또는 <code>⚠️ **[오류 원인]**</code> 등으로 시작하면, 시스템이 이를 실제 에이전트 실패(치명적 에러)로 간주하고 QA/Auditor를 전혀 호출하지 않은 채 즉시 파이프라인을 종료합니다.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="badge">원인 2 · 파이프라인 탈취</div>
+      <div class="card-title">자연어 분석/원인 조사 프롬프트의 ResearchRunner 탈취 및 다중 QA 누락</div>
+      <ul>
+        <li><strong>발생 위치:</strong> <code>mode_classifier.py</code> Line 367, <code>bot.py</code> Line 4499</li>
+        <li><strong>메커니즘:</strong> 사용자가 <code>!mode 2+</code> 상태에서 "원인을 찾아봐줄래?", "비교해줘", "분석해줘" 등을 입력하면 <code>task_type="research"</code>로 분류되어 <code>ResearchRunner</code>로 분기됩니다.</li>
+        <li><strong>결함:</strong> <code>ResearchRunner</code>는 확장 QA(qa2~qa7) 파라미터가 아예 없어 다중 QA가 단 한 대도 실행되지 않으며, Coder에게 시세 조사용 리서치 프롬프트가 주입됩니다.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="badge">원인 3 · 기계적 게이트 차단</div>
+      <div class="card-title">Zero-Production-Diff 게이트에 의한 QA 이관 거부</div>
+      <ul>
+        <li><strong>발생 위치:</strong> <code>trio_agent_runner.py</code> Line 1070, <code>evidence_validator.py</code> Line 557</li>
+        <li><strong>메커니즘:</strong> Coder가 설정 파일(<code>.env</code>, <code>package.json</code>, <code>build.gradle</code>), 문서(<code>README.md</code>), 테스트(<code>test_*.py</code>)만 수정한 경우, 프로덕션 소스코드 git diff가 0줄로 판정되어 시스템이 QA/Auditor 이관을 원천 거부하고 Coder 재작업을 지시하거나 최대 라운드 도달 시 종료합니다.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="badge">원인 4 · 빌드 점검 차단</div>
+      <div class="card-title">Pre-Flight 컴파일 사전 점검 실패 루프</div>
+      <ul>
+        <li><strong>발생 위치:</strong> <code>trio_agent_runner.py</code> Line 1116</li>
+        <li><strong>메커니즘:</strong> 안드로이드/Gradle 프로젝트 등에서 Coder의 수정본이 <code>compileDebugSources</code> 에러를 유발하면 QA 단계로 넘기지 않고 Coder 자가수정을 강제합니다.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="badge">원인 5 · 인프라/API 장애</div>
+      <div class="card-title">OpenRouter API 쿼터 고갈 및 180초 타임아웃</div>
+      <ul>
+        <li><strong>발생 위치:</strong> <code>trio_agent_runner.py</code> Line 1613-1639</li>
+        <li><strong>메커니즘:</strong> 확장 QA 순차 호출 중 OpenRouter 쿼터 소진, 크레딧 부족, 또는 180초 응답 지연 발생 시 예외가 발생하여 전체 루프가 중단됩니다.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="badge">원인 6 · 디스코드 권한</div>
+      <div class="card-title">QA/Auditor 봇의 채널 메시지 전송 권한 누락</div>
+      <ul>
+        <li><strong>발생 위치:</strong> <code>trio_agent_runner.py</code> Line 1245</li>
+        <li><strong>메커니즘:</strong> 특정 채널에서 QA 봇 클라이언트가 <code>Send Messages</code> 권한이 없을 경우, 비방어적 <code>send()</code> 호출이 <code>discord.Forbidden (403)</code>을 발생시켜 상위 에러 핸들러로 튕깁니다.</li>
+      </ul>
+    </div>
+
+    <h2>💡 권장 해결 방안 (패치 방향)</h2>
+    <div class="card">
+      <ul class="solution-list">
+        <li><span><strong>is_system_error 판정 정교화:</strong> 단순 <code>🚨</code> 이모지 시작 체크를 폐지하고 시스템 고유 에러 태그(<code>🚨 **[Zero-Production-Diff</code> 등)로 한정하여 Coder 정상 답변 조기 종료 차단</span></li>
+        <li><span><strong>mode_classifier 오분류 방어:</strong> 코드/시스템 디버깅용 "원인 분석/조사" 질의를 <code>research</code>가 아닌 <code>coding</code> 또는 <code>diagnostic</code>으로 정확히 분류</span></li>
+        <li><span><strong>ResearchRunner 다중 QA 지원:</strong> 리서치 파이프라인에서도 <code>!mode 2+</code> 확장 QA가 누락되지 않도록 파라미터 연계</span></li>
+        <li><span><strong>Zero-Production-Diff 예외 확대:</strong> 설정/인프라/문서/테스트 작업 요청 시 유연하게 QA/Auditor 검증을 허용</span></li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>

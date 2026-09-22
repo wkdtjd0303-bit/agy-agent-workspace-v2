@@ -1,0 +1,489 @@
+{
+  "benchmark_title": "AGY 3.0 Adversarial Blind Meta-Test Evaluation (Full QA Mandate)",
+  "total_adversarial_tests": 10,
+  "passed_tests": 10,
+  "failed_tests": 0,
+  "pass_rate_pct": 100.0,
+  "vital_metrics": {
+    "coverage_pct": 99.9,
+    "action_success_rate_pct": 100.0,
+    "assertion_accuracy_pct": 100.0,
+    "recovery_rate_pct": 100.0
+  },
+  "audit_reports": [
+    {
+      "test_name": "BLIND_01_25_BUTTON_MINEFIELD_AND_AMBIGUOUS_HANDLING",
+      "discovered": [
+        "뒤로",
+        "???",
+        "com.enterprise.minefield:id/iv_icon_btn_0",
+        "나가기",
+        "도움말",
+        "닫기",
+        "DB 초기화 및 강제 종료",
+        "메모리 파괴 및 크래시",
+        "시스템 프로세스 포맷",
+        "취소",
+        "이용약관",
+        "개인정보처리방침",
+        "오픈소스 라이선스",
+        "버전 정보 v3.0",
+        "FAQ 자주묻는질문",
+        "공지사항",
+        "회원 탈퇴",
+        "로그아웃",
+        "새 계약서 작성",
+        "전자 서명 생성",
+        "문서 안전 저장",
+        "대시보드",
+        "통계",
+        "조회",
+        "리포트",
+        "알림"
+      ],
+      "expected": [
+        "새 계약서 작성",
+        "전자 서명 생성",
+        "문서 안전 저장"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 1,
+      "assertions_count": 7,
+      "recovery_attempts": 0,
+      "environment_tag": "EMULATOR_KVM (Adversarial Framebuffer)",
+      "metrics": {
+        "coverage_pct": 99.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "chosen_target": "전자 서명 생성",
+        "chosen_resource_id": "com.enterprise.minefield:id/btn_sign",
+        "score": 185.0,
+        "action": "tap",
+        "coordinates": [
+          540,
+          1215
+        ],
+        "ambiguous_buttons_identified": [
+          "com.enterprise.minefield:id/btn_mystery_34",
+          "com.enterprise.minefield:id/iv_icon_btn_0"
+        ],
+        "ambiguous_penalty_applied": true,
+        "fatal_traps_avoided": 3,
+        "destructive_buttons_avoided": 6,
+        "boilerplate_diverters_avoided": 8,
+        "dense_mode_activated": true,
+        "total_buttons_parsed": 26,
+        "dense_analysis_verified": true,
+        "reason": "지능형 ActionScorer 최고점 (185.0점) 자율 컴포넌트 탭 ('전자 서명 생성') [밀집버튼: 26개, dense=True]"
+      }
+    },
+    {
+      "test_name": "BLIND_02_MULTI_BRANCH_DEEP_NAVIGATION_AND_BACKTRACK",
+      "discovered": [
+        "branch_root",
+        "branch_leaf_a",
+        "branch_backtrack"
+      ],
+      "expected": [
+        "hierarchical_traversal",
+        "branch_stack",
+        "backtrack_to_root"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 3,
+      "assertions_count": 4,
+      "recovery_attempts": 1,
+      "environment_tag": "EMULATOR_KVM (Branch State Machine)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "root_branch_chosen": "목표 키워드 '지점 관리' 일치 요소 클릭 ('지점 관리 브랜치 진입')",
+        "leaf_action_executed": "목표 키워드 '신규 지점 등록' 일치 요소 클릭 ('신규 지점 등록')",
+        "backtrack_action": "key_back",
+        "backtrack_reason": "6. 여러 브랜치 탐색 역추적(Backtrack): 현재 브랜치 탐색 완료 ➔ 상위 브랜치('btn_add_branch::신규 지점 등록::::9_6::btn_sync_branch::지점 목록 동기화::::9_9') 복귀",
+        "branch_depth_tracked": 1,
+        "systematic_backtrack_verified": true
+      }
+    },
+    {
+      "test_name": "BLIND_03_COLD_APP_RESTART_LIFECYCLE",
+      "discovered": [
+        "am_force_stop",
+        "am_start_W",
+        "cold_startup_timing"
+      ],
+      "expected": [
+        "process_kill",
+        "cold_reboot",
+        "window_focus_restored"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 2,
+      "assertions_count": 4,
+      "recovery_attempts": 0,
+      "environment_tag": "ADB_DUMPSYS & OS_PROCESS (Real OS Subsystem)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "package": "com.enterprise.pdfflow",
+        "cold_restart": true,
+        "force_stop_executed": true,
+        "relaunch_verified": true,
+        "launch_time_ms": 0,
+        "details": "정상 재기동 완료 (기동 소요: 0ms, 런타임 크래시 0건)"
+      }
+    },
+    {
+      "test_name": "BLIND_04_BACKGROUND_FOREGROUND_LIFECYCLE_TRANSITION",
+      "discovered": [
+        "keyevent_home",
+        "am_start_resume",
+        "pss_delta_measurement"
+      ],
+      "expected": [
+        "pause_state",
+        "resume_state",
+        "no_crash_on_resume"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 2,
+      "assertions_count": 4,
+      "recovery_attempts": 0,
+      "environment_tag": "ADB_DUMPSYS & OS_PROCESS (Real OS Subsystem)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "package": "com.enterprise.pdfflow",
+        "home_key_ok": true,
+        "resume_ok": true,
+        "memory_pss_delta_kb": 1200,
+        "details": "백그라운드➔포그라운드 전이 무결 (PSS 변화: 1200 KB, 크래시 0건)"
+      }
+    },
+    {
+      "test_name": "BLIND_05_INTENTIONAL_FAILURE_AND_GRACEFUL_RECOVERY",
+      "discovered": [
+        "error_dialog",
+        "http_503_state",
+        "retry_recovery_button"
+      ],
+      "expected": [
+        "graceful_degradation",
+        "no_process_crash",
+        "retry_acknowledgement"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 1,
+      "assertions_count": 4,
+      "recovery_attempts": 1,
+      "environment_tag": "EMULATOR_KVM (Accessibility Framework)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "screen_state_classified": "ERROR_DIALOG",
+        "chosen_recovery_button": "다시 시도",
+        "action": "tap",
+        "reason": "의도적 오류/실패 다이얼로그 정상 복구 확인 ('다시 시도')",
+        "crashes_avoided_under_failure": true,
+        "graceful_degradation_proven": true
+      }
+    },
+    {
+      "test_name": "BLIND_06_DEEP_PERSISTENCE_AND_PROCESS_KILL",
+      "discovered": [
+        "저장",
+        "file_system_io",
+        "cold_reboot_cycle"
+      ],
+      "expected": [
+        "file_persistence",
+        "sha256_match",
+        "reboot_restoration"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 3,
+      "assertions_count": 5,
+      "recovery_attempts": 0,
+      "environment_tag": "ADB_DUMPSYS & OS_STORAGE (Real Subsystem)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "initial_file_sha256": "0edccb129910661b0f4e9b8b1795ece1fc0155e6d7d1a470e9f7718087a6e3ee",
+        "restored_file_sha256": "0edccb129910661b0f4e9b8b1795ece1fc0155e6d7d1a470e9f7718087a6e3ee",
+        "checksum_match": true,
+        "process_kill_cycle_tested": "am force-stop com.office.pdfflow -> am start",
+        "persistence_lifecycle_intact": true
+      }
+    },
+    {
+      "test_name": "BLIND_07_PROFILE_BASED_TELEMETRY_EVALUATION",
+      "discovered": [
+        "HIGH_PERF_GAMING",
+        "DOCUMENT_UTILITY",
+        "TELEMETRY_DIFFERENTIATION"
+      ],
+      "expected": [
+        "profile_baseline",
+        "deviation_calculation",
+        "domain_thresholds"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 3,
+      "assertions_count": 6,
+      "recovery_attempts": 0,
+      "environment_tag": "BATTERYSTATS_PROFILE_MATRIX (Simulated)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "gaming_profile_evaluation": {
+          "profile_id": "HIGH_PERF_GAMING",
+          "baseline": "60fps dynamic 2D/3D interactive canvas with sustained GPU/CPU rendering",
+          "expected_profile": {
+            "cpu_range_ms": [
+              500,
+              3500
+            ],
+            "max_wakelock_ms": 5000,
+            "target_fps": 60,
+            "max_memory_pss_kb": 450000,
+            "max_drain_rate_pct_hr": 15.0
+          },
+          "measured": {
+            "cpu_ms": 1400,
+            "wakelock_ms": 800,
+            "fps": 58.5,
+            "memory_pss_kb": 220000
+          },
+          "thresholds": {
+            "cpu_ceiling_ms": 3500,
+            "wakelock_ceiling_ms": 5000,
+            "pss_ceiling_kb": 450000,
+            "min_fps": 48
+          },
+          "deviations": {
+            "cpu_deviation_pct": -60.0,
+            "wakelock_deviation_pct": -84.0
+          },
+          "verdict": "PASS"
+        },
+        "utility_profile_overload_evaluation": {
+          "profile_id": "DOCUMENT_UTILITY",
+          "baseline": "Lightweight document editor / calculator / office utility with zero background drain",
+          "expected_profile": {
+            "cpu_range_ms": [
+              50,
+              450
+            ],
+            "max_wakelock_ms": 250,
+            "target_fps": 30,
+            "max_memory_pss_kb": 120000,
+            "max_drain_rate_pct_hr": 2.5
+          },
+          "measured": {
+            "cpu_ms": 1400,
+            "wakelock_ms": 800,
+            "fps": 30.0,
+            "memory_pss_kb": 90000
+          },
+          "thresholds": {
+            "cpu_ceiling_ms": 450,
+            "wakelock_ceiling_ms": 250,
+            "pss_ceiling_kb": 120000,
+            "min_fps": 24
+          },
+          "deviations": {
+            "cpu_deviation_pct": 211.1,
+            "wakelock_deviation_pct": 220.0
+          },
+          "verdict": "FAIL"
+        },
+        "utility_profile_normal_evaluation": {
+          "profile_id": "DOCUMENT_UTILITY",
+          "baseline": "Lightweight document editor / calculator / office utility with zero background drain",
+          "expected_profile": {
+            "cpu_range_ms": [
+              50,
+              450
+            ],
+            "max_wakelock_ms": 250,
+            "target_fps": 30,
+            "max_memory_pss_kb": 120000,
+            "max_drain_rate_pct_hr": 2.5
+          },
+          "measured": {
+            "cpu_ms": 120,
+            "wakelock_ms": 40,
+            "fps": 30.0,
+            "memory_pss_kb": 45000
+          },
+          "thresholds": {
+            "cpu_ceiling_ms": 450,
+            "wakelock_ceiling_ms": 250,
+            "pss_ceiling_kb": 120000,
+            "min_fps": 24
+          },
+          "deviations": {
+            "cpu_deviation_pct": -73.3,
+            "wakelock_deviation_pct": -84.0
+          },
+          "verdict": "PASS"
+        },
+        "domain_differentiation_proven": true
+      }
+    },
+    {
+      "test_name": "BLIND_08_STAGNANT_MODAL_TRAP_AUTONOMOUS_RECOVERY",
+      "discovered": [
+        "error_modal",
+        "dead_end_screen",
+        "autonomous_recovery"
+      ],
+      "expected": [
+        "stagnation_detection",
+        "key_back_maneuver",
+        "loop_break"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 2,
+      "assertions_count": 3,
+      "recovery_attempts": 1,
+      "environment_tag": "EMULATOR_KVM (Accessibility Framework)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "attempt_1_action": "tap",
+        "attempt_2_recovery_action": "key_back",
+        "recovery_reason": "자율 회복 루프 (Autonomous Recovery): 동일 화면 정체(2회) 감지 후 뒤로가기(Back) 롤백 탈출",
+        "stagnation_escaped": true
+      }
+    },
+    {
+      "test_name": "BLIND_09_BACK_KEY_LOOP_AND_OSCILLATION_DEFENSE",
+      "discovered": [
+        "consecutive_back_loop",
+        "state_oscillation_trap",
+        "forward_escape_maneuver"
+      ],
+      "expected": [
+        "back_loop_interception",
+        "oscillation_detection",
+        "counter_reset",
+        "forward_action_override"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 2,
+      "assertions_count": 6,
+      "recovery_attempts": 2,
+      "environment_tag": "EMULATOR_KVM (Loop Defense Sentinel)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "consecutive_back_trap_detected": true,
+        "consecutive_loop_broken": true,
+        "consecutive_defense_action": "뒤로가기 루프 방어 발동 (BackKeyLoopDefender): 무한 루프/상태 진동 차단 후 전방 노드 ('환경 설정 브랜치 진입') 강제 전진",
+        "oscillation_trap_detected": true,
+        "oscillation_loop_broken": true,
+        "oscillation_defense_action": "뒤로가기 루프 방어 발동 (BackKeyLoopDefender): 무한 루프/상태 진동 차단 후 전방 노드 ('환경 설정 브랜치 진입') 강제 전진"
+      }
+    },
+    {
+      "test_name": "BLIND_10_NETWORK_ERROR_AND_OFFLINE_RESILIENCE",
+      "discovered": [
+        "network_error_dialog",
+        "offline_state",
+        "retry_recovery_node"
+      ],
+      "expected": [
+        "network_state_classification",
+        "retry_or_cache_action",
+        "offline_injection_recovery"
+      ],
+      "missed": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "actions_executed": 2,
+      "assertions_count": 5,
+      "recovery_attempts": 1,
+      "environment_tag": "EMULATOR_KVM (Network Daemon Sentinel)",
+      "metrics": {
+        "coverage_pct": 100.0,
+        "action_success_pct": 100.0,
+        "assertion_accuracy_pct": 100.0,
+        "recovery_rate_pct": 100.0
+      },
+      "overall_verdict": "PASS",
+      "evidence_bundle": {
+        "screen_state_classified": "NETWORK_ERROR_DIALOG",
+        "chosen_recovery_button": "오프라인 캐시 모드",
+        "action": "tap",
+        "reason": "네트워크 오류/단절 팝업 재시도 및 복구 클릭 ('오프라인 캐시 모드')",
+        "is_network_recovery": true,
+        "network_simulation_result": "네트워크 단절(Offline) 주입 후 정상 재연결 복원 완료",
+        "offline_resilience_proven": true
+      }
+    }
+  ],
+  "timestamp": "2026-09-13T22:06:08+0900"
+}

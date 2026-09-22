@@ -1,0 +1,48 @@
+# ==============================================================================
+# HERMES AGENT SECURITY & PRIVACY IGNORE RULES
+# Prevents Autonomous Agent from reading secrets, keys, or sensitive data
+# ==============================================================================
+
+# 1. Environment files & API Keys
+.env
+.env.*
+*.env
+.env.local
+.env.production
+.env.staging
+
+# 2. Certificates, Keys & Credentials
+credentials/
+*.pem
+*.key
+*.token
+*.cert
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+
+# 3. Sensitive runtime state & logs
+state/
+*.log
+.system_generated/
+reports/gate7/sha256.txt
+
+# 4. Virtual environments & binaries
+.venv/
+venv/
+ENV/
+*.pyc
+__pycache__/
+node_modules/
+.git/
+
+# 5. Core business secrets & proprietary logic (Zero AI Ingestion)
+*trade_core*
+*revenue_model*
+*proprietary*
+*billing_core*
+*pricing_strategy*
+*payment_gateway*
+trade_core_logic.py
+revenue_model.py

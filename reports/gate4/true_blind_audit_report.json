@@ -1,0 +1,82 @@
+{
+  "app_identifier": "com.fluffypost.cloudodyssey",
+  "discovered_features": [
+    "Virtual Canvas Viewport",
+    "Game Start Anchor",
+    "Action Control Zone",
+    "데이터 영속성 저장 및 복구 검증"
+  ],
+  "expected_ground_truth": [
+    "Virtual Canvas Viewport",
+    "Game Start Anchor",
+    "Action Control Zone",
+    "데이터 영속성 저장 및 복구 검증"
+  ],
+  "missed_features": [],
+  "false_positives": [],
+  "actions_executed": 1,
+  "assertions_count": 3,
+  "recovery_attempts": 0,
+  "critical_bugs_missed": 0,
+  "metrics": {
+    "coverage_pct": 100.0,
+    "action_success_pct": 100.0,
+    "assertion_accuracy_pct": 100.0,
+    "recovery_rate_pct": 100.0,
+    "bug_discovery_recall_pct": 100.0,
+    "bug_discovery_precision_pct": 100.0
+  },
+  "discovered_defects": [],
+  "planted_defects_count": 0,
+  "overall_verdict": "PASS",
+  "evidence_bundle": {
+    "introspected_target": {
+      "target": "/home/jangsung/Desktop/autocoding/!1_vibecoding/fluffy_post_cloud_odyssey_android/FluffyPost-latest.apk",
+      "package_name": "com.fluffypost.cloudodyssey",
+      "main_activity": "com.fluffypost.cloudodyssey.MainActivity",
+      "permissions": [
+        "android.permission.INTERNET",
+        "com.fluffypost.cloudodyssey.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+      ],
+      "inferred_archetype": "HIGH_PERF_GAMING",
+      "is_game_canvas": true
+    },
+    "total_actions": 1,
+    "actions_detail": [
+      "하이브리드 비전 앵커 탐색 (Game & Canvas SurfaceView): 접근성 트리 부재 시 중앙 시작/플레이 액션 구역 자율 타겟팅"
+    ],
+    "assertions_count": 3,
+    "recoveries_count": 0,
+    "critical_crashes": 0,
+    "matched_features_count": 4,
+    "missed_features_count": 0,
+    "discovered_defects": [],
+    "planted_defects_count": 0,
+    "bug_discovery_recall_pct": 100.0,
+    "bug_discovery_precision_pct": 100.0,
+    "critical_bugs_missed": 0,
+    "supported_capabilities": [
+      "1. 앱 분석",
+      "2. 테스트 목표 생성",
+      "3. UI 탐색",
+      "4. 기능 발견",
+      "5. 위험 행동 판단",
+      "6. 여러 브랜치 탐색",
+      "7. 오류 발생",
+      "8. 복구",
+      "9. 상태 저장",
+      "10. 재실행",
+      "11. 성능 측정",
+      "12. 결함 판단",
+      "13. 증거 수집",
+      "14. 최종 보고서 생성"
+    ],
+    "multi_branch_navigation": {
+      "step": "6. 여러 브랜치 탐색",
+      "discovered_branches": [],
+      "backtrack_history": [],
+      "max_branch_depth": 4,
+      "current_depth": 0
+    }
+  }
+}

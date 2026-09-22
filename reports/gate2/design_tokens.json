@@ -1,0 +1,24 @@
+{
+  "query": "site:behance.net modern app ui bento grid aesthetic",
+  "reference_screenshot": "/home/jangsung/Desktop/autocoding/!5_agy_agent/reports/gate2/design_reference.png",
+  "style_archetype": "Apple Negative Space & Pinterest Pastel Bento",
+  "canvas_background": "#FAF9F6",
+  "dark_accent": "#0F172A",
+  "palette": {
+    "soft_lavender": "#C4B5FD",
+    "baby_mint": "#A7F3D0",
+    "peach_pink": "#FED7AA",
+    "sky_blue": "#BAE6FD"
+  },
+  "card_radius": "rounded-3xl (32px)",
+  "pill_radius": "rounded-full (9999px)",
+  "frosted_glass": "backdrop-blur-xl bg-white/75 border border-white/85",
+  "typography": {
+    "hero_headline": "text-4xl md:text-6xl font-extrabold tracking-tight",
+    "subhead": "text-lg md:text-xl text-stone-600 font-light",
+    "card_title": "text-xl font-bold text-stone-900"
+  },
+  "layout": "3-column Responsive Asymmetric Bento Grid",
+  "touch_target_min": "48dp",
+  "motion": "0.35s cubic-bezier(0.16, 1, 0.3, 1) hover:-translate-y-1"
+}

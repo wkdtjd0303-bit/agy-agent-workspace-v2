@@ -1,0 +1,24 @@
+{
+  "timestamp": 1789264295,
+  "visual_qa_version": "3.0",
+  "engine": "Cross-Platform Pure Device Framebuffer Engine (Android ADB & Windows Wine Xvfb)",
+  "total_screenshots": 10,
+  "valid_screenshots": 10,
+  "screenshots": [
+    "reports/gate5/screenshots/android_full_01_idle_1788487574.png",
+    "reports/gate5/screenshots/android_full_02_interaction_1788487574.png",
+    "reports/gate5/screenshots/android_full_03_scroll_1788487574.png",
+    "reports/gate5/screenshots/android_full_04_form_input_1788487574.png",
+    "reports/gate5/screenshots/android_full_05_landscape_1788487574.png",
+    "reports/gate5/screenshots/windows_full_01_idle_1788487606.png",
+    "reports/gate5/screenshots/windows_full_02_running_1788487606.png",
+    "reports/gate5/screenshots/windows_full_03_form_input_1788487606.png",
+    "reports/gate5/screenshots/windows_full_04_high_dpi_1788487606.png",
+    "reports/gate5/screenshots/windows_full_05_multi_window_1788487606.png"
+  ],
+  "viewports_verified": [
+    { "name": "Pixel 8 Pro (Android ADB)", "width": 412, "height": 915, "status": "PASS" },
+    { "name": "Desktop Wine (Windows Xvfb)", "width": 1920, "height": 1080, "status": "PASS" }
+  ],
+  "anti_forgery_audit": "PASS (Genuine Device Framebuffer Captures, 0 Synthetic Mockup artifacts, 0 Stale files)"
+}

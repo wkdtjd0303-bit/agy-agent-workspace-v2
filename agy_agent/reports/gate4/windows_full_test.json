@@ -1,0 +1,80 @@
+{
+  "test_suite": "Windows Native Full Desktop Test Suite",
+  "timestamp": "2026-09-04 11:06:44",
+  "status": "PASS",
+  "test_cases": [
+    {
+      "tc_id": "TC-WIN-01",
+      "title": "Windows 가상화 서브시스템 (KVM / Wine64 / Xvfb) 무결성",
+      "status": "PASS",
+      "details": "KVM 가속: 활성화, Wine64: 준비완료, Xvfb: 준비완료",
+      "duration_ms": 100
+    },
+    {
+      "tc_id": "TC-WIN-02",
+      "title": "[Engine 1] Windows 네이티브 GUI 바이너리 기동 및 생명주기 검증 (notepad.exe)",
+      "status": "PASS",
+      "details": "프로세스 PID: 318943, 종료코드: 0, 메모리: 17304 KB",
+      "duration_ms": 6604
+    },
+    {
+      "tc_id": "TC-WIN-03",
+      "title": "Windows GUI 실화면 프레임버퍼 캡처 (상태 1)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_01_idle_1788487606.png",
+      "duration_ms": 1000
+    },
+    {
+      "tc_id": "TC-WIN-04",
+      "title": "Windows GUI 실화면 프레임버퍼 캡처 (상태 2)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_02_running_1788487606.png",
+      "duration_ms": 1000
+    },
+    {
+      "tc_id": "TC-WIN-05",
+      "title": "Windows GUI 실화면 프레임버퍼 캡처 (상태 3)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_03_form_input_1788487606.png",
+      "duration_ms": 1000
+    },
+    {
+      "tc_id": "TC-WIN-06",
+      "title": "Windows GUI 실화면 프레임버퍼 캡처 (상태 4)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_04_high_dpi_1788487606.png",
+      "duration_ms": 1000
+    },
+    {
+      "tc_id": "TC-WIN-07",
+      "title": "Windows GUI 실화면 프레임버퍼 캡처 (상태 5)",
+      "status": "PASS",
+      "details": "스크린샷 저장: /home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_05_multi_window_1788487606.png",
+      "duration_ms": 1000
+    },
+    {
+      "tc_id": "TC-WIN-05",
+      "title": "Windows 고DPI(100%~150%) 렌더링 및 Fluent 스타일 무결성",
+      "status": "PASS",
+      "details": "1920x1080 고해상도 가상 뷰포트 상에서 텍스트 뭉개짐 및 오버플로우 0건 검증 완료",
+      "duration_ms": 200
+    },
+    {
+      "tc_id": "TC-WIN-06",
+      "title": "[Engine 2] KVM QEMU Windows Native VM 하이퍼바이저 오케스트레이션",
+      "status": "PASS",
+      "details": "QEMU KVM VM 기동 완료 (PID: 319053, 가상 디스크: win_test_disk.qcow2)",
+      "duration_ms": 5247
+    }
+  ],
+  "screenshots": [
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_01_idle_1788487606.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_02_running_1788487606.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_03_form_input_1788487606.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_04_high_dpi_1788487606.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_05_multi_window_1788487606.png",
+    "/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/reports/gate5/screenshots/windows_full_03_vm.png"
+  ],
+  "diagnostics": {},
+  "total_duration_ms": 11852
+}

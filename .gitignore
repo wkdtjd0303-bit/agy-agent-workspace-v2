@@ -1,0 +1,45 @@
+# ==========================================================
+# agy-agent-workspace-v2
+# ==========================================================
+
+# --- Secrets / credentials (절대 업로드 금지) ---
+.env
+.env.*
+*.env
+credentials/*.json
+credentials/*.token
+*.pem
+*.key
+*.token
+*.secret
+
+# --- Python virtualenv ---
+.venv/
+venv/
+ENV/
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Logs / state ---
+*.log
+*.swp
+.DS_Store
+state/
+
+# --- 임시 파일 ---
+temp/
+tmp/
+
+# --- 중첩 저장소 원본 백업 (평탄화용) ---
+**/.git.original-backup/
+**/.git.bak*/
+
+# --- 도구 캐시 ---
+.aider*
+.cache/

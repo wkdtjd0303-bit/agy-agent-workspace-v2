@@ -1,0 +1,31 @@
+# Environments and secrets
+.env
+.env.*
+*.env
+credentials/*.json
+credentials/*.token
+*.pem
+*.key
+*.token
+.aider*
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# State and logs
+state/
+*.log
+*.swp
+.DS_Store
+
+# Temporary files
+temp/
+tmp/
+tests/ling_workspace/

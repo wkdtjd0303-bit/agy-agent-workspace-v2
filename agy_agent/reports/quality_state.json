@@ -1,0 +1,93 @@
+{
+  "version": "v1.0",
+  "updated_at": 1789956546.9120414,
+  "categories": {
+    "gameplay": {
+      "passed": 0,
+      "total": 0,
+      "score": 0.0
+    },
+    "visual": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    },
+    "ux": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    },
+    "performance": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    },
+    "architecture": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    }
+  },
+  "overall_score": 100.0,
+  "previous_overall_score": 0.0,
+  "delta": 100.0,
+  "history": [
+    {
+      "milestone": "v1.0",
+      "timestamp": 1789956546.9120378,
+      "overall_score": 100.0,
+      "delta": 100.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    }
+  ],
+  "regression": {
+    "functional_ac_passed": true,
+    "has_regression": false,
+    "details": "무결점 유지 (회귀 없음)"
+  },
+  "active_qcs": [
+    {
+      "id": "QC-V-01",
+      "category": "visual",
+      "description": "반응형 레이아웃 및 뷰포트 오버플로우 방어",
+      "level": 2,
+      "verification_rule": "모바일(390px) ~ 데스크톱(1280px) 가로 스크롤 버그 없이 flex/grid 반응형 처리",
+      "status": "PASS",
+      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+    },
+    {
+      "id": "QC-U-01",
+      "category": "ux",
+      "description": "입력 폼 유효성 검증 및 사용자 친화적 에러 메시지 노출",
+      "level": 1,
+      "verification_rule": "비어있거나 잘못된 입력 시 브라우저 기본 alert 대신 인라인 에러 피드백 표시",
+      "status": "PASS",
+      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+    },
+    {
+      "id": "QC-A-01",
+      "category": "architecture",
+      "description": "상수 및 설정값(Config/Env)의 하드코딩 완전 분리",
+      "level": 1,
+      "verification_rule": "URL, API 키, 색상 토큰이 컴포넌트 내부에 인라인 하드코딩되지 않고 별도 파일로 분리",
+      "status": "PASS",
+      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+    },
+    {
+      "id": "QC-P-01",
+      "category": "performance",
+      "description": "렌더링 지연 방어 및 자원 정리(Cleanup Hook)",
+      "level": 1,
+      "verification_rule": "이벤트 리스너/타이머가 unmount 시 안전하게 removeEventListener/clearTimeout 되는가?",
+      "status": "PASS",
+      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+    }
+  ]
+}

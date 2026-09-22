@@ -1,0 +1,19 @@
+[Unit]
+Description=AGY Discord Vibe Coding Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent
+Environment="PATH=/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/.venv/bin:/home/jangsung/.local/bin:/home/jangsung/.gemini/antigravity-cli/bin:/home/jangsung/Android/Sdk/emulator:/home/jangsung/Android/Sdk/platform-tools:/usr/local/bin:/usr/bin:/bin"
+Environment="HOME=/home/jangsung"
+Environment="ANDROID_HOME=/home/jangsung/Android/Sdk"
+ExecStart=/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/.venv/bin/python3 bot.py
+Restart=always
+RestartSec=2s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

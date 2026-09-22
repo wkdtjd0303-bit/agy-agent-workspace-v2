@@ -1,0 +1,1038 @@
+{
+  "app_identifier": "com.enterprise.appenterprise",
+  "discovered_features": [
+    "android.view.View",
+    "android.widget.Button",
+    "데이터 영속성 저장 및 복구 검증"
+  ],
+  "expected_ground_truth": [
+    "새 계약서 작성",
+    "전자 서명 생성",
+    "문서 안전 저장",
+    "지점 관리 브랜치 진입",
+    "신규 지점 등록",
+    "데이터 영속성 저장 및 복구 검증"
+  ],
+  "missed_features": [
+    "신규 지점 등록",
+    "전자 서명 생성",
+    "문서 안전 저장",
+    "새 계약서 작성",
+    "지점 관리 브랜치 진입"
+  ],
+  "false_positives": [],
+  "actions_executed": 8,
+  "assertions_count": 14,
+  "recovery_attempts": 0,
+  "critical_bugs_missed": 0,
+  "metrics": {
+    "coverage_pct": 16.7,
+    "action_success_pct": 100.0,
+    "assertion_accuracy_pct": 100.0,
+    "recovery_rate_pct": 100.0,
+    "bug_discovery_recall_pct": 100.0,
+    "bug_discovery_precision_pct": 100.0,
+    "strategy_adaptation_count": 0,
+    "strategy_shifts": []
+  },
+  "discovered_defects": [
+    {
+      "defect_id": "DEFECT_CRASH",
+      "category": "CRASH",
+      "severity": "CRITICAL",
+      "evidence": "Crash detected in ADB logcat: DROID_EMU_host_composition_v2 ANDROID_EMU_vulkan ANDROID_EMU_deferred_vulkan_commands ANDROID_EMU_vulkan_null_optional_strings ANDROID_EMU_vulkan_create_resources_with_requirements ANDROID_EMU_YUV_Cac"
+    }
+  ],
+  "planted_defects_count": 0,
+  "overall_verdict": "FAIL",
+  "evidence_bundle": {
+    "introspected_target": {
+      "target": "/mock/unknown/AppEnterprise.apk",
+      "package_name": "com.enterprise.appenterprise",
+      "main_activity": "com.enterprise.appenterprise.MainActivity",
+      "permissions": [],
+      "inferred_archetype": "AUTONOMOUS_UNKNOWN",
+      "is_game_canvas": false,
+      "is_drawing_canvas": false
+    },
+    "inferred_archetype": "AUTONOMOUS_UNKNOWN",
+    "is_drawing_target": false,
+    "is_game_target": false,
+    "total_actions": 8,
+    "actions_detail": [
+      "지능형 ActionScorer 최고점 (110.0점) 자율 컴포넌트 탭 ('android.view.View') [밀집버튼: 16개, dense=False]",
+      "지능형 ActionScorer 최고점 (100.0점) 자율 컴포넌트 탭 ('android.view.View') [밀집버튼: 16개, dense=False]",
+      "지능형 ActionScorer 최고점 (100.0점) 자율 컴포넌트 탭 ('android.view.View') [밀집버튼: 16개, dense=False]",
+      "지능형 ActionScorer 최고점 (100.0점) 자율 컴포넌트 탭 ('android.view.View') [밀집버튼: 16개, dense=False]",
+      "지능형 ActionScorer 최고점 (110.0점) 자율 컴포넌트 탭 ('android.view.View') [밀집버튼: 21개, dense=True]",
+      "하이브리드 비전 앵커 탐색 (Game & Canvas SurfaceView): 접근성 트리 부재 시 중앙 시작/플레이 액션 구역 자율 타겟팅",
+      "하이브리드 비전 앵커 탐색 (Game & Canvas SurfaceView): 접근성 트리 부재 시 중앙 시작/플레이 액션 구역 자율 타겟팅",
+      "하이브리드 비전 앵커 탐색 (Game & Canvas SurfaceView): 접근성 트리 부재 시 중앙 시작/플레이 액션 구역 자율 타겟팅"
+    ],
+    "assertions_count": 14,
+    "recoveries_count": 0,
+    "critical_crashes": 0,
+    "matched_features_count": 1,
+    "missed_features_count": 5,
+    "discovered_defects": [
+      {
+        "defect_id": "DEFECT_CRASH",
+        "category": "CRASH",
+        "severity": "CRITICAL",
+        "evidence": "Crash detected in ADB logcat: DROID_EMU_host_composition_v2 ANDROID_EMU_vulkan ANDROID_EMU_deferred_vulkan_commands ANDROID_EMU_vulkan_null_optional_strings ANDROID_EMU_vulkan_create_resources_with_requirements ANDROID_EMU_YUV_Cac"
+      }
+    ],
+    "planted_defects_count": 0,
+    "bug_discovery_recall_pct": 100.0,
+    "bug_discovery_precision_pct": 100.0,
+    "critical_bugs_missed": 0,
+    "supported_capabilities": [
+      "1. 앱 분석",
+      "2. 테스트 목표 생성",
+      "3. UI 탐색",
+      "4. 기능 발견",
+      "5. 위험 행동 판단",
+      "6. 여러 브랜치 탐색",
+      "7. 오류 발생",
+      "8. 복구",
+      "9. 상태 저장",
+      "10. 재실행",
+      "11. 성능 측정",
+      "12. 결함 판단",
+      "13. 증거 수집",
+      "14. 최종 보고서 생성"
+    ],
+    "multi_branch_navigation": {
+      "step": "6. 여러 브랜치 탐색",
+      "current_depth": 8,
+      "discovered_branches": [],
+      "visited_branches": [],
+      "backtracks_executed": 0,
+      "branch_tree": {},
+      "breadcrumbs": [
+        "Root"
+      ]
+    },
+    "e2e_100_audit": {
+      "total_score": 2,
+      "max_score": 100,
+      "overall_verdict": "BLOCKED",
+      "maturity_level": "Level 1: Scripted Runner (Blocked)",
+      "category_scores": {
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "8": 2,
+        "9": 0,
+        "10": 0
+      },
+      "items": [
+        {
+          "item_id": 1,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "실제 APK/실행 파일이 존재하는지 확인하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 2,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "실제 설치된 앱과 테스트 대상 artifact가 동일한 버전인지 확인하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 3,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "실제 실행된 프로세스 PID를 확인하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 4,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "PID가 테스트 대상 애플리케이션의 PID인지 검증하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 5,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "앱이 실제 foreground 상태인지 확인하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 6,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "앱 실행 성공을 단순 adb install 또는 am start 성공으로 판단하지 않는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 7,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "앱 launch 이후 실제 화면이 렌더링되었는지 검증하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 8,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "앱 launch timeout을 명확하게 정의하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 9,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "앱 crash / ANR / startup failure를 탐지하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 10,
+          "category_id": 1,
+          "category_name": "Ⅰ. E2E 실행 환경 검증 (1~10)",
+          "title": "E2E 환경 자체가 정상인지 별도의 Environment Health Check를 수행하는가?",
+          "passed": false,
+          "status": "BLOCKED",
+          "details": "환경 이상 탐지 (E2E Health Check Failed)"
+        },
+        {
+          "item_id": 11,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "스크린샷 파일이 존재한다는 사실만으로 성공 처리하지 않는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 12,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "캡처된 이미지의 해상도를 검증하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 13,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "이미지가 완전히 검은 화면인지 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 14,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "이미지가 완전히 흰 화면인지 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 15,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "앱 UI가 실제로 존재하는지 이미지 분석을 수행하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 16,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "Android navigation bar만 존재하는 화면을 유효한 앱 화면으로 오판하지 않는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 17,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "시스템 status/navigation bar만 캡처된 경우 FAIL 또는 INVALID 처리하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 18,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "동일한 화면을 반복 캡처하는 것을 새로운 검증으로 계산하지 않는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 19,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "각 screenshot에 timestamp를 기록하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 20,
+          "category_id": 2,
+          "category_name": "Ⅱ. 화면 캡처 신뢰성 (11~20)",
+          "title": "각 screenshot이 어떤 행동 직후에 생성되었는지 action ID와 연결하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 21,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "모든 screenshot에 이전 action이 연결되는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 22,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "action → screenshot 관계를 기록하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 23,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "Before/After 화면을 비교하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 24,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "두 화면이 실제로 변화했는지 판단하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 25,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "변화가 없다면 action이 실패했을 가능성을 조사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 26,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "tap 이후 화면 변화가 없는 경우 무조건 PASS하지 않는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 27,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "scroll 이후 실제 viewport가 변화했는지 확인하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 28,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "input 이후 실제 text/state가 변화했는지 확인하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 29,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "orientation 변경 후 실제 orientation이 변경되었는지 확인하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 30,
+          "category_id": 3,
+          "category_name": "Ⅲ. Screenshot ↔ Action 인과관계 (21~30)",
+          "title": "action sequence 전체를 재생 가능한 trace로 저장하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 31,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "사전에 정의된 fixed coordinate만 사용하는 E2E가 아닌가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 32,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "UI 구조를 탐색할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 33,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "화면에 존재하는 interactive element를 발견하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 34,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "버튼/입력창/탭/메뉴 등을 식별하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 35,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "현재 화면에서 가능한 행동을 추론하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 36,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "한 번 수행한 행동을 무한 반복하지 않는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 37,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "이미 방문한 상태를 기억하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 38,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "새로운 화면/state를 발견하면 exploration graph에 추가하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 39,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "탐색 과정에서 예상하지 못한 화면을 처리할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 40,
+          "category_id": 4,
+          "category_name": "Ⅳ. Autonomous Exploration (31~40)",
+          "title": "사전에 제공되지 않은 앱에서도 탐색 가능한가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 41,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "현재 앱 상태를 정의할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 42,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "Action 전 상태를 기록하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 43,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "Action 후 상태를 기록하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 44,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "상태 전이가 예상대로 발생했는지 확인하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 45,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "잘못된 상태 전이를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 46,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "뒤로가기 이후 이전 상태로 복귀하는지 확인하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 47,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "앱 restart 이후 상태가 정상적으로 복구되는지 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 48,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "데이터가 저장되는 기능의 persistence를 검증하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 49,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "앱을 강제 종료 후 다시 실행했을 때 상태를 검증하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 50,
+          "category_id": 5,
+          "category_name": "Ⅴ. State Machine 검증 (41~50)",
+          "title": "전체 테스트를 state transition graph로 재구성할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 51,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "E2E가 사용자 intent를 표현할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 52,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "Intent를 여러 action으로 분해할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 53,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "각 action의 성공 조건을 정의하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 54,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "최종 목적 상태를 정의하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 55,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "중간 상태를 검증하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 56,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "단순 UI 클릭 성공과 Intent 성공을 구분하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 57,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "Intent 실패 원인을 추적할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 58,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "Intent 전체를 다시 실행할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 59,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "동일 Intent를 다른 경로로 수행할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 60,
+          "category_id": 6,
+          "category_name": "Ⅵ. Intent 기반 E2E (51~60)",
+          "title": "사전에 지정되지 않은 사용자 workflow도 탐색할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 61,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "앱 최초 실행 workflow를 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 62,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "핵심 기능의 happy path를 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 63,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "잘못된 입력을 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 64,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "빈 입력을 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 65,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "뒤로가기를 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 66,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "화면 회전을 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 67,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "앱 재시작을 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 68,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "백그라운드 → foreground 복귀를 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 69,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "저장 → 종료 → 재실행 → 복구를 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 70,
+          "category_id": 7,
+          "category_name": "Ⅶ. 실제 사용자 Workflow 검증 (61~70)",
+          "title": "핵심 사용자 workflow가 처음부터 끝까지 실제로 완료되는지 검증하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 71,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "화면 레이아웃을 분석하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 72,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "화면 밖으로 잘린 UI를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 73,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "겹쳐진 UI를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 74,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "터치 영역(48dp / 44px)을 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 75,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "작은 버튼을 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 76,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "스크롤 불가능한 콘텐츠를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 77,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "가로/세로 orientation에서 layout을 검사하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 78,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "다양한 화면 크기에서 UI를 검사하는가?",
+          "passed": true,
+          "status": "PASS",
+          "details": "시나리오 프로파일 및 TelemetryProfile 기반 임계치 검증 완료"
+        },
+        {
+          "item_id": 79,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "접근성 문제가 실제 interaction을 방해하는지 검사하는가?",
+          "passed": true,
+          "status": "PASS",
+          "details": "내구성 테스트 프레임워크 탑재 및 세션별 상태 감쇠 계측 완료"
+        },
+        {
+          "item_id": 80,
+          "category_id": 8,
+          "category_name": "Ⅷ. 시각/UX E2E (71~80)",
+          "title": "단순히 예뻐 보인다가 아니라 사용자 workflow를 방해하는 UX 문제를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 81,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "Action timeout을 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 82,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "앱 crash를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 83,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "ANR을 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 84,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "UI가 멈춘 상태를 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 85,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "동일 화면 무한 반복을 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 86,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "Agent가 행동을 계속 실패하는 상황을 탐지하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 87,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "Retry 정책이 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 88,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "Retry 횟수에 제한이 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 89,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "실패 후 다른 전략을 시도하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 90,
+          "category_id": 9,
+          "category_name": "Ⅸ. 실패 탐지 / 복구 (81~90)",
+          "title": "최종 실패 시 정확한 failure_reason을 남기는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 91,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "모든 PASS에 실제 evidence가 존재하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 92,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "PASS와 screenshot의 관계가 추적 가능한가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 93,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "PASS와 실제 action trace가 연결되는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 94,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "PASS와 실제 앱 state가 연결되는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 95,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "LLM의 검증 완료 선언만으로 PASS하지 않는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 96,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "Mechanical FAIL을 LLM이 PASS로 덮어쓸 수 없는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 97,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "E2E engine 자체가 실패했을 경우 PASS 대신 UNVERIFIED를 사용할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 98,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "Screenshot만 있고 실제 action/state evidence가 없으면 검증 실패로 처리하는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 99,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "최종 E2E 결과에서 (목표→행동→화면→상태변화→검증→PASS/FAIL)을 모두 재구성할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        },
+        {
+          "item_id": 100,
+          "category_id": 10,
+          "category_name": "Ⅹ. Evidence / 판정 신뢰성 (91~100)",
+          "title": "AI가 틀린 판단을 했더라도 제3자가 evidence를 보고 그 판단이 틀렸음을 발견할 수 있는가?",
+          "passed": false,
+          "status": "UNVERIFIED",
+          "details": "환경 미비로 검증 불가 (Unverified due to environment)"
+        }
+      ],
+      "summary": "AGY Autonomous E2E 100-Point Audit Score: 2/100 (BLOCKED, Level 1: Scripted Runner (Blocked))"
+    }
+  }
+}

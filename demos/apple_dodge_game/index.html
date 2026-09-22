@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>🍎 사과 피하기 (Apple Dodge) - 자율 에이전트 완성작</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: #0F172A;
+            color: #F8FAFC;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 12px;
+            overflow: hidden;
+        }
+
+        .header {
+            margin-bottom: 12px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 800;
+            color: #EF4444;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .header p {
+            font-size: 0.85rem;
+            color: #94A3B8;
+            margin-top: 4px;
+        }
+
+        .game-wrapper {
+            position: relative;
+            background: #000;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+            border: 3px solid #334155;
+        }
+
+        canvas {
+            display: block;
+            width: 380px;
+            height: 570px;
+            touch-action: none;
+        }
+
+        @media (max-width: 420px) {
+            canvas {
+                width: 340px;
+                height: 510px;
+            }
+        }
+
+        .mobile-controls {
+            display: flex;
+            gap: 20px;
+            margin-top: 16px;
+            width: 100%;
+            max-width: 380px;
+            justify-content: space-between;
+        }
+
+        .touch-btn {
+            flex: 1;
+            height: 64px;
+            background: #1E293B;
+            border: 2px solid #475569;
+            border-radius: 12px;
+            color: #F8FAFC;
+            font-size: 1.5rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            active-background-color: #334155;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+            touch-action: none;
+        }
+
+        .touch-btn:active {
+            background: #334155;
+            transform: translateY(2px);
+        }
+
+        .guide {
+            margin-top: 12px;
+            font-size: 0.75rem;
+            color: #64748B;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🍎 사과 피하기</h1>
+        <p>AGY Commander Closed-Loop Autonomous Pipeline</p>
+    </div>
+
+    <div class="game-wrapper">
+        <canvas id="gameCanvas" width="400" height="600"></canvas>
+    </div>
+
+    <div class="mobile-controls">
+        <button class="touch-btn" id="btnLeft" aria-label="왼쪽 이동">◀ 좌로 이동</button>
+        <button class="touch-btn" id="btnRight" aria-label="오른쪽 이동">우로 이동 ▶</button>
+    </div>
+
+    <div class="guide">
+        PC: [◀] [▶] 또는 [A] [D] / [Space] 시작 &middot; 모바일: 하단 버튼 터치
+    </div>
+
+    <!-- Scripts -->
+    <script src="player.js"></script>
+    <script src="apple.js"></script>
+    <script src="game.js"></script>
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const game = new GameEngine(canvas);
+
+            // Mobile button bindings
+            const btnLeft = document.getElementById('btnLeft');
+            const btnRight = document.getElementById('btnRight');
+
+            const setLeft = (val) => { game.inputState.left = val; };
+            const setRight = (val) => { game.inputState.right = val; };
+
+            btnLeft.addEventListener('pointerdown', (e) => { e.preventDefault(); setLeft(true); });
+            btnLeft.addEventListener('pointerup', () => setLeft(false));
+            btnLeft.addEventListener('pointercancel', () => setLeft(false));
+
+            btnRight.addEventListener('pointerdown', (e) => { e.preventDefault(); setRight(true); });
+            btnRight.addEventListener('pointerup', () => setRight(false));
+            btnRight.addEventListener('pointercancel', () => setRight(false));
+
+            // Start loop
+            requestAnimationFrame(game.tick.bind(game));
+        });
+    </script>
+</body>
+</html>
