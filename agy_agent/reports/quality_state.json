@@ -1,6 +1,6 @@
 {
   "version": "v1.0",
-  "updated_at": 1790232865.2682514,
+  "updated_at": 1790236011.7792175,
   "categories": {
     "gameplay": {
       "passed": 0,
@@ -32,20 +32,6 @@
   "previous_overall_score": 100.0,
   "delta": 0.0,
   "history": [
-    {
-      "milestone": "v1.0",
-      "timestamp": 1790219521.080193,
-      "overall_score": 100.0,
-      "delta": 0.0,
-      "categories": {
-        "gameplay": 0.0,
-        "visual": 100.0,
-        "ux": 100.0,
-        "performance": 100.0,
-        "architecture": 100.0
-      },
-      "has_regression": false
-    },
     {
       "milestone": "v1.0",
       "timestamp": 1790219769.6708324,
@@ -301,6 +287,20 @@
     {
       "milestone": "v1.0",
       "timestamp": 1790232865.2682483,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790236011.779214,
       "overall_score": 100.0,
       "delta": 0.0,
       "categories": {

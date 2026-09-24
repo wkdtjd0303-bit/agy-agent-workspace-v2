@@ -1053,8 +1053,84 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_mature_project_depth_gate_never_overrides_explicit_user_feedback(self):
+        """QA1 Rejection Defect 1: In a mature project where Depth Gate triggers requires_depth=True
+        or evidence_missing=True, Commander must NOT override explicit user feedback with maintenance/CS fallback.
+        """
+        import asyncio
+        from roadmap_manager import RoadmapManager, RoadmapMilestone, RoadmapTask
+        from product_refinement_governor import ProductRefinementGovernor
+
+        # 1. Seed 6+ mature UI components to activate ProductRefinementGovernor
+        src = os.path.join(self.tmp, "app", "src", "main", "java", "com", "example", "pdfapp")
+        os.makedirs(src, exist_ok=True)
+        mature_components = {
+            "MainActivity.kt": "class MainActivity : Activity() { override fun onCreate() { setContentView(R.layout.main) } }",
+            "PdfRenderer.kt": "class PdfRenderer { fun renderPage(page: Int) { /* render */ } }",
+            "CanvasOverlay.kt": "class CanvasOverlay : View() { override fun onDraw(canvas: Canvas) { canvas.drawRect(0f, 0f, 10f, 10f, paint) } }",
+            "ExportEngine.kt": "class ExportEngine { fun exportPdf(path: String) { /* export */ } }",
+            "PageManager.kt": "class PageManager { fun getPageCount(): Int = 42 }",
+            "SearchEngine.kt": "class SearchEngine { fun search(query: String) = emptyList<String>() }",
+        }
+        for fname, content in mature_components.items():
+            with open(os.path.join(src, fname), "w", encoding="utf-8") as f:
+                f.write(content)
+
+        # 2. Seed 2+ completed milestones
+        rm = RoadmapManager(self.tmp)
+        rm.append_milestones([
+            RoadmapMilestone(
+                version="v1.0",
+                title="코어 PDF 비동기 렌더링 엔진",
+                tasks=[RoadmapTask(text="초기 렌더링 파이프라인 구축", done=True)],
+                status="DONE"
+            ),
+            RoadmapMilestone(
+                version="v2.0",
+                title="캔버스 오버레이 뷰어 및 페이지 관리자",
+                tasks=[RoadmapTask(text="캔버스 인터랙션 및 페이지 전환", done=True)],
+                status="DONE"
+            ),
+        ])
+
+        # Verify that Depth Gate triggers (requires_depth or evidence_missing)
+        reality = Commander.inspect_codebase_reality(self.tmp)
+        self.assertGreaterEqual(len(reality.implemented_components), 6)
+        depth_verdict = ProductRefinementGovernor.evaluate(
+            workspace=self.tmp,
+            domain="mobile_app",
+            reality=reality,
+            target_version="v3.0"
+        )
+        self.assertTrue(
+            depth_verdict.requires_depth or depth_verdict.evidence_missing,
+            f"Expected Depth Gate to trigger, but got: requires_depth={depth_verdict.requires_depth}, evidence_missing={depth_verdict.evidence_missing}"
+        )
+
+        async def _run():
+            plan = await Commander.plan_adaptive_next_milestone_async(
+                root_user_goal=USER_COMPLAINT_PROMPT,
+                workspace=self.tmp,
+                domain="mobile_app"
+            )
+            # Must remain the user feedback plan, NOT depth/maintenance fallback
+            self.assertIn("사용자 피드백", plan.title, f"Depth gate overrode user feedback! Plan: {plan.title}")
+            self.assertNotIn("유지보수", plan.title, f"Plan was overridden with maintenance: {plan.title}")
+            self.assertNotIn("CS 대응", plan.title, f"Plan was overridden with CS fallback: {plan.title}")
+            self.assertEqual(plan.source, "feedback", f"Plan source should be 'feedback', got: {plan.source}")
+            # Ensure all 5 user points are covered in what
+            tasks_str = " ".join(plan.what)
+            self.assertTrue(any(k in tasks_str for k in ["디자인 통일성", "연결성"]))
+            self.assertTrue(any(k in tasks_str for k in ["도큐크래프트", "명칭", "리브랜딩"]))
+            self.assertTrue(any(k in tasks_str for k in ["그레이톤", "아이콘"]))
+            self.assertTrue("메인" in tasks_str and any(b in tasks_str for b in ["열기", "빈페이지", "합치기", "변환하기"]))
+            self.assertTrue(any(k in tasks_str for k in ["PDF", "크래시", "안정성", "최적화"]))
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

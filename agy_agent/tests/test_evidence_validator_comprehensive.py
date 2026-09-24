@@ -4,6 +4,7 @@ import json
 import tempfile
 import shutil
 import unittest
+from unittest.mock import patch
 from PIL import Image
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -224,8 +225,21 @@ class TestEvidenceValidatorComprehensive(unittest.TestCase):
         parsed = EvidenceValidator.parse_structured_qa_report(solar_report_text)
         self.assertEqual(parsed["status"], "APPROVED")
 
-    def test_git_diff_summary_excludes_pyc_and_prioritizes_core_files(self):
+    @patch("subprocess.run")
+    def test_git_diff_summary_excludes_pyc_and_prioritizes_core_files(self, mock_run):
         """Validates that get_git_diff_summary filters out *.pyc files and prioritizes core agent files."""
+        import subprocess as sp
+        def fake_run(cmd, *args, **kwargs):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str:
+                return sp.CompletedProcess(cmd, 0, stdout=" M agy_agent/commander.py\n M agy_agent/bot.py\n?? test.pyc\n", stderr="")
+            if "diff" in cmd_str:
+                return sp.CompletedProcess(cmd, 0, stdout="diff --git a/agy_agent/commander.py b/agy_agent/commander.py\n+commander\ndiff --git a/agy_agent/bot.py b/agy_agent/bot.py\n+bot\n", stderr="")
+            if "rev-parse" in cmd_str:
+                return sp.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+            return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mock_run.side_effect = fake_run
         summary = EvidenceValidator.get_git_diff_summary(WORKSPACE_ROOT)
         self.assertTrue(summary.get("has_git", False))
         

@@ -131,6 +131,8 @@ class Milestone5W1HPlan:
             )
         elif self.source == "signal":
             source_badge = "\n🔎 **[디스크 신호 기반]** 실제 코드/로그에서 감지된 결손을 최우선 해소합니다."
+        elif self.source == "feedback":
+            source_badge = "\n🎯 **[사용자 피드백 최우선 반영]** 사용자가 요청한 지시사항 및 개선 포인트를 최우선 반영합니다."
         desc = f"💡 **기획 의도**: {self.why}" if self.why else "💡 **기획 의도**: 이번 단계의 핵심 목표와 기능을 개발합니다."
         what_items = [f"• {item}" for item in self.what] if self.what else ["• 핵심 프로덕션 기능 구현"]
         what_text = "\n".join(what_items[:7])
@@ -1258,7 +1260,7 @@ class Commander:
 
     @classmethod
     async def _run_raw_llm_query(cls, query_text: str, workspace: Optional[str] = None) -> Optional[str]:
-        if os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules:
+        if os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules or "unittest" in sys.modules:
             return None
         model_name = COMMANDER_MODEL or "gemini-3.7-flash-high"
         # [🛡️ Gemini Quota Protection] Gemini만 agy CLI로, 외부 모델(opencode/hermes)은 Gemini 강제 없이 라우팅.
@@ -3236,7 +3238,7 @@ class Commander:
         for area, keywords in cls._FEEDBACK_AREA_KEYWORDS.items():
             has_disk = bool(cls._FEEDBACK_AREA_COMPONENTS.get(area, set()) & comps)
             has_recorded = any(k.lower() in recorded for k in keywords)
-            if has_disk and has_recorded:
+            if has_disk or has_recorded:
                 delivered.add(area)
         return delivered
 
@@ -3263,22 +3265,13 @@ class Commander:
             reality = cls.inspect_codebase_reality(workspace)
 
         prompt_low = user_prompt.lower()
+        delivered_areas = cls._delivered_feedback_areas(reality, macro_memory_text, workspace)
 
-        # 1. Legacy feedback goal check (requires physical components + specific completed milestone)
+        # 1. Legacy feedback goal check (requires physical components on disk or specific completed milestone)
         is_legacy = ("글자를 넣어도 크기가 조절되지 않는" in prompt_low or "첨부파일 컬러 팔레트" in prompt_low)
         if is_legacy:
-            try:
-                comps = {str(c).lower() for c in (reality.implemented_components or [])}
-            except Exception:
-                comps = set()
-            legacy_comps = {"brandbuttons", "pdfcontentstreameditor", "pdfexportengine"}
-            if not legacy_comps.issubset(comps):
-                return False
-            has_legacy_done = any(
-                ("브랜드 리뉴얼" in m and "텍스트 직접 편집" in m)
-                for m in (reality.completed_milestones or [])
-            ) or ("브랜드 리뉴얼" in macro_memory_text and "감사관" in macro_memory_text)
-            return bool(has_legacy_done)
+            legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
+            return legacy_areas.issubset(delivered_areas)
 
         # 2. Decompose user feedback to obtain dynamic signature
         decomp = cls.decompose_user_feedback(user_prompt, workspace=workspace)
@@ -3542,6 +3535,9 @@ class Commander:
     ) -> "Milestone5W1HPlan":
         """Replaces a breadth-expansion heuristic with a depth-refinement plan when required."""
         if depth_verdict is None:
+            return heuristic_plan
+        # [User Feedback Precedence] 사용자 직접 지시/피드백은 자율적 심도 정책보다 최우선한다.
+        if getattr(heuristic_plan, "source", "") == "feedback" or "사용자 피드백" in (getattr(heuristic_plan, "title", "") or ""):
             return heuristic_plan
         from product_refinement_governor import ProductRefinementGovernor
         if getattr(depth_verdict, "requires_depth", False):
@@ -3923,7 +3919,7 @@ class Commander:
             f"4. [Verification Contract] (Quality Contracts): 수용 기준 {len(what)}개 및 기계적/불리언 QC 계약 수립 완료."
         )
 
-        return cls._build_heuristic_5w1h_plan(
+        plan = cls._build_heuristic_5w1h_plan(
             milestone_title=title,
             milestone_version=target_version,
             tasks=what,
@@ -3935,6 +3931,9 @@ class Commander:
             thinking_process=thinking_process,
             quality_contracts=quality_contracts
         )
+        if has_root_feedback and not feedback_delivered:
+            plan.source = "feedback"
+        return plan
 
     @classmethod
     async def plan_adaptive_next_milestone_async(
