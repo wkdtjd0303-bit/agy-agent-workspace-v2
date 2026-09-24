@@ -668,7 +668,8 @@ class TestEarlyTerminationAndMockCompletionDefense(unittest.TestCase):
                  patch("trio_agent_runner.EvidenceValidator.verify_anti_mocking_and_authenticity", return_value=(True, [], {})), \
                  patch("trio_agent_runner.QualityStateManager.evaluate_and_update", return_value={"regression": {"has_regression": False}, "overall_score": 100.0, "delta": 0.0}), \
                  patch("trio_agent_runner.EvidenceValidator.check_visual_asset_presence", return_value={"has_assets": True}), \
-                 patch("vision_attachment_analyzer.VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa", new_callable=AsyncMock, return_value={"has_screenshots": True}):
+                 patch("vision_attachment_analyzer.VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa", new_callable=AsyncMock, return_value={"has_screenshots": True}), \
+                 patch("autonomy_guard.CollaborationIntelligence.evaluate_auditor_value_alignment", return_value=("PROCEED", "가치 부합 확인")):
                 
                 mock_qa.return_value = (
                     "[STATUS: APPROVED]\n\n"

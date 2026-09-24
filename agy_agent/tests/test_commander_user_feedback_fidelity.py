@@ -1599,6 +1599,97 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_vague_complaint_detection_precision(self):
+        """Actionable feedback with concrete domain targets must NOT be classified as vague complaints."""
+        actionable_prompts = [
+            "PDF 열면 튕겨요 고쳐줘",
+            "버그 고쳐줘",
+            "성능 개선해줘",
+            "글씨가 작아서 불편해",
+            "UI 통일성 맞춰줘",
+            "결제할 때 멈춰요",
+            "장바구니 담기가 안돼요"
+        ]
+        for p in actionable_prompts:
+            self.assertFalse(
+                Commander._is_vague_complaint(p, workspace=self.tmp),
+                f"Actionable feedback falsely classified as vague: '{p}'"
+            )
+
+        vague_prompts = [
+            "앱이 너무 불편해요 고쳐줘",
+            "이상해 고쳐봐",
+            "피드백 반영해줘",
+            "별로야 수정해",
+            "마음에 안 드는데 바꿔줘"
+        ]
+        for p in vague_prompts:
+            self.assertTrue(
+                Commander._is_vague_complaint(p, workspace=self.tmp),
+                f"Vague complaint falsely classified as actionable: '{p}'"
+            )
+
+    def test_pdf_crash_feedback_preserved_under_high_severity_signal_gap(self):
+        """Actionable PDF crash feedback must supersede unrelated high-severity signals (e.g. Lint error)."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        lint_dir = os.path.join(self.tmp, "build", "reports")
+        os.makedirs(lint_dir, exist_ok=True)
+        lint_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<issues format="6" by="lint 8.0.0">\n'
+            '    <issue id="HardcodedText" severity="Error" message="Hardcoded string" />\n'
+            '</issues>\n'
+        )
+        with open(os.path.join(lint_dir, "lint-results.xml"), "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        Commander._deferred_signal_rounds.clear()
+
+        llm_response = (
+            "<thinking>\n"
+            "1. Base Invariance: Preserving core.\n"
+            "2. Quality State: Checking lint.\n"
+            "3. Idea Convergence: PDF crash fix.\n"
+            "4. Action Type: Surgical fix.\n"
+            "5. Verification: Crash 0.\n"
+            "</thinking>\n"
+            "```json\n"
+            "{\n"
+            '  "title": "사용자 피드백 긴급 반영: PDF 크래시 최적화",\n'
+            '  "what": ["PDF 문서 비정상 종료 원인 분석", "비동기 메모리 최적화"],\n'
+            '  "why": "크래시 방어",\n'
+            '  "how": "I/O 최적화",\n'
+            '  "who_where": "app/src/main",\n'
+            '  "when_acceptance": ["크래시 0건"]\n'
+            "}\n"
+            "```"
+        )
+
+        async def _run():
+            with patch.object(Commander, "_run_raw_llm_query", new_callable=AsyncMock) as mock_llm:
+                mock_llm.return_value = llm_response
+                plan = await Commander.plan_adaptive_next_milestone_async(
+                    root_user_goal="PDF 열면 튕겨요 고쳐줘",
+                    workspace=self.tmp,
+                    domain="mobile_app"
+                )
+                self.assertEqual(plan.source, "feedback")
+                self.assertIn("PDF 크래시", plan.title)
+                self.assertIn("[신호 결손 감지 알림]", plan.thinking_process)
+
+        asyncio.run(_run())
+
+    def test_deferred_signal_rounds_cache_pruning(self):
+        """_prune_deferred_signal_rounds must prune memory cache when exceeding threshold."""
+        Commander._deferred_signal_rounds.clear()
+        for i in range(150):
+            Commander._deferred_signal_rounds[f"test_key_{i}"] = i % 2
+
+        Commander._prune_deferred_signal_rounds(max_size=50)
+        self.assertLessEqual(len(Commander._deferred_signal_rounds), 50)
+
 
 if __name__ == "__main__":
     unittest.main()

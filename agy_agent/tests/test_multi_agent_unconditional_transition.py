@@ -40,6 +40,21 @@ class TestMultiAgentUnconditionalTransition(unittest.IsolatedAsyncioTestCase):
         self.auditor_client = MagicMock()
         self.auditor_client.is_ready.return_value = False
 
+        self.hermetic_patches = [
+            patch("trio_agent_runner.EvidenceValidator.inspect_production_diff", return_value={"is_zero_production_diff": False, "prod_changed_files": ["diagnostic_report.md"], "non_prod_files": []}),
+            patch("trio_agent_runner.EvidenceValidator.verify_anti_mocking_and_authenticity", return_value=(True, [], {})),
+            patch("trio_agent_runner.QualityStateManager.evaluate_and_update", return_value={"regression": {"has_regression": False}, "overall_score": 100.0, "delta": 0.0}),
+            patch("trio_agent_runner.EvidenceValidator.check_visual_asset_presence", return_value={"has_assets": True}),
+            patch("vision_attachment_analyzer.VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa", new_callable=AsyncMock, return_value={"has_screenshots": True}),
+            patch("autonomy_guard.CollaborationIntelligence.evaluate_auditor_value_alignment", return_value=("PROCEED", "가치 부합 확인")),
+        ]
+        for p in self.hermetic_patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.hermetic_patches):
+            p.stop()
+
     @patch("trio_agent_runner.safe_send_discord_message", new_callable=AsyncMock)
     @patch("trio_agent_runner.ThermalGuard.check_round_transition_cooldown", new_callable=AsyncMock)
     @patch("trio_agent_runner.AgentRunner.run_prompt")
@@ -99,7 +114,7 @@ class TestMultiAgentUnconditionalTransition(unittest.IsolatedAsyncioTestCase):
                 "점검 결과 이상 없음 확인.\n\n"
                 "---\n"
                 "### 🛡️ 3중 협업 품질 요약\n"
-                "• 👨‍💻 Coder | 🕵️ QA | ⚖️ Auditor"
+                "• 👨‍💻 Coder 완료 | 🕵️ QA 통과 | ⚖️ Auditor 최종 승인"
             )
         ]
 

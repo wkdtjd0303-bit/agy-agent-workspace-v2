@@ -2153,13 +2153,13 @@ class Commander:
                 handled = True
 
             # (7) E-Commerce / Payment & Checkout Stability
-            if any(k in it_low for k in ["결제", "payment", "checkout", "체크아웃", "주문"]) and any(k in it_low for k in ["멈춤", "멈춰", "오류", "안됨", "안 됨", "느림", "버그", "실패", "프리징", "에러", "크래시", "튕김", "지연", "먹통"]):
+            if any(k in it_low for k in ["결제", "payment", "checkout", "체크아웃", "주문"]) and any(k in it_low for k in ["멈춤", "멈춰", "오류", "안됨", "안 됨", "안돼", "안 돼", "안되", "안 되", "느림", "버그", "실패", "프리징", "에러", "크래시", "튕김", "지연", "먹통"]):
                 targeted_keywords.append("결제 프로세스 안정화")
                 detected_tasks.append("[결제 안정화] 결제/체크아웃 화면 프리징 및 멈춤 원인 분석, 비동기 트랜잭션 예외 방어")
                 handled = True
 
             # (8) E-Commerce / Cart & Basket Interaction
-            if any(k in it_low for k in ["장바구니", "cart", "바스켓"]) and any(k in it_low for k in ["멈춤", "멈춰", "오류", "안됨", "안 됨", "느림", "버그", "실패", "프리징", "에러", "크래시", "튕김", "담기 안", "먹통", "안 눌", "안눌", "클릭", "버튼"]):
+            if any(k in it_low for k in ["장바구니", "cart", "바스켓"]) and any(k in it_low for k in ["멈춤", "멈춰", "오류", "안됨", "안 됨", "안돼", "안 돼", "안되", "안 되", "느림", "버그", "실패", "프리징", "에러", "크래시", "튕김", "담기 안", "담기안", "먹통", "안 눌", "안눌", "클릭", "버튼"]):
                 targeted_keywords.append("장바구니 기능 개선")
                 detected_tasks.append("[장바구니 인터랙션] 장바구니 담기 및 상태 업데이트 인터랙션 정상화")
                 handled = True
@@ -2185,7 +2185,7 @@ class Commander:
             # (11) Design Cohesion & Visual Refresh
             if any(k in it_low for k in [
                 "통일성", "연결성", "매칭", "디자인", "깔끔", "룩앤필", "스타일", "예쁘게", "정돈",
-                "세련", "다듬", "조잡", "촌스럽", "답답", "시원", "바꿔"
+                "세련", "다듬", "조잡", "촌스럽", "답답", "시원", "ui", "레이아웃"
             ]):
                 has_design_req = True
                 targeted_keywords.append("디자인 통일성 개편")
@@ -3314,22 +3314,67 @@ class Commander:
         "불편", "고쳐", "피드백", "별로", "이상해", "안돼", "안되", "수정해줘", "개선해", "바꿔줘"
     )
     _SPECIFIC_DOMAIN_KEYWORDS: Tuple[str, ...] = (
-        "로고", "아이콘", "대시보드", "ocr", "크래시", "튕김", "색상", "팔레트", "버튼",
-        "텍스트", "스트림", "검색", "하이라이트", "주석", "북마크", "인쇄", "내보내기",
-        "그레이톤", "리브랜딩", "도큐크래프트", "디자인 통일성", "4대", "다크모드", "야간",
-        "패스워드", "보안", "서명", "필터", "회전", "썸네일", "글자", "에디터", "폰트", "크기"
+        "로고", "아이콘", "대시보드", "ocr", "크래시", "튕김", "튕기", "튕긴", "튕겨",
+        "색상", "팔레트", "버튼", "텍스트", "스트림", "검색", "하이라이트", "주석",
+        "북마크", "인쇄", "내보내기", "그레이톤", "리브랜딩", "도큐크래프트", "디자인 통일성",
+        "4대", "다크모드", "야간", "패스워드", "보안", "서명", "필터", "회전", "썸네일",
+        "글자", "에디터", "폰트", "크기", "pdf", "버그", "에러", "오류", "누수", "결함",
+        "오작동", "성능", "속도", "지연", "프리징", "글씨", "ui", "레이아웃",
+        "장바구니", "결제", "체크아웃", "주문", "카트"
     )
     _deferred_signal_rounds: Dict[str, int] = {}
 
     @classmethod
-    def _is_vague_complaint(cls, prompt: str) -> bool:
-        """Determines whether a user prompt represents a vague complaint without concrete domain targets."""
+    def _prune_deferred_signal_rounds(cls, max_size: int = 100) -> None:
+        """Prunes in-memory deferred signal rounds dict when size exceeds threshold."""
+        if len(cls._deferred_signal_rounds) > max_size:
+            for k in list(cls._deferred_signal_rounds.keys()):
+                if cls._deferred_signal_rounds.get(k, 0) == 0:
+                    cls._deferred_signal_rounds.pop(k, None)
+            if len(cls._deferred_signal_rounds) > max_size:
+                excess = len(cls._deferred_signal_rounds) - max_size
+                for k in list(cls._deferred_signal_rounds.keys())[:excess]:
+                    cls._deferred_signal_rounds.pop(k, None)
+
+    @classmethod
+    def _is_vague_complaint(cls, prompt: str, workspace: Optional[str] = None) -> bool:
+        """Determines whether a user prompt represents a vague complaint without concrete domain targets.
+        Single Source of Truth (SSOT):
+        1. Fast check against specific domain keywords.
+        2. SSOT check via decompose_user_feedback: if tasks contain any concrete domain tag
+           (e.g., [PDF 텍스트 편집], [버튼 가독성], [폰트 가독성], [브랜드 리뉴얼], [명칭 리브랜딩],
+           [아이콘 리뉴얼], [메인 대시보드 개편], [결제 안정화], [장바구니 인터랙션],
+           [성능 최적화], [안정성 및 크래시 방어], [디자인 통일성], [UI 인터랙션 복구]),
+           it has a concrete engineering target -> is_vague = False.
+        3. Only if no concrete target/tag/domain keyword is found AND prompt contains vague
+           complaint words (_VAGUE_COMPLAINT_KEYWORDS) -> is_vague = True.
+        """
         if not prompt:
             return False
         p_lower = prompt.lower()
+        if any(k in p_lower for k in cls._SPECIFIC_DOMAIN_KEYWORDS):
+            return False
+
+        try:
+            fb = cls.decompose_user_feedback(prompt, workspace=workspace)
+            concrete_tags = (
+                "[pdf 텍스트 편집]", "[인플레이스 텍스트 편집]",
+                "[버튼 가독성]", "[폰트 가독성]",
+                "[브랜드 리뉴얼]", "[명칭 리브랜딩]",
+                "[아이콘 리뉴얼]", "[메인 대시보드 개편]",
+                "[결제 안정화]", "[장바구니 인터랙션]",
+                "[성능 최적화]", "[안정성 및 크래시 방어]",
+                "[디자인 통일성]", "[ui 인터랙션 복구]",
+            )
+            for task in fb.get("tasks", []):
+                task_low = task.lower()
+                if any(tag in task_low for tag in concrete_tags):
+                    return False
+        except Exception:
+            pass
+
         has_vague = any(k in p_lower for k in cls._VAGUE_COMPLAINT_KEYWORDS)
-        has_specific = any(k in p_lower for k in cls._SPECIFIC_DOMAIN_KEYWORDS)
-        return has_vague and not has_specific
+        return has_vague
 
     @classmethod
     def _get_deferred_signal_cache_key(cls, workspace: Optional[str], area: str) -> str:
@@ -3367,6 +3412,7 @@ class Commander:
                     QualityStateManager.save_state(workspace, q_state)
             except Exception:
                 pass
+        cls._prune_deferred_signal_rounds()
 
     @classmethod
     def _detect_user_feedback_intent(cls, root_user_goal: str) -> bool:
@@ -3480,6 +3526,7 @@ class Commander:
                     pass
             current_count = max(in_memory_count, persisted_count) + 1
             cls._deferred_signal_rounds[cache_key] = current_count
+            cls._prune_deferred_signal_rounds()
             if q_state is not None and workspace:
                 try:
                     q_state.setdefault("deferred_signal_rounds", {})[area] = current_count
@@ -3877,7 +3924,7 @@ class Commander:
                     "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
                 )
                 visual_approved = True
-            elif cls._is_vague_complaint(root_user_goal):
+            elif cls._is_vague_complaint(root_user_goal, workspace=workspace):
                 title = "사용자 피드백 구체화 및 개선 포인트 식별"
                 what = [
                     "불편 사항 및 개선 희망 기능 구체적 요구사항 파악 (화면/동작/에러 식별)",
@@ -4248,7 +4295,7 @@ class Commander:
         cls._reset_deferred_signal_rounds_for_workspace(workspace, active_area=active_area)
 
         # 고위험(high) 신호 결손 처리: 사용자 피드백이 활성인 경우 피드백 계획을 폐기하지 않고 병합
-        is_vague = cls._is_vague_complaint(root_user_goal)
+        is_vague = cls._is_vague_complaint(root_user_goal, workspace=workspace)
         is_fb_active = feedback_locked and cls._is_feedback_plan(heuristic_plan) and not is_vague
         if signal_gap is not None and signal_gap.severity == "high":
             if is_fb_active:
@@ -4511,7 +4558,7 @@ class Commander:
         active_area = getattr(signal_gap, "area", None) if signal_gap else None
         cls._reset_deferred_signal_rounds_for_workspace(workspace, active_area=active_area)
 
-        is_vague = cls._is_vague_complaint(root_user_goal)
+        is_vague = cls._is_vague_complaint(root_user_goal, workspace=workspace)
         is_fb_locked = feedback_locked and cls._is_feedback_plan(plan) and not is_vague
         if signal_gap is not None and signal_gap.severity == "high":
             if not is_fb_locked:
