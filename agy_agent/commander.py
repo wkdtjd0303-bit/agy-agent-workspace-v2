@@ -17,6 +17,22 @@ from quality_state_manager import QualityStateManager
 logger = logging.getLogger(__name__)
 
 
+# ──────────────────────────────────────────────
+# Shared Intent Classification & Decomposition Constants (SoT: feedback_classifier.py)
+# ──────────────────────────────────────────────
+
+from feedback_classifier import (
+    FeedbackIntentClassifier,
+    IntentVerdict,
+    FEEDBACK_DEFECT_KEYWORDS,
+    CRASH_STABILITY_KEYWORDS,
+    EXPLICIT_NEW_PROJECT_KEYWORDS,
+    GENERAL_CREATION_VERBS,
+    DESIGN_REFRESH_KEYWORDS,
+    FEATURE_EXPANSION_KEYWORDS,
+)
+
+
 @dataclass
 class CommanderDecision:
     mode: str                    # "single" or "pair"
@@ -107,6 +123,14 @@ class Milestone5W1HPlan:
     def to_discord_message(self, mode_label: str = "3", engine_disp: str = "Gemini 3.7 Flash") -> str:
         """Formats the 5W1H plan as a clean, highly readable standard Discord text message."""
         header = f"👑 **[Commander 사령관 마일스톤 기획 — {self.version}: {self.title}]**"
+        source_badge = ""
+        if self.source == "depth":
+            source_badge = (
+                "\n🧭 **[심도 우선 정책 적용]** 기존 기능을 A1/B1/C1으로 심화 — "
+                "신규 확장(D) 대신 체감 품질(동작감·완성도·유지보수성)을 먼저 끌어올립니다."
+            )
+        elif self.source == "signal":
+            source_badge = "\n🔎 **[디스크 신호 기반]** 실제 코드/로그에서 감지된 결손을 최우선 해소합니다."
         desc = f"💡 **기획 의도**: {self.why}" if self.why else "💡 **기획 의도**: 이번 단계의 핵심 목표와 기능을 개발합니다."
         what_items = [f"• {item}" for item in self.what] if self.what else ["• 핵심 프로덕션 기능 구현"]
         what_text = "\n".join(what_items[:7])
@@ -115,6 +139,7 @@ class Milestone5W1HPlan:
 
         parts = [
             header,
+            source_badge,
             "",
             desc,
             "",
@@ -586,17 +611,122 @@ class Commander:
         return decision
 
     @classmethod
+    def _is_native_agy_model(cls, model_name: Optional[str]) -> bool:
+        """True when the model must run through the Antigravity (agy) CLI.
+
+        [🛡️ Gemini Quota Protection] 비-Gemini/외부 모델(opencode-go, openrouter 등)은
+        agy CLI(=Gemini 강제 폴백 + 언어서버 기동)로 보내지 않고 해당 엔진으로 라우팅한다.
+        """
+        ml = (model_name or "").strip().lower()
+        if not ml:
+            return True
+        if ml.startswith(("opencode-go/", "opencode/", "openrouter/", "anthropic/")):
+            return False
+        if any(k in ml for k in ("qwen", "deepseek", "llama", "solar", "ling", "minimax", "mimo", "kimi", "glm", "grok")):
+            return False
+        return True
+
+    @classmethod
+    async def _run_opencode_commander_query(
+        cls, prompt: str, workspace: Optional[str], model_name: str
+    ) -> Optional[str]:
+        """Runs a Commander query through the OpenCode CLI (non-Gemini) and returns text."""
+        from engine_manager import EngineManager
+        adapter = EngineManager.get_adapter("opencode")
+        if not adapter:
+            return None
+        bin_path = adapter.get_binary_path()
+        if not bin_path:
+            return None
+        cwd = workspace or os.getcwd()
+        cmd = adapter.build_command(prompt, cwd, model=model_name)
+        proc = None
+        text_parts: List[str] = []
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=30 * 1024 * 1024,
+            )
+
+            async def _consume():
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if not decoded:
+                        continue
+                    try:
+                        event = json.loads(decoded)
+                    except json.JSONDecodeError:
+                        text_parts.append(decoded)
+                        continue
+                    if event.get("type") == "text":
+                        txt = (event.get("part") or {}).get("text")
+                        if txt:
+                            text_parts.append(str(txt))
+
+            await asyncio.wait_for(_consume(), timeout=240.0)
+            await proc.wait()
+        except Exception as e:
+            logger.debug(f"Commander OpenCode query notice: {e}")
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return None
+        return "\n".join(text_parts).strip() or None
+
+    @classmethod
+    async def _run_commander_external_query(
+        cls, prompt: str, workspace: Optional[str], model_name: str
+    ) -> Optional[str]:
+        """Routes a Commander query to a non-Gemini engine without any Gemini fallback."""
+        ml = (model_name or "").lower()
+        if ml.startswith(("opencode-go/", "opencode/")):
+            return await cls._run_opencode_commander_query(prompt, workspace, model_name)
+        # OpenRouter / third-party -> Hermes direct REST API (no CLI, no language server)
+        try:
+            from engine_manager import EngineManager
+            adapter = EngineManager.get_adapter("hermes")
+            if adapter and hasattr(adapter, "execute_direct_api"):
+                code, resp, _errs = await adapter.execute_direct_api(prompt, model=model_name)
+                if code == 0 and resp and resp.strip():
+                    return resp.strip()
+        except Exception as e:
+            logger.debug(f"Commander OpenRouter query notice: {e}")
+        return None
+
+    @classmethod
     async def _run_llm_inference(
         cls,
         prompt: str,
         workspace: Optional[str] = None
     ) -> Optional[CommanderDecision]:
-        """Runs Gemini 3.7 Flash via agy CLI non-interactively."""
-        model_name = COMMANDER_MODEL or "gemini-3.7-flash-middle"
-        # [🛡️ Token Protection Mandate - Solar Pro 4 Protocol] Force Gemini model; block all external models
-        if not model_name.lower().startswith("gemini-") or any(k in model_name.lower() for k in ("claude", "sonnet", "opus", "gpt-oss", "qwen", "deepseek", "solar", "llama", "openrouter")):
-            logger.warning(f"Non-Gemini model '{model_name}' blocked in commander; enforcing 'gemini-3.7-flash-middle'")
-            model_name = "gemini-3.7-flash-middle"
+        """Commander intent inference: Gemini -> agy CLI, external -> opencode/hermes (no Gemini force)."""
+        model_name = COMMANDER_MODEL or "gemini-3.7-flash-high"
+        # [🛡️ Gemini Quota Protection] 더 이상 Gemini를 강제하지 않는다.
+        if not cls._is_native_agy_model(model_name):
+            raw_external = await cls._run_commander_external_query(prompt, workspace, model_name)
+            if raw_external:
+                decision = cls._parse_json_decision(raw_external)
+                if decision:
+                    return decision
+            return None
+        # [🛡️ Quota Firewall] 무인/자율 컨텍스트에서 Commander 가 Gemini 를 자동 소모하는 것을 차단합니다.
+        try:
+            from quota_firewall import check_model as _qfw_check
+            _qfw = _qfw_check(model_name, source="Commander._run_llm_inference")
+            if not _qfw.allowed:
+                logger.warning(f"[QuotaFirewall] {_qfw.reason}")
+                return None
+        except Exception as _qfw_err:
+            logger.debug(f"QuotaFirewall check skipped: {_qfw_err}")
         cwd = workspace or os.getcwd()
         clamped_prompt = (prompt[:8000] + "...") if len(prompt) > 8000 else prompt
 
@@ -608,13 +738,26 @@ class Commander:
             f"{COMMANDER_SYSTEM_PROMPT}\n\n[USER INPUT PROMPT TO CLASSIFY]:\n{clamped_prompt}"
         ]
 
+        # [🛡️ LS Quota Leak Neutralization] CloudCode 캐싱 프록시를 주입해
+        # Language Server 의 6분 주기 폴링이 Gemini 한도를 소모하지 않도록 차단합니다.
+        agy_env = os.environ.copy()
+        try:
+            from cloudcode_cache_proxy import start_proxy, get_proxy_url
+            proxy_url = get_proxy_url()
+            if not proxy_url:
+                proxy_url = f"http://127.0.0.1:{start_proxy()}"
+            agy_env["CLOUD_CODE_URL"] = proxy_url
+        except Exception as _proxy_err:
+            logger.debug(f"Commander CloudCode proxy notice: {_proxy_err}")
+
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=agy_env
             )
 
             stdout, stderr = await process.communicate()
@@ -642,6 +785,12 @@ class Commander:
                     await process.wait()
                 except Exception:
                     pass
+            # [🛡️ Quota Leak Prevention] 고아 Language Server 즉시 정리
+            try:
+                from session_manager import kill_agy_language_servers
+                kill_agy_language_servers()
+            except Exception:
+                pass
 
     @classmethod
     def _parse_json_decision(cls, raw_output: str) -> Optional[CommanderDecision]:
@@ -1111,11 +1260,19 @@ class Commander:
     async def _run_raw_llm_query(cls, query_text: str, workspace: Optional[str] = None) -> Optional[str]:
         if os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules:
             return None
-        model_name = COMMANDER_MODEL or "gemini-3.7-flash-middle"
-        # [🛡️ Token Protection Mandate - Solar Pro 4 Protocol] Force Gemini model; block all external models
-        if not model_name.lower().startswith("gemini-") or any(k in model_name.lower() for k in ("claude", "sonnet", "opus", "gpt-oss", "qwen", "deepseek", "solar", "llama", "openrouter")):
-            logger.warning(f"Non-Gemini model '{model_name}' blocked in commander raw query; enforcing 'gemini-3.7-flash-middle'")
-            model_name = "gemini-3.7-flash-middle"
+        model_name = COMMANDER_MODEL or "gemini-3.7-flash-high"
+        # [🛡️ Gemini Quota Protection] Gemini만 agy CLI로, 외부 모델(opencode/hermes)은 Gemini 강제 없이 라우팅.
+        if not cls._is_native_agy_model(model_name):
+            return await cls._run_commander_external_query(query_text, workspace, model_name)
+        # [🛡️ Quota Firewall] 무인/자율 컨텍스트에서 Gemini 자동 소모를 차단합니다.
+        try:
+            from quota_firewall import check_model as _qfw_check
+            _qfw = _qfw_check(model_name, source="Commander._run_raw_llm_query")
+            if not _qfw.allowed:
+                logger.warning(f"[QuotaFirewall] {_qfw.reason}")
+                return None
+        except Exception as _qfw_err:
+            logger.debug(f"QuotaFirewall check skipped: {_qfw_err}")
         cwd = workspace or os.getcwd()
         cmd = [
             AGY_PATH,
@@ -1125,13 +1282,25 @@ class Commander:
             "--print",
             query_text
         ]
+        # [🛡️ LS Quota Leak Neutralization] CloudCode 캐싱 프록시 주입
+        agy_env = os.environ.copy()
+        try:
+            from cloudcode_cache_proxy import start_proxy, get_proxy_url
+            proxy_url = get_proxy_url()
+            if not proxy_url:
+                proxy_url = f"http://127.0.0.1:{start_proxy()}"
+            agy_env["CLOUD_CODE_URL"] = proxy_url
+        except Exception as _proxy_err:
+            logger.debug(f"Commander CloudCode proxy notice: {_proxy_err}")
+
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=agy_env
             )
             stdout, stderr = await process.communicate()
             return stdout.decode("utf-8", errors="replace").strip()
@@ -1153,6 +1322,12 @@ class Commander:
                     await process.wait()
                 except Exception:
                     pass
+            # [🛡️ Quota Leak Prevention] 고아 Language Server 즉시 정리
+            try:
+                from session_manager import kill_agy_language_servers
+                kill_agy_language_servers()
+            except Exception:
+                pass
 
     # =========================================================================
     # Intelligent Multi-QA Squad Dispatching & Conflict Resolution (AGY 4.x)
@@ -1794,6 +1969,697 @@ class Commander:
 
 
     @classmethod
+    def decompose_user_feedback(
+        cls,
+        user_prompt: str,
+        workspace: Optional[str] = None,
+        domain: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Deconstructs raw user feedback into structured, targeted 5W1H elements.
+        Faithfully targets specific user complaints (naming, icon tone, dashboard actions, crash, design cohesion)
+        without falling back to unrelated generic templates or hardcoded legacy strings.
+        """
+        raw_p = (user_prompt or "").strip()
+        cleaned = re.sub(r'^[!/]?mode\s+\S+\s*', '', raw_p, flags=re.IGNORECASE).strip()
+        p_lower = cleaned.lower()
+
+        # P2 Guard: Empty or whitespace input returns clean default structure
+        if not cleaned:
+            return {
+                "title": "사용자 피드백 긴급 반영: 품질 고도화",
+                "tasks": [
+                    "사용자 요구사항 분석 및 실체 구현",
+                    "기능 수정 회귀 방어, 컴파일/빌드 무결점 및 런타임 크래시 0건 검증"
+                ],
+                "why": "사용자 피드백 요구사항을 분석하여 런타임 안정성과 상용 서비스 완성도를 고도화하기 위함입니다.",
+                "how": "외과수술식 정밀 코드 수정 및 단위/통합 테스트 회귀 검증을 적용합니다.",
+                "who_where": "• Coder: 핵심 로직 구현\n• QA: 회귀 검증\n• Auditor: 최종 품질 승인",
+                "when_acceptance": [
+                    "컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
+                    "사용자 피드백 지시사항 디스크 소스코드 상에 실체 구현 완료 (스텁/가짜 목업 엄격 배제)",
+                    "⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
+                ],
+                "acceptance_criteria": [
+                    "컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
+                    "사용자 피드백 지시사항 디스크 소스코드 상에 실체 구현 완료 (스텁/가짜 목업 엄격 배제)",
+                    "⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
+                ],
+                "quality_contracts": [
+                    {
+                        "id": "QC-U-01",
+                        "category": "ux",
+                        "description": "사용자 피드백 인터랙션 정상화",
+                        "level": 1,
+                        "verification_rule": "사용자가 요구한 컴포넌트의 클릭 및 반응 인터랙션 무결점 동작"
+                    },
+                    {
+                        "id": "QC-A-01",
+                        "category": "architecture",
+                        "description": "피드백 수정 코드 아키텍처 정합성 및 빌드 무결점",
+                        "level": 1,
+                        "verification_rule": "빌드/컴파일 에러 0건 및 기존 기능 회귀 없는 아키텍처 상태 분리 준수"
+                    }
+                ],
+                "visual_asset_spec": "시각 에셋 불필요 (기존 디자인 토큰 및 코드 기반 UI 컴포넌트 정밀 수정)",
+                "visual_approved": False
+            }
+
+        # 1. Defect B: First split by numbered/bullet list markers (1., 2), ①, -, •)
+        numbered_chunks = re.split(r'(?:^|\n)\s*(?:[0-9]+[.)]|[①-⑩]|\*|-|•)\s*', cleaned)
+        items: List[str] = []
+        for chunk in numbered_chunks:
+            chunk_s = chunk.strip()
+            if not chunk_s:
+                continue
+            # 2. Defect B: Sub-split single lines / clauses by punctuation (. ? ! ~), semicolons (;), interpuncts (·), or newlines
+            sub_sentences = re.split(r'(?<=[.?!~])\s+|[;\n·]+', chunk_s)
+            for sub in sub_sentences:
+                sub_clean = sub.strip()
+                if sub_clean:
+                    items.append(sub_clean)
+        if not items:
+            items = [line.strip() for line in cleaned.split("\n") if line.strip()]
+        if not items and cleaned.strip():
+            items = [cleaned.strip()]
+
+        detected_tasks: List[str] = []
+        targeted_keywords: List[str] = []
+        has_icon_req = False
+        has_naming_req = False
+        has_main_dash_req = False
+        has_crash_req = False
+        has_design_req = False
+        has_ai_image_removal = False
+        dash_actions: List[str] = []
+
+        for item in items:
+            it_low = item.lower()
+            handled = False
+
+            # (1) PDF Text Editing (In-place, No-OCR)
+            if any(k in it_low for k in ["ocr", "글자 수정", "텍스트 문구", "문구 수정", "in-place", "인플레이스"]) or ("edit" in it_low and any(k in it_low for k in ["글자", "텍스트", "문구", "수정", "pdf"])):
+                targeted_keywords.append("PDF 원본 텍스트 직접 편집")
+                detected_tasks.append("[PDF 텍스트 편집] 기존 PDF 내 원본 텍스트 스트림 직접 수정(In-place Text Stream Editing, No-OCR) 엔진 구현")
+                handled = True
+
+            # (2) Button Readability, Contrast & Size
+            if ("버튼" in it_low or "button" in it_low) and any(k in it_low for k in ["가독성", "시인성", "wcag", "고대비", "크기", "크게", "작게", "사이즈", "키워"]):
+                targeted_keywords.append("버튼 가독성 개선")
+                detected_tasks.append("[버튼 가독성] UI 버튼 시인성 및 가독성 고대비 최적화 (터치 타깃 크기 48dp 이상 및 WCAG AA 명도 대비 준수)")
+                handled = True
+
+            # (2-1) Typography, Font Size & Text Readability
+            if any(k in it_low for k in ["글씨", "글자 크기", "글자크기", "폰트", "글꼴", "타이포", "텍스트 크기", "텍스트크기", "문구 크기"]) and any(k in it_low for k in ["작아", "작아서", "키워", "안보여", "안 보여", "가독성", "크기", "키워줘", "확대", "작다", "키우"]):
+                targeted_keywords.append("폰트 가독성 개선")
+                detected_tasks.append("[폰트 가독성] 텍스트 크기(sp) 및 타이포그래피 계층 고도화 (최소 14sp 이상 확보 및 가독성 최적화)")
+                handled = True
+
+            # (3) Brand Renewal & Colors (Attached Palette)
+            if any(k in it_low for k in ["팔레트", "첨부파일", "브랜드 테마"]) or (any(k in it_low for k in ["컬러", "색상"]) and any(k in it_low for k in ["로고", "브랜드", "테마", "앱 이름"])):
+                targeted_keywords.append("브랜드 리뉴얼(로고·앱명·컬러)")
+                detected_tasks.append("[브랜드 리뉴얼] 첨부파일 컬러 팔레트 기반 브랜드 테마, 신규 로고 및 앱 이름 리뉴얼")
+                handled = True
+
+            # (4) Naming / Rebranding (Explicit noun anchor strictly required)
+            if any(k in it_low for k in ["이름", "앱 이름", "앱이름", "명칭", "네이밍", "앱명", "리브랜딩", "rebrand", "naming", "app name"]):
+                has_naming_req = True
+                targeted_keywords.append("명칭 리브랜딩")
+                
+                # Defect A fix: Comprehensive particle & verb blacklist
+                PARTICLES_AND_VERBS_BLACKLIST = {
+                    "을", "를", "은", "는", "이", "가", "도", "만", "으로", "로", "에", "에서", "에게", "한테", "과", "와",
+                    "바꿔줘", "바꿔", "변경해줘", "변경", "해줘", "수정해줘", "수정", "개선해줘", "개선", "다듬어줘", "설정해줘",
+                    "앱", "신규", "새로운", "기존", "현재", "다른", "다른걸로", "이름", "앱명", "명칭", "네이밍", "예쁜", "멋진",
+                    "좋은", "추천", "추천해줘", "하나", "무엇", "좀", "잘", "별로", "별로야", "마음에", "안들어", "안들어요",
+                    "구려", "이상해", "원해", "바람", "부탁", "부탁해", "부탁드립니다"
+                }
+
+                detected_cand: Optional[str] = None
+
+                # 1. Quoted names anywhere in the text
+                m_quoted = re.search(r"['\"‘“]([A-Za-z0-9가-힣_-]+)['\"’”]", item)
+                if m_quoted:
+                    cand = m_quoted.group(1).strip()
+                    if cand.lower() not in PARTICLES_AND_VERBS_BLACKLIST and len(cand) >= 2:
+                        detected_cand = cand
+
+                # 2. Pattern: <Name>(?:이라는|라는|이란|란)\s*(?:이름|명칭|네이밍|앱명)?
+                if not detected_cand:
+                    m_particle = re.search(r"([A-Za-z0-9가-힣_-]+?)(?:이라는|라는|이란|란)\s*(?:이름|명칭|네이밍|앱명)?", item)
+                    if m_particle:
+                        cand = m_particle.group(1).strip()
+                        if cand.lower() not in PARTICLES_AND_VERBS_BLACKLIST and len(cand) >= 2:
+                            detected_cand = cand
+
+                # 3. Pattern: (?:이름|명칭|앱명|네이밍)(?:은|는|을|를|이|가|도)?\s*([A-Za-z0-9가-힣_-]+)", item)
+                if not detected_cand:
+                    m_name_after = re.search(r"(?:이름|명칭|앱명|네이밍)(?:은|는|을|를|이|가|도)?\s*([A-Za-z0-9가-힣_-]+)", item)
+                    if m_name_after:
+                        cand = m_name_after.group(1).strip()
+                        cand = re.sub(r"(?:으로|로|은|는|이|가|을|를)$", "", cand)
+                        if cand.lower() not in PARTICLES_AND_VERBS_BLACKLIST and len(cand) >= 2:
+                            detected_cand = cand
+
+                if detected_cand:
+                    detected_name = f"'{detected_cand}'"
+                else:
+                    detected_name = "기존 앱 명칭"
+                detected_tasks.append(f"[명칭 리브랜딩] {detected_name} 대체 신규 브랜드 네이밍 확정 및 전역 식별자·UI 리브랜딩 적용")
+                handled = True
+
+            # (5) App Icon & Visual Tone
+            if any(k in it_low for k in ["아이콘", "그레이톤", "그레이", "라이트 그레이", "gray", "icon"]):
+                has_icon_req = True
+                targeted_keywords.append("그레이톤 아이콘")
+                detected_tasks.append("[아이콘 리뉴얼] 라이트 그레이톤의 깔끔하고 미니멀한 신규 앱 아이콘 및 시각 에셋 제작·적용")
+                handled = True
+
+            # (6) Main Dashboard & Action Buttons & AI Image removal
+            if any(k in it_low for k in [
+                "메인", "대시보드", "ai 이미지", "열기", "빈페이지", "합치기", "변환하기", "버튼 옵션", "꺼내다",
+                "홈 화면", "홈화면", "메인 화면", "메인화면", "메인 페이지", "허전", "채워"
+            ]):
+                has_main_dash_req = True
+                targeted_keywords.append("메인 대시보드 개편")
+                if "ai 이미지" in it_low or ("이미지" in it_low and any(w in it_low for w in ["별로", "제거", "빼", "들어가"])):
+                    has_ai_image_removal = True
+                if "열기" in item: dash_actions.append("열기")
+                if "빈페이지" in item: dash_actions.append("빈페이지 만들기")
+                if "합치기" in item: dash_actions.append("합치기")
+                if "변환" in item: dash_actions.append("변환하기")
+                handled = True
+
+            # (7) E-Commerce / Payment & Checkout Stability
+            if any(k in it_low for k in ["결제", "payment", "checkout", "체크아웃", "주문"]) and any(k in it_low for k in ["멈춤", "멈춰", "오류", "안됨", "안 됨", "느림", "버그", "실패", "프리징", "에러", "크래시", "튕김", "지연", "먹통"]):
+                targeted_keywords.append("결제 프로세스 안정화")
+                detected_tasks.append("[결제 안정화] 결제/체크아웃 화면 프리징 및 멈춤 원인 분석, 비동기 트랜잭션 예외 방어")
+                handled = True
+
+            # (8) E-Commerce / Cart & Basket Interaction
+            if any(k in it_low for k in ["장바구니", "cart", "바스켓"]) and any(k in it_low for k in ["멈춤", "멈춰", "오류", "안됨", "안 됨", "느림", "버그", "실패", "프리징", "에러", "크래시", "튕김", "담기 안", "먹통", "안 눌", "안눌", "클릭", "버튼"]):
+                targeted_keywords.append("장바구니 기능 개선")
+                detected_tasks.append("[장바구니 인터랙션] 장바구니 담기 및 상태 업데이트 인터랙션 정상화")
+                handled = True
+
+            # (9) Asset / Image Loading & Performance Optimization
+            if any(k in it_low for k in ["느림", "지연", "버벅", "slow", "속도", "로딩", "늦게", "안 떠", "안떠"]) and any(k in it_low for k in ["이미지", "사진", "썸네일", "에셋"]):
+                targeted_keywords.append("이미지 로딩 최적화")
+                detected_tasks.append("[성능 최적화] 이미지/에셋 비동기 캐싱 및 렌더링 지연(Lazy Loading) 최적화")
+                handled = True
+
+            # (10) Stability, Crash & Memory Optimization (Generic Catch-all)
+            if any(k in it_low for k in CRASH_STABILITY_KEYWORDS):
+                has_crash_req = True
+                if "pdf" in it_low or "pdf" in p_lower:
+                    targeted_keywords.append("PDF 크래시 최적화")
+                    target_doc = "PDF 문서"
+                else:
+                    targeted_keywords.append("런타임 크래시 최적화")
+                    target_doc = "화면/애플리케이션"
+                detected_tasks.append(f"[안정성 및 크래시 방어] {target_doc} 진입 및 조작 시 발생하는 비정상 종료/멈춤 원인 분석 및 비동기 I/O·메모리 최적화")
+                handled = True
+
+            # (11) Design Cohesion & Visual Refresh
+            if any(k in it_low for k in [
+                "통일성", "연결성", "매칭", "디자인", "깔끔", "룩앤필", "스타일", "예쁘게", "정돈",
+                "세련", "다듬", "조잡", "촌스럽", "답답", "시원", "바꿔"
+            ]):
+                has_design_req = True
+                targeted_keywords.append("디자인 통일성 개편")
+                detected_tasks.append("[디자인 통일성] 전체 화면 및 컴포넌트 간 시각 요소 매칭 및 디자인 통일성·연결성 고도화")
+                handled = True
+
+            # (12) Button Click & Interaction Recovery
+            if ("버튼" in it_low or "button" in it_low) and any(k in it_low for k in ["안 눌", "안눌", "안됨", "안 됨", "동작 안", "먹통", "클릭"]):
+                targeted_keywords.append("버튼 인터랙션 정상화")
+                detected_tasks.append(f"[UI 인터랙션 복구] 버튼 클릭 이벤트 리스너 정상화 및 터치 반응성 보강")
+                handled = True
+
+            # Defect D fix: Filter out preamble fragments and meaningless conjunctions/tokens
+            DISCARD_FRAGMENTS = {
+                "앱이", "앱은", "앱을", "앱의", "앱도", "앱에", "앱", "어플", "어플이", "어플은", "앱에서",
+                "그리고", "또한", "하지만", "그런데", "그 외", "그외", "기타",
+                "요청사항", "요청 사항", "수정사항", "수정 사항", "피드백", "개선사항", "개선 사항",
+                "다음과", "아래와", "아래", "다음", "사항", "요청", "확인", "부탁", "부탁해", "부탁드립니다",
+                "다른걸로", "다른걸로해줘", "다른걸로해주세요", "다른것으로", "다른것으로해줘",
+                "해줘", "해주세요", "해줘요", "부탁해요", "좋을듯", "좋을것같아", "좋겠어", "꺼내다주면좋을듯",
+                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "10."
+            }
+            clean_frag = re.sub(r'^[0-9]+[.)]\s*|^[①-⑩]\s*|^[-*•]\s*', '', item).strip()
+            clean_frag_normalized = re.sub(r'[\s.,:;!?~-]', '', clean_frag).lower()
+
+            is_preamble_or_fragment = (
+                not clean_frag_normalized
+                or clean_frag_normalized in DISCARD_FRAGMENTS
+                or clean_frag.lower() in DISCARD_FRAGMENTS
+                or any(clean_frag_normalized == p.replace(" ", "") for p in DISCARD_FRAGMENTS)
+                or (len(clean_frag_normalized) <= 3 and any(clean_frag_normalized.startswith(p) for p in ["앱이", "앱은", "앱을", "앱도", "어플", "그리", "또한", "하지"]))
+                or (clean_frag.endswith(":") and len(clean_frag_normalized) <= 10 and any(w in clean_frag for w in ["요청", "피드백", "사항", "다음", "아래", "앱", "내용"]))
+                or (clean_frag_normalized.startswith("다른걸로") and len(clean_frag_normalized) <= 10)
+                or (clean_frag_normalized.startswith("다른것으로") and len(clean_frag_normalized) <= 10)
+            )
+
+            if not handled and not is_preamble_or_fragment and len(item.strip()) >= 2:
+                detected_tasks.append(f"[사용자 요구사항 반영] {item.strip()[:70]}")
+
+        # [Defect 3] Single consolidated dashboard task to prevent duplicate entries
+        if has_main_dash_req:
+            actions = []
+            for act in ["열기", "빈페이지 만들기", "합치기", "변환하기"]:
+                if act in dash_actions:
+                    actions.append(act)
+            if not actions:
+                actions = ["열기", "빈페이지 만들기", "합치기", "변환하기"]
+            action_desc = "·".join(actions)
+            ai_removal_desc = " (AI 생성 이미지 배제 및 " if has_ai_image_removal else " ("
+            detected_tasks.append(f"[메인 대시보드 개편] 메인 화면 UI 리뉴얼{ai_removal_desc}{action_desc} 4대 핵심 기능 버튼 전면 배치)")
+
+        # Fallback if no specific categories triggered
+        if not detected_tasks:
+            detected_tasks.append(f"[사용자 피드백 실체 구현] {cleaned[:80]}")
+
+        detected_tasks.append("기능 수정 회귀 방어, 컴파일/빌드 무결점 및 런타임 크래시 0건 검증")
+
+        seen_t = set()
+        final_tasks = []
+        for t in detected_tasks:
+            if t not in seen_t:
+                seen_t.add(t)
+                final_tasks.append(t)
+
+        if targeted_keywords:
+            unique_kw = list(dict.fromkeys(targeted_keywords))
+            title_core = ", ".join(unique_kw)
+        else:
+            first_line = cleaned.split("\n")[0] if cleaned else "품질 고도화"
+            first_clean = re.sub(r'^[0-9]+[.)]\s*|^[①-⑩]\s*|^[-*•]\s*', '', first_line).strip()
+            first_clean = re.sub(r'\s+', ' ', first_clean).strip()
+            if len(first_clean) > 40:
+                truncated = first_clean[:40].rsplit(' ', 1)[0]
+                title_core = (truncated or first_clean[:35]) + "…"
+            else:
+                title_core = first_clean or "품질 고도화"
+
+        # Contextual prefix taxonomy aligned with user feedback intent
+        if not cleaned or not cleaned.strip():
+            title_prefix = "사용자 피드백 긴급 반영"
+        else:
+            verdict = FeedbackIntentClassifier.classify(cleaned, project_initialized=True)
+            if has_crash_req or any("[안정성 및 크래시 방어]" in t or "[결제 안정화]" in t for t in final_tasks) or verdict.intent_type == "defect":
+                title_prefix = "사용자 피드백 긴급 반영"
+            elif verdict.title_prefix:
+                title_prefix = verdict.title_prefix
+            else:
+                title_prefix = "사용자 피드백 지시 반영"
+
+        milestone_title = f"{title_prefix}: {title_core}"
+
+        why_parts = []
+        if has_naming_req or any(k in p_lower for k in ["로고", "이름", "디자인", "컬러", "색상"]):
+            why_parts.append("로고/앱 이름/디자인 시각 완성도")
+        if any(k in p_lower for k in ["가독성", "시인성", "wcag"]) or ("버튼" in p_lower and any(k in p_lower for k in ["가독성", "시인성", "떨어", "고대비"])):
+            why_parts.append("버튼 가독성")
+        if any(k in p_lower for k in ["ocr", "글자 수정", "문구 수정", "원본 텍스트"]):
+            why_parts.append("기존 PDF 원본 문서 내 텍스트를 OCR 없이 직접 수정")
+        if has_icon_req:
+            why_parts.append("라이트 그레이톤 미니멀 아이콘 적용")
+        if has_main_dash_req:
+            why_parts.append("메인 화면 AI 이미지 배제 및 핵심 액션 버튼 전면 노출")
+        if has_crash_req:
+            if "pdf" in p_lower:
+                why_parts.append("PDF 오픈 시 튕김 크래시 문제 해결")
+            else:
+                why_parts.append("화면 멈춤/크래시 런타임 안정성 문제 해결")
+        if any(k in p_lower for k in ["결제", "payment"]):
+            why_parts.append("결제 화면 멈춤 및 결제 프로세스 정상화")
+        if any(k in p_lower for k in ["장바구니", "cart"]):
+            why_parts.append("장바구니 담기 및 수량 조작 반응성 확보")
+        if any(k in p_lower for k in ["이미지", "사진"]) and any(k in p_lower for k in ["느림", "지연", "로딩"]):
+            why_parts.append("이미지 비동기 캐싱 및 로딩 지연 해소")
+        if has_design_req and "로고/앱 이름/디자인 시각 완성도" not in why_parts:
+            why_parts.append("화면 간 디자인 통일성과 시각적 연결성 확보")
+
+        why_summary = (
+            f"사용자가 직접 제기한 피드백({', '.join(why_parts) if why_parts else cleaned[:60]})을 최우선 반영하여, "
+            f"불만족스러웠던 UI/아이콘/동작 완성도와 런타임 안정성을 대폭 개선하고 상용 수준의 완성도를 확보하기 위함입니다."
+        )
+
+        how_steps = []
+        if has_design_req:
+            how_steps.append("디자인 시스템 일관성 토큰 적용")
+        if has_naming_req:
+            how_steps.append("전역 식별자 및 UI 브랜드 네이밍 리팩토링")
+        if has_icon_req:
+            how_steps.append("라이트 그레이톤 벡터 드로어블/아이콘 에셋 바인딩")
+        if has_main_dash_req:
+            if any(b in p_lower for b in ["열기", "빈페이지", "합치기", "변환"]):
+                how_steps.append("메인 화면 4대 액션 버튼(열기·빈페이지·합치기·변환하기) 그리드 구성")
+            else:
+                how_steps.append("메인 화면 핵심 기능 버튼 전면 배치")
+        if has_crash_req:
+            target_context = "PDF 문서" if "pdf" in p_lower else "비즈니스 로직 및 I/O"
+            how_steps.append(f"{target_context} 처리 시 백그라운드 비동기 처리 및 크래시 방어 예외 핸들링")
+        if any(k in p_lower for k in ["결제", "payment"]):
+            how_steps.append("결제 트랜잭션 비동기 처리 및 실패 시 롤백 예외 방어")
+        if any(k in p_lower for k in ["장바구니", "cart"]):
+            how_steps.append("장바구니 담기 이벤트 리스너 바인딩 및 상태 동기화")
+        if any(k in p_lower for k in ["이미지", "사진"]) and any(k in p_lower for k in ["느림", "지연", "로딩"]):
+            how_steps.append("이미지 메모리 캐싱 및 비동기 레이지 로딩 파이프라인")
+
+        if not how_steps:
+            how_steps.append("사용자 피드백 지적 컴포넌트 외과수술식 정밀 수정 및 안정성 보강")
+
+        how_summary = ", ".join(how_steps) + "을(를) 적용합니다."
+
+        ws_label = workspace or "작업 디렉토리"
+        target_scope = " / ".join(dict.fromkeys(targeted_keywords[:3])) if targeted_keywords else "사용자 피드백 요구사항"
+        src_path = "app/src/main/" if (domain == "mobile_app" or ("app" in ws_label.lower() and "pdf" in p_lower)) else f"{ws_label}/"
+        who_where = (
+            f"• Coder: {target_scope} 실체 구현 및 비동기/UI 인터랙션 최적화\n"
+            f"• QA: 사용자 제기 결손 검증, 회귀 방어 및 런타임 안정성 검수\n"
+            f"• Auditor: 사용자 피드백 요구사항 100% 충족 및 상용 수준 최종 품질 승인\n"
+            f"• 대상 경로: {src_path}"
+        )
+
+        acceptance_criteria = [
+            "컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
+            "사용자 피드백 지시사항 디스크 소스코드 상에 실체 구현 완료 (스텁/가짜 목업 엄격 배제)",
+        ]
+        if has_main_dash_req:
+            dash_buttons = []
+            if "열기" in p_lower: dash_buttons.append("열기")
+            if "빈페이지" in p_lower: dash_buttons.append("빈페이지")
+            if "합치기" in p_lower: dash_buttons.append("합치기")
+            if "변환" in p_lower: dash_buttons.append("변환하기")
+            if dash_buttons:
+                b_label = "·".join(dash_buttons)
+                acceptance_criteria.append(f"메인 화면 4대 기능 버튼({b_label}) 정상 노출 및 클릭 시 실체 동작")
+            else:
+                acceptance_criteria.append("메인 화면 주요 액션 버튼 정상 노출 및 클릭 시 실체 동작")
+
+        if has_crash_req:
+            doc_type = "PDF 문서" if "pdf" in p_lower else "애플리케이션 및 주요 화면"
+            acceptance_criteria.append(f"{doc_type} 진입/조작 시 런타임 크래시 0건 및 비동기 로딩 무결점 작동")
+
+        if has_naming_req:
+            acceptance_criteria.append("신규 브랜드/앱 명칭 리브랜딩 전역 식별자 및 UI 일괄 반영 완료")
+
+        if has_icon_req:
+            acceptance_criteria.append("지정된 톤앤매너의 신규 앱 아이콘 및 시각 에셋 소스코드/리소스 반영 완료")
+
+        if has_design_req:
+            acceptance_criteria.append("전체 화면 및 컴포넌트 간 디자인 시스템 토큰 일관성 확보")
+
+        if any(k in p_lower for k in ["결제", "payment"]):
+            acceptance_criteria.append("결제 프로세스 정상 완료 및 트랜잭션 에러 0건")
+
+        if any(k in p_lower for k in ["장바구니", "cart"]):
+            acceptance_criteria.append("장바구니 담기 및 상태 업데이트 인터랙션 정상 작동")
+
+        acceptance_criteria.append("⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득")
+
+        quality_contracts: List[Dict[str, Any]] = []
+        if has_main_dash_req or any(k in p_lower for k in ["버튼", "터치"]):
+            dash_desc = "메인 대시보드 4대 기능 버튼" if (has_main_dash_req and any(b in p_lower for b in ["열기", "빈페이지"])) else "핵심 UI 버튼 및 대화형 컴포넌트"
+            quality_contracts.append({
+                "id": "QC-U-01",
+                "category": "ux",
+                "description": f"{dash_desc} 터치 타깃 48dp 이상 확보",
+                "level": 1,
+                "verification_rule": "버튼 및 대화형 컴포넌트의 최소 48dp 터치 타깃 규격 준수 및 클릭 핸들러 바인딩"
+            })
+
+        if has_design_req or has_icon_req or any(k in p_lower for k in ["디자인", "색상", "컬러"]):
+            quality_contracts.append({
+                "id": "QC-V-01",
+                "category": "visual",
+                "description": "디자인 통일성 및 UI 오버플로우/텍스트 클리핑 제로화",
+                "level": 1,
+                "verification_rule": "텍스트 클리핑(세로 쪼개짐) 없이 TextOverflow.Ellipsis 및 일관된 테마 컬러 토큰 적용"
+            })
+
+        if has_crash_req or any(k in p_lower for k in ["프리징", "멈춤", "지연", "느림"]):
+            doc_type = "PDF 로딩" if "pdf" in p_lower else "비즈니스 로직 및 I/O"
+            quality_contracts.append({
+                "id": "QC-P-01",
+                "category": "performance",
+                "description": f"{doc_type} 비동기 I/O 코루틴/스레드 처리 및 런타임 크래시 0건",
+                "level": 1,
+                "verification_rule": "I/O 및 무거운 작업 시 백그라운드 비블로킹 패턴 사용 및 try-catch 예외 방어"
+            })
+
+        if has_naming_req:
+            quality_contracts.append({
+                "id": "QC-A-01",
+                "category": "architecture",
+                "description": "브랜드 네이밍 전역 일관성 및 ViewModel/상태 분리 무결성",
+                "level": 1,
+                "verification_rule": "기존 레거시 명칭 잔재 없이 신규 브랜드 식별자로 일괄 리팩토링 및 UDF 패턴 준수"
+            })
+
+        if not quality_contracts:
+            quality_contracts.append({
+                "id": "QC-U-01",
+                "category": "ux",
+                "description": "사용자 피드백 지적 인터랙션 정상화",
+                "level": 1,
+                "verification_rule": "사용자가 지적한 컴포넌트의 클릭 및 반응 인터랙션 무결점 동작"
+            })
+            quality_contracts.append({
+                "id": "QC-A-01",
+                "category": "architecture",
+                "description": "피드백 수정 코드 아키텍처 정합성 및 빌드 무결점",
+                "level": 1,
+                "verification_rule": "빌드/컴파일 에러 0건 및 기존 기능 회귀 없는 아키텍처 상태 분리 준수"
+            })
+
+        visual_approved = has_icon_req or has_design_req or ("첨부파일" in p_lower or "팔레트" in p_lower)
+        if "첨부파일" in p_lower or "팔레트" in p_lower:
+            visual_asset_spec = (
+                "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
+                "• Type A: 첨부파일 컬러 팔레트를 반영한 세련된 신규 브랜드 로고 및 앱 아이콘 일러스트 생성\n"
+                "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
+            )
+        elif has_icon_req:
+            visual_asset_spec = (
+                "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
+                "• Type A: 라이트 그레이톤의 깔끔하고 미니멀한 대표 런처 아이콘 에셋 생성 (res/drawable/ 저장)\n"
+                "• Type B: 주요 기능 직관적 고대비 벡터 아이콘 배치"
+            )
+        elif has_design_req:
+            visual_asset_spec = (
+                "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
+                "• Type B: 전체 화면 디자인 시스템에 통일감을 부여하는 일관된 벡터/UI 시각 에셋 배치"
+            )
+        else:
+            visual_asset_spec = "시각 에셋 불필요 (기존 디자인 토큰 및 코드 기반 UI 컴포넌트 정밀 수정)"
+
+        return {
+            "title": milestone_title,
+            "tasks": final_tasks,
+            "why": why_summary,
+            "how": how_summary,
+            "who_where": who_where,
+            "when_acceptance": acceptance_criteria,
+            "acceptance_criteria": acceptance_criteria,
+            "quality_contracts": quality_contracts,
+            "visual_asset_spec": visual_asset_spec,
+            "visual_approved": visual_approved
+        }
+
+    @classmethod
+    def _validate_and_anchor_5w1h_fields(
+        cls,
+        data: Dict[str, Any],
+        heuristic_plan: Milestone5W1HPlan,
+        user_prompt: str = "",
+        is_feedback_or_locked: bool = False
+    ) -> Tuple[str, str, str, List[str], str, bool]:
+        """
+        [🔒 Defect A Anti-Hallucination Gate for 5W1H Fields]
+        In feedback mode or when milestone is locked (preserve_caller_milestone=True),
+        prevents LLM hallucinations in why, how, who_where, when_acceptance, and visual_asset_spec
+        from leaking into Coder directives.
+
+        An AI field candidate is adopted ONLY IF:
+          (a) compute_vocabulary_overlap(ai_candidate, [heuristic_text]) >= 0.35, AND
+          (b) ai_candidate tokens intersect with user_prompt tokens (if user_prompt has tokens).
+        Otherwise, the field is strictly anchored to the tailored heuristic_plan value.
+
+        Returns: (why, how, who_where, when_acceptance, visual_asset_spec, visual_approved)
+        """
+        from feedback_classifier import FeedbackIntentClassifier
+
+        prompt_tokens = FeedbackIntentClassifier.extract_tokens(user_prompt) if user_prompt else set()
+
+        def _is_valid_candidate(ai_val: str, heuristic_val: str) -> bool:
+            if not ai_val or not ai_val.strip():
+                return False
+            cand_clean = ai_val.strip()
+            # If not in locked/feedback mode, allow LLM candidate if non-empty
+            if not is_feedback_or_locked:
+                return True
+            overlap = FeedbackIntentClassifier.compute_vocabulary_overlap(cand_clean, [heuristic_val])
+            cand_tokens = FeedbackIntentClassifier.extract_tokens(cand_clean)
+            has_prompt_intersection = bool(cand_tokens.intersection(prompt_tokens)) if prompt_tokens else True
+            return (overlap >= 0.35 and has_prompt_intersection)
+
+        # 1. Why
+        ai_why = str(data.get("why", "")).strip()
+        why = ai_why if _is_valid_candidate(ai_why, heuristic_plan.why) else heuristic_plan.why
+
+        # 2. How
+        ai_how = str(data.get("how", "")).strip()
+        how = ai_how if _is_valid_candidate(ai_how, heuristic_plan.how) else heuristic_plan.how
+
+        # 3. Who/Where
+        ai_who = str(data.get("who_where", "")).strip()
+        who_where = ai_who if _is_valid_candidate(ai_who, heuristic_plan.who_where) else heuristic_plan.who_where
+
+        # 4. When Acceptance
+        ai_when = data.get("when_acceptance")
+        if isinstance(ai_when, list) and ai_when:
+            ai_when_text = " ".join(str(w) for w in ai_when)
+            heur_when_text = " ".join(heuristic_plan.when_acceptance)
+            if _is_valid_candidate(ai_when_text, heur_when_text):
+                when_acceptance = [str(w).strip() for w in ai_when if str(w).strip()]
+            else:
+                when_acceptance = list(heuristic_plan.when_acceptance)
+        else:
+            when_acceptance = list(heuristic_plan.when_acceptance)
+
+        # 5. Visual Asset Spec & Approved
+        ai_vis = str(data.get("visual_asset_spec", "")).strip()
+        heur_vis = heuristic_plan.visual_asset_spec or ""
+        visual_asset_spec = ai_vis if _is_valid_candidate(ai_vis, heur_vis) else heur_vis
+
+        if is_feedback_or_locked and heuristic_plan.visual_approved:
+            visual_approved = True
+        else:
+            visual_approved = bool(data.get("visual_approved", heuristic_plan.visual_approved))
+
+        return why, how, who_where, when_acceptance, visual_asset_spec, visual_approved
+
+    @classmethod
+    async def plan_user_feedback_milestone_async(
+        cls,
+        user_prompt: str,
+        workspace: Optional[str] = None,
+        milestone_version: str = "v1.0",
+        macro_memory_text: str = "",
+        domain: Optional[str] = None
+    ) -> Milestone5W1HPlan:
+        """
+        Synthesizes a 5W1H master plan directly targeted at user feedback.
+        Attempts LLM query first to faithfully map user requirements,
+        falling back seamlessly to rule-based decomposition.
+        """
+        decomp = cls.decompose_user_feedback(user_prompt, workspace=workspace, domain=domain)
+        dom = domain or ("mobile_app" if "pdf" in (user_prompt or "").lower() else "saas_web")
+        base_plan = Milestone5W1HPlan(
+            version=milestone_version,
+            title=decomp["title"],
+            domain=dom,
+            why=decomp["why"],
+            what=decomp["tasks"],
+            how=decomp["how"],
+            who_where=decomp["who_where"],
+            when_acceptance=decomp["when_acceptance"],
+            visual_asset_spec=decomp["visual_asset_spec"],
+            visual_approved=decomp["visual_approved"],
+            source="feedback_decomposition",
+            quality_contracts=decomp["quality_contracts"]
+        )
+        base_plan.directive_for_coder = base_plan.build_directive_for_coder(
+            macro_memory_text=macro_memory_text,
+            user_prompt=user_prompt
+        )
+
+        ai_query = (
+            f"You are [👑 Commander], the Chief Strategic Product Architect.\n"
+            f"The user has submitted direct feedback/complaints regarding the app:\n"
+            f"\"{user_prompt}\"\n\n"
+            f"Formulate a razor-sharp 5W1H milestone master plan targeting ALL of the user's specific feedback points (1:1 mapping).\n"
+            f"Candidate Title: {decomp['title']}\n"
+            f"Candidate Tasks: {json.dumps(decomp['tasks'], ensure_ascii=False)}\n"
+            f"Output JSON ONLY: {{\"title\": \"...\", \"why\": \"...\", \"what\": [...], \"how\": \"...\", \"who_where\": \"...\", \"when_acceptance\": [...], \"visual_asset_spec\": \"...\", \"visual_approved\": true}}"
+        )
+
+        try:
+            raw_res = await asyncio.wait_for(cls._run_raw_llm_query(ai_query, workspace), timeout=30.0)
+            if raw_res:
+                cleaned = raw_res.strip()
+                if "```json" in cleaned:
+                    m = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
+                    if m: cleaned = m.group(1).strip()
+                elif "```" in cleaned:
+                    m = re.search(r"```\s*(.*?)\s*```", cleaned, re.DOTALL)
+                    if m: cleaned = m.group(1).strip()
+                s_idx = cleaned.find("{")
+                e_idx = cleaned.rfind("}")
+                if s_idx != -1 and e_idx != -1 and e_idx > s_idx:
+                    data = json.loads(cleaned[s_idx:e_idx+1])
+                    if isinstance(data, dict) and (data.get("why") or data.get("what")):
+                        ai_title = str(data.get("title", "")).strip()
+                        if ai_title.startswith("사용자 피드백") and any(w in ai_title.lower() for w in user_prompt.lower().split() if len(w) >= 2):
+                            base_plan.title = ai_title
+                        why, how, who_where, when_acceptance, visual_asset_spec, visual_approved = cls._validate_and_anchor_5w1h_fields(
+                            data=data,
+                            heuristic_plan=base_plan,
+                            user_prompt=user_prompt,
+                            is_feedback_or_locked=True
+                        )
+                        base_plan.why = why
+                        base_plan.how = how
+                        base_plan.who_where = who_where
+                        base_plan.when_acceptance = when_acceptance
+                        base_plan.visual_asset_spec = visual_asset_spec
+                        base_plan.visual_approved = visual_approved
+                        base_plan.source = "ai"
+                        base_plan.directive_for_coder = base_plan.build_directive_for_coder(
+                            macro_memory_text=macro_memory_text,
+                            user_prompt=user_prompt
+                        )
+        except Exception as e:
+            logger.debug(f"Commander user feedback AI planning note (fallback to decomp): {e}")
+
+        return base_plan
+
+    @classmethod
+    def plan_user_feedback_milestone(
+        cls,
+        user_prompt: str,
+        workspace: Optional[str] = None,
+        milestone_version: str = "v1.0",
+        macro_memory_text: str = "",
+        domain: Optional[str] = None
+    ) -> Milestone5W1HPlan:
+        """Synchronous wrapper for user feedback milestone planning."""
+        decomp = cls.decompose_user_feedback(user_prompt, workspace=workspace, domain=domain)
+        dom = domain or ("mobile_app" if "pdf" in (user_prompt or "").lower() else "saas_web")
+        plan = Milestone5W1HPlan(
+            version=milestone_version,
+            title=decomp["title"],
+            domain=dom,
+            why=decomp["why"],
+            what=decomp["tasks"],
+            how=decomp["how"],
+            who_where=decomp["who_where"],
+            when_acceptance=decomp["when_acceptance"],
+            visual_asset_spec=decomp["visual_asset_spec"],
+            visual_approved=decomp["visual_approved"],
+            source="feedback_decomposition",
+            quality_contracts=decomp["quality_contracts"]
+        )
+        plan.directive_for_coder = plan.build_directive_for_coder(
+            macro_memory_text=macro_memory_text,
+            user_prompt=user_prompt
+        )
+        return plan
+
+    @classmethod
     def _build_heuristic_5w1h_plan(
         cls,
         milestone_title: str,
@@ -1804,7 +2670,10 @@ class Commander:
         user_prompt: str = "",
         macro_memory_text: str = "",
         delta_analysis: str = "",
-        thinking_process: str = ""
+        thinking_process: str = "",
+        quality_contracts: Optional[List[Dict[str, Any]]] = None,
+        project_initialized: Optional[bool] = None,
+        preserve_caller_milestone: bool = False
     ) -> Milestone5W1HPlan:
         v_num = milestone_version.lower()
         is_v1 = ("v1" in v_num or "1" in v_num or not v_num)
@@ -1813,51 +2682,92 @@ class Commander:
 
         ws_label = workspace or "작업 디렉토리"
 
-        clean_user_p = user_prompt.strip()
+        raw_user_p = (user_prompt or "").strip()
+        clean_user_p = re.sub(r'^[!/]?mode\s+\S+\s*', '', raw_user_p, flags=re.IGNORECASE).strip()
         is_adaptive_internal = clean_user_p.startswith("사용자 원본 목표:")
-        has_user_directive = bool(clean_user_p and not is_adaptive_internal and not clean_user_p.startswith("🎯 [") and not clean_user_p.startswith("!mode"))
+        has_user_directive = bool(clean_user_p and not is_adaptive_internal and not clean_user_p.startswith("🎯 [") and not clean_user_p.startswith("👑 ["))
         user_lower = clean_user_p.lower() if has_user_directive else ""
 
-        has_design_req = any(k in user_lower for k in ["로고", "이름", "디자인", "컬러", "색상", "버튼", "가독성", "룩앤필", "스타일", "팔레트"])
+        has_commerce_defect = any(k in user_lower for k in ["결제", "장바구니", "주문"]) and any(
+            c in user_lower for c in ["멈춤", "오류", "안됨", "안 됨", "안눌림", "안 눌림", "느림", "버그", "프리징", "실패"]
+        )
+        has_design_req = any(k in user_lower for k in [
+            "로고", "앱 이름", "앱명", "리브랜딩", "디자인", "컬러", "색상", "버튼",
+            "가독성", "룩앤필", "스타일", "팔레트", "통일성", "연결성", "깔끔", "크게", "작게", "예쁘게",
+            "세련", "다듬", "조잡", "촌스럽", "답답", "시원", "글씨", "폰트", "허전", "채워"
+        ])
         has_edit_req = any(k in user_lower for k in ["edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr"])
-        has_complaint_or_quality = any(k in user_lower for k in ["별로", "퀄리티", "개선", "피드백", "반영", "바꿔", "떨어", "높여"])
+        has_complaint_or_quality = (
+            any(k in user_lower for k in FEEDBACK_DEFECT_KEYWORDS)
+            or any(k in user_lower for k in [
+                "별로", "퀄리티", "개선", "피드백", "반영", "바꿔", "떨어", "높여",
+                "아이콘", "리브랜딩", "명칭", "네이밍", "앱명", "메인"
+            ])
+            or has_commerce_defect
+        )
+        has_numbered_items = bool(re.search(r'(?m)^\s*(?:\d+[.)]|[①-⑩]|[-*•])\s+', clean_user_p))
 
-        # Top-level priority: Direct User Feedback & Directives override all generic templates
-        if has_user_directive and (has_design_req or has_edit_req or has_complaint_or_quality):
-            user_tasks = []
-            if has_design_req:
-                user_tasks.append("첨부파일 컬러 팔레트 기반 브랜드 테마, 신규 로고 및 앱 이름 리뉴얼")
-                user_tasks.append("UI 버튼 시인성 및 가독성 고대비 최적화 (WCAG AA 명도 대비 준수 및 터치 타깃 48dp)")
-            if has_edit_req:
-                user_tasks.append("기존 PDF 내 원본 텍스트 스트림 직접 수정(In-place Text Stream Editing, No-OCR) 엔진 구현")
-                user_tasks.append("수정된 텍스트 및 레이아웃의 실시간 렌더링 및 무손실 파일 저장/내보내기 검증")
-            if not user_tasks:
-                user_tasks.append(f"사용자 피드백 지시사항 실체 구현 ({clean_user_p[:60]})")
-            user_tasks.append("기능 수정 회귀 방어 및 런타임 크래시 0건 검증")
+        # Explicit initial launch flag (passed from bot.py on new goal)
+        is_explicit_initial = (project_initialized is False)
 
-            tasks = user_tasks
-            milestone_title = "사용자 피드백 긴급 반영: 브랜드 리뉴얼(로고·앱명·컬러), 버튼 가독성 개선 및 PDF 원본 텍스트 직접 편집"
+        # New product specification guard:
+        # Only explicit new project creation or numbered feature specifications trigger new product planning.
+        # Colloquial modification/feedback requests ("디자인 통일성 있게 만들어줘", "버튼 좀 더 크게 만들어줘",
+        # "화면이 좀 답답한데 시원하게 좀 바꿔줘", "앱이 전반적으로 조잡해 보여서 세련되게 다듬어줘") are NOT blocked.
+        has_new_product_spec = (
+            is_explicit_initial
+            or any(k in user_lower for k in EXPLICIT_NEW_PROJECT_KEYWORDS)
+            or any(k in user_lower for k in ["앱 개발", "서비스 개발", "프로젝트 개발", "신규 개발", "신규 프로젝트"])
+            or (
+                has_numbered_items
+                and any(k in user_lower for k in GENERAL_CREATION_VERBS)
+                and not (has_complaint_or_quality or has_commerce_defect or has_design_req)
+            )
+        )
 
-            why = (
-                "사용자가 제기한 피드백을 최우선 반영하여, 불만족스러웠던 로고/앱 이름/디자인 시각 완성도와 "
-                "버튼 가독성을 대폭 개선하고, 기존 PDF 원본 문서 내 텍스트를 OCR 없이 직접 수정하는 핵심 기능을 완결하기 위함입니다."
-            )
-            how = (
-                "첨부파일 컬러 토큰 추출 적용, 버튼 고대비 컴포넌트 리팩토링, "
-                "PDF Content Stream 파싱 및 Tj/TJ 텍스트 연산자 직접 치환 엔진을 적용합니다."
-            )
-            who_where = (
-                f"• Coder: 브랜드 컬러 에셋, 고대비 버튼 UI 및 PDF 원본 텍스트 직접 수정 엔진 구현\n"
-                f"• QA: 버튼 가독성 및 원본 PDF 텍스트 무손실 수정 검증\n"
-                f"• Auditor: 사용자 피드백 요구사항 100% 충족 및 상용 품질 최종 승인\n"
-                f"• 대상 경로: {ws_label}/"
-            )
-            visual_asset_spec = (
-                "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
-                "• Type A: 첨부파일 컬러 팔레트를 반영한 세련된 신규 브랜드 로고 및 앱 아이콘 일러스트 생성\n"
-                "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
-            )
-            visual_approved = True
+        when_acceptance_list: Optional[List[str]] = None
+        plan_qcs: Optional[List[Dict[str, Any]]] = quality_contracts
+
+        # [Authority Gate (Redesigned)]:
+        # Caller milestone is authoritative IF AND ONLY IF:
+        # 1. preserve_caller_milestone is explicitly set by caller (orchestrator level decision), OR
+        # 2. caller's milestone already starts with "사용자 피드백" (explicitly structured feedback milestone), OR
+        # 3. caller's title and tasks are non-empty AND have strong semantic alignment (overlap >= 0.35)
+        #    with the user prompt.
+        # Otherwise, user feedback directives strictly override static roadmap milestones!
+        caller_has_title_and_tasks = bool(
+            tasks and len(tasks) > 0
+            and milestone_title
+            and milestone_title.strip() not in ("임의 타이틀", "품질 고도화", "요구사항 실체 구현 및 품질 고도화", "신규 마일스톤")
+        )
+        is_already_feedback_milestone = bool(milestone_title and milestone_title.startswith("사용자 피드백"))
+        prompt_overlap = FeedbackIntentClassifier.compute_vocabulary_overlap(milestone_title, [user_prompt or ""]) if (milestone_title and user_prompt) else 0.0
+
+        is_authoritative = (
+            preserve_caller_milestone
+            or is_already_feedback_milestone
+            or (caller_has_title_and_tasks and prompt_overlap >= 0.35)
+        )
+
+        # Top-level priority: Direct User Feedback & Directives override generic templates
+        intent_verdict = FeedbackIntentClassifier.classify(raw_user_p, project_initialized=(not is_explicit_initial))
+        is_legacy_feedback_goal = ("글자를 넣어도 크기가 조절되지 않는" in clean_user_p or "첨부파일 컬러 팔레트" in clean_user_p)
+        is_feedback_directive = (
+            intent_verdict.is_feedback_directive
+            and not (is_legacy_feedback_goal and cls._feedback_all_delivered(workspace=workspace))
+        )
+        if is_feedback_directive:
+            fb_decomp = cls.decompose_user_feedback(clean_user_p, workspace=workspace, domain=domain)
+            if not is_authoritative:
+                tasks = fb_decomp["tasks"]
+                milestone_title = fb_decomp["title"]
+            why = fb_decomp["why"]
+            how = fb_decomp["how"]
+            who_where = fb_decomp["who_where"]
+            when_acceptance_list = fb_decomp.get("when_acceptance") or fb_decomp.get("acceptance_criteria")
+            visual_asset_spec = fb_decomp["visual_asset_spec"]
+            visual_approved = fb_decomp["visual_approved"]
+            plan_qcs = fb_decomp.get("quality_contracts") or plan_qcs
 
         elif domain == "mobile_app":
             if is_v1:
@@ -1937,26 +2847,41 @@ class Commander:
             )
             visual_approved = True
 
+        if not tasks and has_numbered_items and has_new_product_spec:
+            extracted_items = []
+            for line in clean_user_p.splitlines():
+                m = re.match(r'^\s*(?:\d+[.)]|[①-⑩]|[-*•])\s*(.+)', line)
+                if m:
+                    it = m.group(1).strip()
+                    if len(it) >= 2:
+                        extracted_items.append(f"{it} 구현 및 연동")
+            if extracted_items:
+                tasks = extracted_items
+
         what_list = list(tasks) if tasks else [
             f"{milestone_title} 핵심 비즈니스 로직 및 인터랙션 구현",
             "반응형 UI 레이아웃 및 사용자 데이터 영속화",
             "예외 방어 및 안정성 보강"
         ]
 
-        when_list = [
-            "1. 컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
-            f"2. {milestone_title} 명시된 기능 스펙 디스크 소스코드 상에 실체 구현 완료 (스텁/TODO/가짜 목업 엄격 배제)",
-            "3. 엣지 케이스 및 예외 처리 방어 (비정상 입력/대용량 데이터/I/O 실패 복원력)",
-            "4. 콘솔 오류 및 런타임 크래시 0건 (실사용 반응성 및 60fps 무결점 작동)",
-            "5. ⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
-        ]
+        if when_acceptance_list:
+            when_list = list(when_acceptance_list)
+        else:
+            when_list = [
+                "1. 컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
+                f"2. {milestone_title} 명시된 기능 스펙 디스크 소스코드 상에 실체 구현 완료 (스텁/TODO/가짜 목업 엄격 배제)",
+                "3. 엣지 케이스 및 예외 처리 방어 (비정상 입력/대용량 데이터/I/O 실패 복원력)",
+                "4. 콘솔 오류 및 런타임 크래시 0건 (실사용 반응성 및 60fps 무결점 작동)",
+                "5. ⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
+            ]
 
-        qcs = QualityStateManager.generate_domain_default_qcs(
-            domain=domain,
-            title=milestone_title,
-            tasks=what_list,
-            milestone_version=milestone_version
-        )
+        if not plan_qcs:
+            plan_qcs = QualityStateManager.generate_domain_default_qcs(
+                domain=domain,
+                title=milestone_title,
+                tasks=what_list,
+                milestone_version=milestone_version
+            )
 
         plan = Milestone5W1HPlan(
             version=milestone_version,
@@ -1970,7 +2895,7 @@ class Commander:
             visual_asset_spec=visual_asset_spec,
             visual_approved=visual_approved,
             source="heuristic",
-            quality_contracts=qcs,
+            quality_contracts=plan_qcs,
             delta_analysis=delta_analysis,
             thinking_process=thinking_process
         )
@@ -1989,7 +2914,9 @@ class Commander:
         domain: Optional[str] = None,
         workspace: Optional[str] = None,
         user_prompt: str = "",
-        macro_memory_text: str = ""
+        macro_memory_text: str = "",
+        project_initialized: Optional[bool] = None,
+        preserve_caller_milestone: bool = False
     ) -> Milestone5W1HPlan:
         """
         [5W1H Strategic Milestone Planning Engine]
@@ -2008,7 +2935,9 @@ class Commander:
             domain=dom,
             workspace=workspace,
             user_prompt=user_prompt,
-            macro_memory_text=macro_memory_text
+            macro_memory_text=macro_memory_text,
+            project_initialized=project_initialized,
+            preserve_caller_milestone=preserve_caller_milestone
         )
 
         user_priority_rule = ""
@@ -2075,22 +3004,52 @@ class Commander:
                 if s_idx != -1 and e_idx != -1 and e_idx > s_idx:
                     data = json.loads(cleaned[s_idx:e_idx+1])
                     if isinstance(data, dict) and data.get("why") and data.get("what"):
-                        target_title = str(data.get("title", "")).strip() or heuristic_plan.title or milestone_title
+                        is_feedback_mode = ("사용자 피드백" in (heuristic_plan.title or "") or "사용자 피드백" in (milestone_title or ""))
+                        if is_feedback_mode or preserve_caller_milestone:
+                            # [🔒 Anti-Hallucination Lock & Authority Gate]:
+                            # When caller explicitly preserved the milestone or user feedback directive is active,
+                            # title and what are strictly anchored to the authoritative heuristic plan.
+                            target_title = heuristic_plan.title
+                            target_what = heuristic_plan.what
+                        else:
+                            # Post-guard for regular milestones: prevent hallucinated titles via generalized vocabulary overlap & version coherence
+                            ai_title_candidate = str(data.get("title", "")).strip()
+                            is_phantom = FeedbackIntentClassifier.is_phantom_or_divergent(
+                                candidate_title=ai_title_candidate,
+                                expected_title=heuristic_plan.title or milestone_title,
+                                expected_version=milestone_version,
+                                user_prompt=user_prompt or ""
+                            )
+                            if is_phantom or not ai_title_candidate:
+                                target_title = heuristic_plan.title or milestone_title
+                                target_what = heuristic_plan.what
+                            else:
+                                target_title = ai_title_candidate
+                                target_what = list(data["what"]) if isinstance(data["what"], list) and len(data["what"]) >= 2 else heuristic_plan.what
+
                         parsed_qcs = data.get("quality_contracts")
                         if not parsed_qcs or not isinstance(parsed_qcs, list):
                             parsed_qcs = heuristic_plan.quality_contracts
+
+                        is_locked = is_feedback_mode or preserve_caller_milestone
+                        why, how, who_where, when_acceptance, visual_asset_spec, visual_approved = cls._validate_and_anchor_5w1h_fields(
+                            data=data,
+                            heuristic_plan=heuristic_plan,
+                            user_prompt=user_prompt or "",
+                            is_feedback_or_locked=is_locked
+                        )
 
                         ai_plan = Milestone5W1HPlan(
                             version=milestone_version,
                             title=target_title,
                             domain=dom,
-                            why=str(data["why"]).strip(),
-                            what=list(data["what"]) if isinstance(data["what"], list) else heuristic_plan.what,
-                            how=str(data.get("how", heuristic_plan.how)).strip(),
-                            who_where=str(data.get("who_where", heuristic_plan.who_where)).strip(),
-                            when_acceptance=list(data.get("when_acceptance", heuristic_plan.when_acceptance)) if isinstance(data.get("when_acceptance"), list) else heuristic_plan.when_acceptance,
-                            visual_asset_spec=str(data.get("visual_asset_spec", heuristic_plan.visual_asset_spec)).strip(),
-                            visual_approved=bool(data.get("visual_approved", heuristic_plan.visual_approved)),
+                            why=why,
+                            what=target_what,
+                            how=how,
+                            who_where=who_where,
+                            when_acceptance=when_acceptance,
+                            visual_asset_spec=visual_asset_spec,
+                            visual_approved=visual_approved,
                             source="ai",
                             quality_contracts=parsed_qcs
                         )
@@ -2113,7 +3072,9 @@ class Commander:
         domain: Optional[str] = None,
         workspace: Optional[str] = None,
         user_prompt: str = "",
-        macro_memory_text: str = ""
+        macro_memory_text: str = "",
+        project_initialized: Optional[bool] = None,
+        preserve_caller_milestone: bool = False
     ) -> Milestone5W1HPlan:
         """Synchronous entry point for 5W1H milestone planning."""
         from product_planner import AutonomousProductPlanner
@@ -2125,7 +3086,9 @@ class Commander:
             domain=dom,
             workspace=workspace,
             user_prompt=user_prompt,
-            macro_memory_text=macro_memory_text
+            macro_memory_text=macro_memory_text,
+            project_initialized=project_initialized,
+            preserve_caller_milestone=preserve_caller_milestone
         )
 
     @classmethod
@@ -2143,6 +3106,7 @@ class Commander:
         """
         [Mode 3 Macro Orchestration Mandate]
         Synthesizes a razor-sharp, isolated 5W1H milestone directive for Coder & QA.
+        Preserves caller's authoritative milestone title and tasks.
         """
         plan = cls.plan_milestone_5w1h(
             milestone_title=milestone_title,
@@ -2151,7 +3115,8 @@ class Commander:
             domain=domain,
             workspace=workspace,
             user_prompt=user_prompt,
-            macro_memory_text=macro_memory_text
+            macro_memory_text=macro_memory_text,
+            preserve_caller_milestone=True
         )
         return plan.directive_for_coder
 
@@ -2184,6 +3149,418 @@ class Commander:
         else:
             return f"v{max_maj + 1}.0"
 
+    # ── Feedback Capability Delivery Guard (중복 기획 원천 차단) ─────────────
+    _FEEDBACK_AREA_KEYWORDS: Dict[str, tuple] = {
+        # Legacy areas
+        "brand_renewal": ("브랜드", "로고", "앱 이름", "앱명", "팔레트", "컬러", "리뉴얼", "브랜드 테마"),
+        "button_readability": ("버튼", "가독성", "wcag", "48dp", "고대비", "터치 타깃"),
+        "inplace_text_edit": ("인플레이스", "in-place", "텍스트 스트림", "no-ocr", "원본 텍스트", "글자 수정", "content stream"),
+        "lossless_save": ("무손실", "내보내기", "손실 없", "lossless"),
+        # New 5-point areas (Dynamic & Comprehensive user feedback)
+        "design_cohesion": ("디자인", "통일성", "연결성", "매칭", "디자인 시스템", "일관성", "디자인 통일성"),
+        "naming_rebrand": ("명칭", "리브랜딩", "도큐크래프트", "docucraft", "앱 이름", "신규 브랜드", "이름"),
+        "icon_renewal": ("아이콘", "그레이톤", "라이트 그레이", "gray", "icon", "런처 아이콘"),
+        "dashboard_actions": ("대시보드", "메인 화면", "홈 화면", "메인 페이지", "4대", "열기", "빈페이지", "합치기", "변환하기"),
+        "crash_stability": ("크래시", "튕김", "튕겨", "안정성", "crash", "비정상 종료", "최적화"),
+    }
+    _FEEDBACK_AREA_COMPONENTS: Dict[str, set] = {
+        "brand_renewal": {"brandbuttons", "branddesignsystem", "brandlogo"},
+        "button_readability": {"brandbuttons", "brandbutton"},
+        "inplace_text_edit": {"pdfcontentstreameditor", "textsizelabels", "directtexteditdialog"},
+        "lossless_save": {"pdfexportengine", "pdfexportmanager", "pdfsavewithpassworddialog"},
+        "design_cohesion": {"branddesignsystem", "semanticuitoken", "nightreadingtheme", "designsystem"},
+        "naming_rebrand": {"branddesignsystem", "brandlogo", "rebrand"},
+        "icon_renewal": {"ic_launcher", "brandlogo", "appicon"},
+        "dashboard_actions": {"maindashboard", "dashboardscreen", "actionbuttons", "dashboard"},
+        "crash_stability": {"rebuiltpdfstructuretest", "atomicjsonstore", "safepdf", "pdfdocumenthandler"},
+    }
+
+    @classmethod
+    def _delivered_feedback_areas(
+        cls,
+        reality: Optional[CodebaseReality] = None,
+        macro_memory_text: str = "",
+        workspace: Optional[str] = None,
+    ) -> set:
+        """Detects which user-feedback capabilities are ALREADY delivered.
+
+        Evidence sources (never the static root goal, so a completed milestone is
+        never re-planned):
+          1. Components physically present on disk (CodebaseReality).
+          2. Completed milestone headers recorded in ROADMAP.md.
+          3. Macro cycle memory (Commander directive / Auditor conclusion).
+        """
+        if reality is None:
+            reality = cls.inspect_codebase_reality(workspace)
+
+        try:
+            comps = {str(c).lower() for c in (reality.implemented_components or [])}
+        except Exception:
+            comps = set()
+
+        recorded = " ".join([
+            " ".join(reality.completed_milestones or []),
+            macro_memory_text or "",
+        ]).lower()
+
+        delivered: set = set()
+        for area, keywords in cls._FEEDBACK_AREA_KEYWORDS.items():
+            if cls._FEEDBACK_AREA_COMPONENTS.get(area, set()) & comps:
+                delivered.add(area)
+            elif any(k.lower() in recorded for k in keywords):
+                delivered.add(area)
+        return delivered
+
+    @classmethod
+    def _is_user_feedback_delivered(
+        cls,
+        user_prompt: str,
+        reality: Optional[CodebaseReality] = None,
+        macro_memory_text: str = "",
+        workspace: Optional[str] = None,
+    ) -> bool:
+        """
+        [Defect 1 Guard] Determines whether the user feedback directive has already been delivered.
+        Avoids infinite re-planning of identical feedback across consecutive cycles in !mode 3.
+        """
+        if not user_prompt:
+            return False
+
+        if reality is None:
+            reality = cls.inspect_codebase_reality(workspace)
+
+        prompt_low = user_prompt.lower()
+        recorded = " ".join([
+            " ".join(reality.completed_milestones or []),
+            macro_memory_text or "",
+        ]).lower()
+
+        # 1. Check legacy feedback goal
+        is_legacy = ("글자를 넣어도 크기가 조절되지 않는" in prompt_low or "첨부파일 컬러 팔레트" in prompt_low)
+        delivered_areas = cls._delivered_feedback_areas(reality, macro_memory_text, workspace)
+        if is_legacy:
+            legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
+            return legacy_areas.issubset(delivered_areas)
+
+        # 2. Decompose user feedback to obtain dynamic signature
+        decomp = cls.decompose_user_feedback(user_prompt, workspace=workspace)
+        target_title = (decomp.get("title") or "").strip().lower()
+        title_core = target_title.replace("사용자 피드백 긴급 반영:", "").strip()
+
+        # Direct title or core check in recorded completed milestones or macro memory
+        if title_core and title_core in recorded:
+            return True
+
+        for done_title in (reality.completed_milestones or []):
+            try:
+                from roadmap_manager import capability_similarity
+                if capability_similarity(decomp.get("title", ""), done_title) >= 0.55:
+                    return True
+            except Exception:
+                pass
+
+        # 3. Check dynamic active areas
+        active_areas = {
+            area for area, keywords in cls._FEEDBACK_AREA_KEYWORDS.items()
+            if any(k.lower() in prompt_low for k in keywords)
+        }
+        if active_areas and active_areas.issubset(delivered_areas):
+            return True
+
+        return False
+
+    @classmethod
+    def _feedback_all_delivered(
+        cls,
+        reality: Optional[CodebaseReality] = None,
+        macro_memory_text: str = "",
+        workspace: Optional[str] = None,
+    ) -> bool:
+        delivered = cls._delivered_feedback_areas(reality, macro_memory_text, workspace)
+        legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
+        new_areas = {"design_cohesion", "naming_rebrand", "icon_renewal", "dashboard_actions", "crash_stability"}
+        return legacy_areas.issubset(delivered) or new_areas.issubset(delivered) or len(delivered) >= 4
+
+    @classmethod
+    def _feedback_signature_matches(cls, text: str) -> bool:
+        """True when a plan/title reads like the bundle of user-feedback capabilities."""
+        low = (text or "").lower()
+        hits = sum(
+            1 for keywords in cls._FEEDBACK_AREA_KEYWORDS.values()
+            if any(k.lower() in low for k in keywords)
+        )
+        return hits >= 3
+
+    @classmethod
+    def _is_duplicate_of_completed_capability(
+        cls,
+        plan: "Milestone5W1HPlan",
+        reality: Optional[CodebaseReality] = None,
+        macro_memory_text: str = "",
+        workspace: Optional[str] = None,
+    ) -> bool:
+        """Rejects a freshly synthesized plan that merely repeats delivered work."""
+        if plan is None:
+            return False
+
+        combined = f"{plan.title} {' '.join(plan.what or [])}"
+        if cls._feedback_signature_matches(combined) and cls._feedback_all_delivered(
+            reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+        ):
+            return True
+
+        try:
+            from roadmap_manager import capability_similarity
+        except Exception:
+            return False
+
+        if reality is None:
+            reality = cls.inspect_codebase_reality(workspace)
+        for done_title in (reality.completed_milestones or []):
+            if capability_similarity(plan.title, done_title) >= 0.6:
+                return True
+        return False
+
+    @classmethod
+    def _reconcile_completed_ledger(
+        cls,
+        reality: CodebaseReality,
+        macro_memory_text: str = "",
+        workspace: Optional[str] = None,
+    ) -> CodebaseReality:
+        """Marks delivered capabilities DONE in ROADMAP.md and refreshes reality.
+
+        디스크에 실구현된 역량은 ROADMAP 원장에서도 완료로 체크하여, 승인 라운드에서
+        체크가 누락되었더라도 동일 작업이 재기획되지 않게 한다.
+        """
+        try:
+            from roadmap_manager import RoadmapManager
+            delivered_now = cls._delivered_feedback_areas(
+                reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+            )
+            legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
+            new_areas = {"design_cohesion", "naming_rebrand", "icon_renewal", "dashboard_actions", "crash_stability"}
+            if not (legacy_areas.issubset(delivered_now) or new_areas.issubset(delivered_now) or len(delivered_now) >= 4):
+                return reality
+
+            rm = RoadmapManager(workspace)
+            marked = rm.reconcile_delivered_capabilities(
+                lambda title, tasks: cls._feedback_signature_matches(f"{title} {' '.join(tasks)}")
+            )
+            if marked:
+                logger.info(f"[Commander] 실구현 원장 동기화: {marked} 개 마일스톤 [x] 처리 완료")
+                return cls.inspect_codebase_reality(workspace)
+        except Exception as e:
+            logger.debug(f"[Commander] reconcile completed ledger notice: {e}")
+        return reality
+
+    @classmethod
+    def _discover_signal_gap(
+        cls,
+        reality: CodebaseReality,
+        domain: str,
+        workspace: Optional[str],
+    ):
+        """Reads the real code/signals on disk to find the single top-priority gap."""
+        try:
+            from gap_signal_scanner import GapSignalScanner
+            return GapSignalScanner.select_next(
+                workspace,
+                domain,
+                source_files=reality.source_files,
+                test_files=reality.test_files,
+            )
+        except Exception as e:
+            logger.debug(f"[Commander] gap signal scan notice: {e}")
+            return None
+
+    @classmethod
+    def _build_signal_hardening_plan(
+        cls,
+        signal,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> "Milestone5W1HPlan":
+        """Builds a deterministic milestone that closes a disk-observed signal gap."""
+        title = signal.title
+        what = list(signal.actions) or [signal.detail]
+        why = (
+            f"디스크 코드/신호 실사에서 [{signal.area}] 결손이 감지되었습니다: {signal.detail} "
+            f"문서상 계획이 아니라 실제 코드 상태를 근거로 이 결손을 최우선 해소합니다."
+        )
+        delta = f"디스크 실사 신호 기반 결손 [{signal.area}] 타깃팅 (근거: {signal.evidence})"
+        thinking = (
+            f"1. [Observation & Ground Truth] (Code/Signal Reality): 디스크 실사에서 {signal.area} 결손 감지 — {signal.evidence}\n"
+            f"2. [Delta & Blocker Analysis]: Value x Risk x Cost 우선순위 {signal.priority} (severity={signal.severity})\n"
+            f"3. [Single-Action Scope Guard]: '{title}' 단 하나의 결손에만 집중하고 부수 기능 확장 금지\n"
+            f"4. [Verification Contract]: {len(what)}개 조치 항목을 기계적으로 검증"
+        )
+        plan = cls._build_heuristic_5w1h_plan(
+            milestone_title=title,
+            milestone_version=target_version,
+            tasks=what,
+            domain=domain,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+            delta_analysis=delta,
+            thinking_process=thinking,
+        )
+        plan.why = why
+        plan.source = "signal"
+        plan.directive_for_coder = plan.build_directive_for_coder(macro_memory_text=macro_memory_text)
+        return plan
+
+    # ── Depth-First Product Refinement Governor (스코프 크립 원천 차단) ──────
+    # 사용자 핵심 우려: "A,B,C 만들었네? 그럼 D 만들자" 식의 무한 확장 차단.
+    # 제품이 충분한 폭(컴포넌트 ≥6, 승인 마일스톤 ≥2)에 도달했는데도
+    # 체감 심도(애니메이션·상태 커버리지·접근성·CS·상품성)가 낮으면,
+    # 신규 확장(EXPAND)을 금지하고 기존 기능 심화(DEEPEN, A1/B1/C1)만 발주한다.
+    _DEPTH_MIN_COMPONENTS = 6
+    _DEPTH_MIN_COMPLETED = 2
+
+    @classmethod
+    def _evaluate_depth_governor(cls, reality, domain: str, workspace: Optional[str]):
+        """Returns a product-maturity-gated DepthVerdict (or None on any failure)."""
+        try:
+            from product_refinement_governor import ProductRefinementGovernor
+            verdict = ProductRefinementGovernor.evaluate(workspace, domain, reality=reality)
+        except Exception as e:
+            logger.debug(f"[Commander] depth governor notice: {e}")
+            return None
+
+        comps = len(getattr(reality, "implemented_components", []) or [])
+        done = len(getattr(reality, "completed_milestones", []) or [])
+        if comps < cls._DEPTH_MIN_COMPONENTS or done < cls._DEPTH_MIN_COMPLETED:
+            # 아직 폭/이력이 성숙하지 않음 → 코어 구축 및 역량 확장을 허용한다.
+            if verdict is not None:
+                verdict.requires_depth = False
+                verdict.gap = None
+                # 미성숙 프로젝트는 런타임 증거 부재로 확장을 막지 않는다(코어 구축 우선).
+                verdict.evidence_missing = False
+        if verdict is not None:
+            logger.info(
+                f"[Commander] Depth Governor: score={verdict.depth_score:.1f}% "
+                f"bar={verdict.bar:.0f}% requires_depth={verdict.requires_depth} "
+                f"grade={verdict.evidence_grade} evidence_missing={getattr(verdict, 'evidence_missing', False)} "
+                f"runtime_verified={verdict.runtime_verified} "
+                f"partial={getattr(verdict, 'runtime_verified_partial', [])} "
+                f"stale={getattr(verdict, 'stale_discarded', [])} "
+                f"runtime_failed={verdict.runtime_failed}"
+            )
+        return verdict
+
+    @classmethod
+    def _build_depth_refinement_plan(
+        cls,
+        gap,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> "Milestone5W1HPlan":
+        """Builds a deterministic DEEPEN milestone that lifts the existing surface's depth."""
+        title = gap.title
+        what = list(gap.actions) or [gap.detail]
+        why = (
+            f"기존 표면의 제품 심도가 기준선 미만입니다: {gap.detail} "
+            f"새 기능(D)을 늘리는 대신 기존 기능을 A1/B1/C1으로 심화하여 "
+            f"체감 품질(쫀득한 동작·실사용 완성도·유지보수성)을 끌어올립니다."
+        )
+        delta = f"심도 우선(DEPTH-FIRST) 결손 [{gap.area}] 타깃팅 (근거: {gap.evidence})"
+        thinking = (
+            f"1. [Observation & Ground Truth] (Product Depth Reality): 기존 표면 심도 결손 [{gap.area}] 감지 — {gap.evidence}\n"
+            f"2. [Delta & Blocker Analysis]: Value x Risk x Cost 우선순위 {gap.priority} (severity={gap.severity})\n"
+            f"3. [Single-Action Scope Guard]: '{title}' 단 하나의 심화에만 집중하고 신규 기능 확장(D) 전면 금지\n"
+            f"4. [Verification Contract]: {len(what)}개 조치 및 기계적 QC 계약으로 완결 검증\n"
+            f"5. [Depth-First Policy]: 기존 표면 심도 기준선(80%) 통과 시에만 다음 역량 확장 허용"
+        )
+        plan = cls._build_heuristic_5w1h_plan(
+            milestone_title=title,
+            milestone_version=target_version,
+            tasks=what,
+            domain=domain,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+            delta_analysis=delta,
+            thinking_process=thinking,
+        )
+        plan.why = why
+        plan.source = "depth"
+        if getattr(gap, "verification", None):
+            plan.when_acceptance = list(plan.when_acceptance) + list(gap.verification)
+        plan.directive_for_coder = plan.build_directive_for_coder(macro_memory_text=macro_memory_text)
+        return plan
+
+    @classmethod
+    def _apply_depth_gate(
+        cls,
+        heuristic_plan: "Milestone5W1HPlan",
+        depth_verdict,
+        reality,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> "Milestone5W1HPlan":
+        """Replaces a breadth-expansion heuristic with a depth-refinement plan when required."""
+        if depth_verdict is None:
+            return heuristic_plan
+        from product_refinement_governor import ProductRefinementGovernor
+        if getattr(depth_verdict, "requires_depth", False):
+            if getattr(depth_verdict, "gap", None) is None:
+                return heuristic_plan
+            try:
+                kind = ProductRefinementGovernor.classify(
+                    heuristic_plan.title, heuristic_plan.what, reality.implemented_components
+                )
+                if kind == "deepen":
+                    return heuristic_plan
+            except Exception:
+                pass
+            depth_plan = cls._build_depth_refinement_plan(
+                depth_verdict.gap, domain, target_version, workspace, macro_memory_text
+            )
+            logger.info(
+                f"[Commander] 심도 우선 강제: 기존 '{heuristic_plan.title}' 대신 "
+                f"심화 마일스톤 '{depth_plan.title}' 발주 (depth={depth_verdict.depth_score:.0f}%)"
+            )
+            return depth_plan
+        # [D2 fail-closed] 정적 기준선 통과라도 런타임 증거가 없으면 신규 확장을 승인하지 않는다.
+        if getattr(depth_verdict, "evidence_missing", False):
+            try:
+                kind = ProductRefinementGovernor.classify(
+                    heuristic_plan.title, heuristic_plan.what, reality.implemented_components
+                )
+            except Exception:
+                kind = "expand"
+            if kind != "deepen":
+                gap = ProductRefinementGovernor.runtime_verification_gap(depth_verdict)
+                verify_plan = cls._build_depth_refinement_plan(
+                    gap, domain, target_version, workspace, macro_memory_text
+                )
+                logger.warning(
+                    "[Commander] 런타임 증거 부재 → 신규 확장 계획 대신 런타임 검증 마일스톤 발주 "
+                    f"(기존 '{heuristic_plan.title}', kind={kind})"
+                )
+                return verify_plan
+        return heuristic_plan
+
+    @classmethod
+    def _persist_adaptive_plan(cls, workspace: Optional[str], plan: "Milestone5W1HPlan") -> None:
+        try:
+            from roadmap_manager import RoadmapManager
+            rm = RoadmapManager(workspace)
+            rm.append_or_update_adaptive_milestone(
+                version=plan.version,
+                title=plan.title,
+                tasks=plan.what,
+                status="IN_PROGRESS",
+            )
+        except Exception as rm_err:
+            logger.debug(f"Adaptive roadmap sync notice: {rm_err}")
+
     @classmethod
     def _build_heuristic_adaptive_plan(
         cls,
@@ -2200,33 +3577,46 @@ class Commander:
         """
         comps = set(c.lower() for c in reality.implemented_components)
         p_lower = root_user_goal.lower()
+        quality_contracts: List[Dict[str, Any]] = []
 
         # 0. User Feedback & Directive Priority: User directives always supersede autonomous ladders
-        has_design_req = any(k in p_lower for k in ["로고", "이름", "디자인", "컬러", "색상", "버튼", "가독성", "ui", "룩앤필", "스타일", "팔레트"])
-        has_edit_req = any(k in p_lower for k in ["edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr"])
-        has_feedback = any(k in p_lower for k in ["별로", "퀄리티", "개선", "피드백", "반영", "바꿔", "떨어", "높여"])
-
-        if has_design_req or has_edit_req or has_feedback:
-            title = "사용자 피드백 긴급 반영: 브랜드 리뉴얼(로고·앱명·컬러), 버튼 가독성 개선 및 PDF 원본 텍스트 직접 편집"
-            what = []
-            if has_design_req:
-                what.append("첨부파일 컬러 팔레트 기반 브랜드 테마, 신규 로고 및 앱 이름 리뉴얼")
-                what.append("UI 버튼 시인성 및 가독성 고대비 최적화 (WCAG AA 명도 대비 준수 및 터치 타깃 48dp)")
-            if has_edit_req:
-                what.append("기존 PDF 내 원본 텍스트 스트림 직접 수정(In-place Text Stream Editing, No-OCR) 엔진 구현")
-                what.append("수정된 텍스트 및 레이아웃의 실시간 렌더링 및 무손실 파일 저장/내보내기 검증")
-            if not what:
-                what.append(f"사용자 피드백 지시사항 실체 구현 ({root_user_goal[:60]})")
-            what.append("기능 수정 회귀 방어 및 런타임 크래시 0건 검증")
-
-            how = "첨부파일 컬러 토큰 추출 적용, 버튼 고대비 컴포넌트 리팩토링, PDF Content Stream 파싱 및 Tj/TJ 텍스트 연산자 직접 치환 엔진을 적용합니다."
-            why = "사용자가 제기한 피드백을 최우선 반영하여, 불만족스러웠던 로고/앱 이름/디자인 시각 완성도와 버튼 가독성을 대폭 개선하고, 기존 PDF 원본 문서 내 텍스트를 OCR 없이 직접 수정하는 핵심 기능을 완결하기 위함입니다."
-            visual_asset_spec = (
-                "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
-                "• Type A: 첨부파일 컬러 팔레트를 반영한 세련된 신규 브랜드 로고 및 앱 아이콘 일러스트 생성\n"
-                "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
-            )
-            visual_approved = True
+        intent_verdict = FeedbackIntentClassifier.classify(root_user_goal, project_initialized=True)
+        has_root_feedback = (
+            intent_verdict.has_feedback_signal
+            or intent_verdict.intent_type in ("defect", "design")
+            or any(k in p_lower for k in ["edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr", "리브랜딩", "앱명", "아이콘", "그레이톤", "대시보드"])
+        )
+        is_legacy_feedback_goal = ("글자를 넣어도 크기가 조절되지 않는" in p_lower or "첨부파일 컬러 팔레트" in p_lower)
+        feedback_delivered = cls._is_user_feedback_delivered(
+            root_user_goal, reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+        )
+        if has_root_feedback and not feedback_delivered:
+            if is_legacy_feedback_goal:
+                title = "사용자 피드백 긴급 반영: 브랜드 리뉴얼(로고·앱명·컬러), 버튼 가독성 개선 및 PDF 원본 텍스트 직접 편집"
+                what = [
+                    "첨부파일 컬러 팔레트 기반 브랜드 테마, 신규 로고 및 앱 이름 리뉴얼",
+                    "UI 버튼 시인성 및 가독성 고대비 최적화 (WCAG AA 명도 대비 준수 및 터치 타깃 48dp)",
+                    "기존 PDF 내 원본 텍스트 스트림 직접 수정(In-place Text Stream Editing, No-OCR) 엔진 구현",
+                    "수정된 텍스트 및 레이아웃의 실시간 렌더링 및 무손실 파일 저장/내보내기 검증",
+                    "기능 수정 회귀 방어 및 런타임 크래시 0건 검증"
+                ]
+                how = "첨부파일 컬러 토큰 추출 적용, 버튼 고대비 컴포넌트 리팩토링, PDF Content Stream 파싱 및 Tj/TJ 텍스트 연산자 직접 치환 엔진을 적용합니다."
+                why = "사용자가 제기한 피드백을 최우선 반영하여, 불만족스러웠던 로고/앱 이름/디자인 시각 완성도와 버튼 가독성을 대폭 개선하고, 기존 PDF 원본 문서 내 텍스트를 OCR 없이 직접 수정하는 핵심 기능을 완결하기 위함입니다."
+                visual_asset_spec = (
+                    "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
+                    "• Type A: 첨부파일 컬러 팔레트를 반영한 세련된 신규 브랜드 로고 및 앱 아이콘 일러스트 생성\n"
+                    "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
+                )
+                visual_approved = True
+            else:
+                fb_decomp = cls.decompose_user_feedback(root_user_goal, workspace=workspace, domain=domain)
+                title = fb_decomp["title"]
+                what = fb_decomp["tasks"]
+                how = fb_decomp["how"]
+                why = fb_decomp["why"]
+                visual_asset_spec = fb_decomp["visual_asset_spec"]
+                visual_approved = fb_decomp["visual_approved"]
+                quality_contracts = fb_decomp.get("quality_contracts") or []
 
         # 1. Game Domain (e.g. Avoid Apples / Arcade Dodge / Sonic / Mario / Platformer)
         elif domain == "game" or any(k in p_lower for k in ["게임", "game", "사과", "피하기", "낙하", "dodge", "소닉", "마리오", "플랫포머"]):
@@ -2506,7 +3896,8 @@ class Commander:
             user_prompt=f"사용자 원본 목표: {root_user_goal}\n\n{why}",
             macro_memory_text=macro_memory_text,
             delta_analysis=delta_summary,
-            thinking_process=thinking_process
+            thinking_process=thinking_process,
+            quality_contracts=quality_contracts
         )
 
     @classmethod
@@ -2526,20 +3917,76 @@ class Commander:
         from product_planner import AutonomousProductPlanner
         dom = domain or AutonomousProductPlanner.detect_domain(root_user_goal, workspace)
         reality = cls.inspect_codebase_reality(workspace)
+        reality = cls._reconcile_completed_ledger(reality, macro_memory_text, workspace)
         target_version = cls._compute_next_version(reality)
 
-        # Baseline heuristic
-        heuristic_plan = cls._build_heuristic_adaptive_plan(
-            root_user_goal=root_user_goal,
-            reality=reality,
-            domain=dom,
-            target_version=target_version,
-            workspace=workspace,
-            macro_memory_text=macro_memory_text
+        # Baseline heuristic with circuit breaker
+        try:
+            heuristic_plan = cls._build_heuristic_adaptive_plan(
+                root_user_goal=root_user_goal,
+                reality=reality,
+                domain=dom,
+                target_version=target_version,
+                workspace=workspace,
+                macro_memory_text=macro_memory_text
+            )
+        except Exception as plan_err:
+            logger.error(f"[Commander] Adaptive heuristic planning fallback: {plan_err}", exc_info=True)
+            heuristic_plan = cls._build_heuristic_5w1h_plan(
+                milestone_title="사용자 요구사항 구현 및 품질 안정화",
+                milestone_version=target_version,
+                tasks=["핵심 비즈니스 로직 및 컴포넌트 실체 구현", "빌드 무결점 및 런타임 에러 0건 검증"],
+                domain=dom,
+                workspace=workspace,
+                user_prompt=root_user_goal,
+                macro_memory_text=macro_memory_text
+            )
+
+        # [Depth-First Product Refinement] 기존 표면 심도가 낮으면 신규 확장(D) 대신
+        # 기존 기능 심화(A1/B1/C1)를 강제한다 (스코프 크립 원천 차단).
+        depth_verdict = cls._evaluate_depth_governor(reality, dom, workspace)
+        heuristic_plan = cls._apply_depth_gate(
+            heuristic_plan, depth_verdict, reality, dom, target_version, workspace, macro_memory_text
         )
+        depth_brief = ""
+        try:
+            from product_refinement_governor import ProductRefinementGovernor
+            depth_brief = ProductRefinementGovernor.to_brief(depth_verdict)
+        except Exception:
+            depth_brief = ""
+
+        # [Code/Signal-Driven Gap Discovery] 문서(PRD/ROADMAP)가 아니라 디스크의 실제
+        # 코드/신호(테스트 실패·Lint Error·크래시 로그·스텁 잔재)에서 결손을 찾는다.
+        signal_gap = cls._discover_signal_gap(reality, dom, workspace)
+
+        # 고위험(high) 신호 결손은 역량 진화보다 우선하여 결정론적으로 하드닝 마일스톤을 발주한다.
+        if signal_gap is not None and signal_gap.severity == "high":
+            try:
+                plan = cls._build_signal_hardening_plan(
+                    signal_gap, dom, target_version, workspace, macro_memory_text
+                )
+                cls._persist_adaptive_plan(workspace, plan)
+                logger.info(
+                    f"[Commander] 코드/신호 기반 결손 우선 발주: [{signal_gap.area}] {signal_gap.title} "
+                    f"(priority={signal_gap.priority}, evidence={signal_gap.evidence})"
+                )
+                return plan
+            except Exception as sig_err:
+                logger.warning(f"[Commander] signal hardening plan fallback: {sig_err}")
 
         completed_str = ", ".join(reality.completed_milestones) if reality.completed_milestones else "없음 (최초 마일스톤)"
         comps_str = ", ".join(reality.implemented_components[:25]) if reality.implemented_components else "없음 (초기 상태)"
+        delivered_areas = cls._delivered_feedback_areas(
+            reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+        )
+        delivered_feedback_str = ", ".join(sorted(delivered_areas)) if delivered_areas else "없음 (아직 미전달)"
+
+        signal_brief = "없음 (디스크 코드/신호상 미해결 결손 없음)"
+        if signal_gap is not None:
+            signal_brief = (
+                f"[{signal_gap.area}/{signal_gap.severity}] {signal_gap.title} "
+                f"(priority={signal_gap.priority}) — {signal_gap.evidence}"
+            )
 
         # Fetch Ground-Truth Quality State Store for closed-loop closed-delta feedback
         quality_state_summary = QualityStateManager.format_state_summary_for_commander(workspace)
@@ -2554,6 +4001,14 @@ class Commander:
             f"{comps_str}\n\n"
             f"[COMPLETED MILESTONES SO FAR]:\n"
             f"{completed_str}\n\n"
+            f"[ALREADY DELIVERED USER-FEEDBACK CAPABILITIES]:\n"
+            f"{delivered_feedback_str}\n"
+            f"(The above are ALREADY DONE on disk. NEVER re-propose them; plan the single NEXT un-delivered capability.)\n\n"
+            f"[DEPTH-FIRST PRODUCT REFINEMENT GOVERNOR]:\n"
+            f"{depth_brief}\n\n"
+            f"[DISK CODE/SIGNAL GAP DISCOVERY]:\n"
+            f"{signal_brief}\n"
+            f"(This gap was read from real code/logs on disk. When it is the highest Value x Risk x Cost target, close it first.)\n\n"
             f"{quality_state_summary}\n\n"
             f"[MACRO CYCLE HISTORY]:\n"
             f"{macro_memory_text[:1200] if macro_memory_text else 'None'}\n\n"
@@ -2625,18 +4080,43 @@ class Commander:
                         if not parsed_qcs or not isinstance(parsed_qcs, list):
                             parsed_qcs = heuristic_plan.quality_contracts
 
+                        is_locked = "사용자 피드백" in (heuristic_plan.title or "")
+                        if is_locked:
+                            target_title = heuristic_plan.title
+                            target_what = heuristic_plan.what
+                        else:
+                            ai_title_candidate = str(data.get("title", "")).strip()
+                            is_phantom = FeedbackIntentClassifier.is_phantom_or_divergent(
+                                candidate_title=ai_title_candidate,
+                                expected_title=heuristic_plan.title,
+                                expected_version=target_version,
+                                user_prompt=root_user_goal or ""
+                            )
+                            if is_phantom or not ai_title_candidate:
+                                target_title = heuristic_plan.title
+                                target_what = heuristic_plan.what
+                            else:
+                                target_title = ai_title_candidate
+                                target_what = list(data["what"]) if isinstance(data["what"], list) else heuristic_plan.what
+
                         delta_analysis = str(data.get("delta_analysis", heuristic_plan.delta_analysis)).strip()
+                        why, how, who_where, when_acceptance, visual_asset_spec, visual_approved = cls._validate_and_anchor_5w1h_fields(
+                            data=data,
+                            heuristic_plan=heuristic_plan,
+                            user_prompt=root_user_goal or "",
+                            is_feedback_or_locked=is_locked
+                        )
                         ai_plan = Milestone5W1HPlan(
                             version=target_version,
-                            title=str(data["title"]).strip(),
+                            title=target_title,
                             domain=dom,
-                            why=str(data.get("why", heuristic_plan.why)).strip(),
-                            what=list(data["what"]) if isinstance(data["what"], list) else heuristic_plan.what,
-                            how=str(data.get("how", heuristic_plan.how)).strip(),
-                            who_where=str(data.get("who_where", heuristic_plan.who_where)).strip(),
-                            when_acceptance=list(data.get("when_acceptance", heuristic_plan.when_acceptance)) if isinstance(data.get("when_acceptance"), list) else heuristic_plan.when_acceptance,
-                            visual_asset_spec=str(data.get("visual_asset_spec", heuristic_plan.visual_asset_spec)).strip(),
-                            visual_approved=bool(data.get("visual_approved", heuristic_plan.visual_approved)),
+                            why=why,
+                            what=target_what,
+                            how=how,
+                            who_where=who_where,
+                            when_acceptance=when_acceptance,
+                            visual_asset_spec=visual_asset_spec,
+                            visual_approved=visual_approved,
                             source="ai",
                             quality_contracts=parsed_qcs,
                             delta_analysis=delta_analysis,
@@ -2646,23 +4126,42 @@ class Commander:
                             macro_memory_text=macro_memory_text,
                             user_prompt=f"사용자 원본 목표: {root_user_goal}"
                         )
-                        plan = ai_plan
+                        # [중복 기획 차단] LLM이 이미 전달된 역량을 재제안하면 폐기하고,
+                        # 완료기록/디스크 기반의 결손 도메인 폴백을 그대로 채택한다.
+                        if cls._is_duplicate_of_completed_capability(
+                            ai_plan, reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+                        ):
+                            logger.warning(
+                                f"[Commander] 중복 기획 차단: AI 계획 '{ai_plan.title}' 가 "
+                                f"이미 전달된 역량과 일치 → 결손 도메인 폴백을 채택합니다."
+                            )
+                        else:
+                            # [Depth-First Guard] 심도 기준선 미달인데 AI가 신규 확장(D)을
+                            # 제안하면 거부하고 결정론적 심화 폴백(heuristic_plan)을 채택한다.
+                            # 런타임 증거 부재(evidence_missing) 시에도 확장은 fail-closed 로 거부한다.
+                            _depth_ok = True
+                            _needs_depth_guard = depth_verdict is not None and (
+                                getattr(depth_verdict, "requires_depth", False)
+                                or getattr(depth_verdict, "evidence_missing", False)
+                            )
+                            if _needs_depth_guard:
+                                try:
+                                    from product_refinement_governor import ProductRefinementGovernor
+                                    _depth_ok, _depth_reason = ProductRefinementGovernor.validate_plan(
+                                        ai_plan.title, ai_plan.what, depth_verdict,
+                                        reality.implemented_components
+                                    )
+                                    if not _depth_ok:
+                                        logger.warning(f"[Commander] {_depth_reason}")
+                                except Exception as _dg_err:
+                                    logger.warning(f"[Commander] depth validate notice: {_dg_err}")
+                            if _depth_ok:
+                                plan = ai_plan
         except Exception as e:
             logger.info(f"Adaptive LLM planning notice (using domain heuristic): {e}")
 
-        # Sync to ROADMAP.md and PRD.md
-        try:
-            from roadmap_manager import RoadmapManager
-            rm = RoadmapManager(workspace)
-            rm.append_or_update_adaptive_milestone(
-                version=plan.version,
-                title=plan.title,
-                tasks=plan.what,
-                status="IN_PROGRESS"
-            )
-        except Exception as rm_err:
-            logger.debug(f"Adaptive roadmap sync notice: {rm_err}")
-
+        # Sync to ROADMAP.md (PRD는 실행 일기로만 기록되며 우선순위 소스가 아니다)
+        cls._persist_adaptive_plan(workspace, plan)
         return plan
 
     @classmethod
@@ -2677,28 +4176,51 @@ class Commander:
         from product_planner import AutonomousProductPlanner
         dom = domain or AutonomousProductPlanner.detect_domain(root_user_goal, workspace)
         reality = cls.inspect_codebase_reality(workspace)
+        reality = cls._reconcile_completed_ledger(reality, macro_memory_text, workspace)
         target_version = cls._compute_next_version(reality)
-        plan = cls._build_heuristic_adaptive_plan(
-            root_user_goal=root_user_goal,
-            reality=reality,
-            domain=dom,
-            target_version=target_version,
-            workspace=workspace,
-            macro_memory_text=macro_memory_text
-        )
+
+        # [Code/Signal-Driven Gap Discovery] 고위험 신호 결손을 역량 진화보다 우선한다.
+        signal_gap = cls._discover_signal_gap(reality, dom, workspace)
+        if signal_gap is not None and signal_gap.severity == "high":
+            try:
+                plan = cls._build_signal_hardening_plan(
+                    signal_gap, dom, target_version, workspace, macro_memory_text
+                )
+                cls._persist_adaptive_plan(workspace, plan)
+                logger.info(f"[Commander] 코드/신호 기반 결손 우선 발주: [{signal_gap.area}] {signal_gap.title}")
+                return plan
+            except Exception as sig_err:
+                logger.warning(f"[Commander] signal hardening plan fallback: {sig_err}")
 
         try:
-            from roadmap_manager import RoadmapManager
-            rm = RoadmapManager(workspace)
-            rm.append_or_update_adaptive_milestone(
-                version=plan.version,
-                title=plan.title,
-                tasks=plan.what,
-                status="IN_PROGRESS"
+            plan = cls._build_heuristic_adaptive_plan(
+                root_user_goal=root_user_goal,
+                reality=reality,
+                domain=dom,
+                target_version=target_version,
+                workspace=workspace,
+                macro_memory_text=macro_memory_text
             )
-        except Exception as rm_err:
-            logger.debug(f"Adaptive roadmap sync notice: {rm_err}")
+        except Exception as plan_err:
+            logger.error(f"[Commander] Adaptive heuristic planning fallback: {plan_err}", exc_info=True)
+            plan = cls._build_heuristic_5w1h_plan(
+                milestone_title="사용자 요구사항 구현 및 품질 안정화",
+                milestone_version=target_version,
+                tasks=["핵심 비즈니스 로직 및 컴포넌트 실체 구현", "빌드 무결점 및 런타임 에러 0건 검증"],
+                domain=dom,
+                workspace=workspace,
+                user_prompt=root_user_goal,
+                macro_memory_text=macro_memory_text
+            )
 
+        # [Depth-First Product Refinement] 기존 표면 심도가 낮으면 신규 확장(D) 대신
+        # 기존 기능 심화(A1/B1/C1)를 강제한다 (스코프 크립 원천 차단).
+        depth_verdict = cls._evaluate_depth_governor(reality, dom, workspace)
+        plan = cls._apply_depth_gate(
+            plan, depth_verdict, reality, dom, target_version, workspace, macro_memory_text
+        )
+
+        cls._persist_adaptive_plan(workspace, plan)
         return plan
 
 

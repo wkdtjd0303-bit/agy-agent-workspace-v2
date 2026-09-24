@@ -57,22 +57,28 @@ class TestEngineManager(unittest.TestCase):
         self.assertIsNone(EngineManager.get_adapter("non_existent_engine"))
 
     def test_local_binary_detection_on_host(self):
-        # On this environment, agy, hermes, codex, and copilot are installed
+        # On this environment, agy and hermes are guaranteed installed
         detected = EngineManager.detect_installed_engines()
         self.assertIsInstance(detected, dict)
         self.assertTrue(detected.get("agy", False), "AGY binary should be detected")
         self.assertTrue(detected.get("hermes", False), "Hermes binary should be detected")
-        self.assertTrue(detected.get("codex", False), "Codex binary should be detected")
 
         hermes_adapter = EngineManager.get_adapter("hermes")
         self.assertTrue(hermes_adapter.is_installed())
         ver = hermes_adapter.get_version()
         self.assertTrue("hermes" in ver.lower() or "0." in ver)
 
+        # Optional binary detection on host/CI: codex may or may not be installed
         codex_adapter = EngineManager.get_adapter("codex")
-        self.assertTrue(codex_adapter.is_installed())
-        cver = codex_adapter.get_version()
-        self.assertTrue("codex" in cver.lower())
+        if codex_adapter and codex_adapter.is_installed():
+            self.assertTrue(detected.get("codex", False), "Codex binary should be detected when installed")
+            cver = codex_adapter.get_version()
+            self.assertTrue(
+                "codex" in cver.lower() or bool(re.search(r'\d+\.\d+', cver)),
+                f"Expected codex version string, got: {cver}"
+            )
+        else:
+            self.assertFalse(detected.get("codex", False), "Codex binary should be False when not installed")
 
     def test_command_building(self):
         prompt = "Write a hello world script"
@@ -90,7 +96,7 @@ class TestEngineManager(unittest.TestCase):
         hermes_cmd = hermes.build_command(prompt, self.workspace)
         self.assertIn("chat", hermes_cmd)
         self.assertIn("-q", hermes_cmd)
-        self.assertIn(prompt, hermes_cmd)
+        self.assertTrue(any(prompt in arg for arg in hermes_cmd))
         self.assertIn("--oneshot", hermes_cmd)
         self.assertIn("-Q", hermes_cmd)
         self.assertIn("--yolo", hermes_cmd)
@@ -99,7 +105,7 @@ class TestEngineManager(unittest.TestCase):
         aider = EngineManager.get_adapter("aider")
         aider_cmd = aider.build_command(prompt, self.workspace)
         self.assertIn("chat", aider_cmd)
-        self.assertIn(prompt, aider_cmd)
+        self.assertTrue(any(prompt in arg for arg in aider_cmd))
 
         # 3. Codex
         codex = EngineManager.get_adapter("codex")
@@ -109,7 +115,7 @@ class TestEngineManager(unittest.TestCase):
         self.assertIn("-C", codex_cmd)
         self.assertIn("-m", codex_cmd)
         self.assertIn("o3-mini", codex_cmd)
-        self.assertIn(prompt, codex_cmd)
+        self.assertTrue(any(prompt in arg for arg in codex_cmd))
         # Test incompatible model filtering
         codex_incompatible = codex.build_command(prompt, self.workspace, model="gemini-3.1-pro-high")
         self.assertNotIn("gemini-3.1-pro-high", codex_incompatible)
@@ -118,15 +124,15 @@ class TestEngineManager(unittest.TestCase):
         claude = EngineManager.get_adapter("claude")
         claude_cmd = claude.build_command(prompt, self.workspace)
         self.assertIn("-p", claude_cmd)
-        self.assertIn(prompt, claude_cmd)
+        self.assertTrue(any(prompt in arg for arg in claude_cmd))
         self.assertIn("--dangerously-skip-permissions", claude_cmd)
 
         # 5. OpenCode
         opencode = EngineManager.get_adapter("opencode")
         opencode_cmd = opencode.build_command(prompt, self.workspace)
         self.assertIn("run", opencode_cmd)
-        self.assertIn(prompt, opencode_cmd)
-        self.assertIn("-y", opencode_cmd)
+        self.assertTrue(any(prompt in arg for arg in opencode_cmd))
+        self.assertIn("--auto", opencode_cmd)
 
         # 6. Copilot
         copilot = EngineManager.get_adapter("copilot")

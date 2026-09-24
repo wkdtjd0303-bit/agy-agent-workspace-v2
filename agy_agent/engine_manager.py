@@ -71,8 +71,20 @@ class BaseEngineAdapter:
             return "미설치"
         try:
             out = subprocess.check_output([bin_path, "--version"], text=True, stderr=subprocess.STDOUT, timeout=2.5)
-            clean = out.strip().split("\n")[0].strip()
-            return clean if clean else "버전 확인 불가"
+            lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
+            # Find the first line that looks like a version string (contains semantic version numbers like \d+\.\d+)
+            # and ignore warning/notice/deprecation/path alias lines.
+            for line in lines:
+                lower = line.lower()
+                if any(lower.startswith(w) for w in ["warning", "notice", "info", "error", "deprecat", "could not"]):
+                    continue
+                if re.search(r'\b\d+\.\d+(?:\.\d+)?', line):
+                    return line
+            # Fallback to the first non-warning line or the first line
+            for line in lines:
+                if not any(line.lower().startswith(w) for w in ["warning", "notice", "info", "error", "could not"]):
+                    return line
+            return lines[0] if lines else "버전 확인 불가"
         except Exception:
             return "설치됨 (버전 미확인)"
 
@@ -250,7 +262,7 @@ class AgyAdapter(BaseEngineAdapter):
             "gemini-3.8-flash-tiered",
             "gemini-3.7-flash-high",
             "gemini-3.7-flash-tiered",
-            "gemini-3.7-flash-middle",
+            "gemini-3.7-flash-medium",
             "gemini-3.1-pro-high",
             "gemini-3.1-pro-low",
             "gemini-3.6-flash-high",
@@ -276,7 +288,6 @@ class AgyAdapter(BaseEngineAdapter):
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--print-timeout", config.AGY_PRINT_TIMEOUT,
-            "--effort", getattr(config, "AGY_EFFORT", "high"),
         ]
         raw_model = model or getattr(config, "QA_MODEL", "gemini-3.1-pro-high") or "gemini-3.1-pro-high"
         # Dynamically resolve using Antigravity /model active catalog (auto-upgrades deprecated 2.5 etc.)
@@ -294,12 +305,19 @@ class AgyAdapter(BaseEngineAdapter):
             or "/" in effective_model
             or any(marker in effective_model.lower() for marker in ("qwen", "deepseek", "llama", "solar", "ling", "minimax"))
         ):
+            # [🛡️ Gemini Quota Protection] 비네이티브 모델을 조용히 Gemini로 폴백하지 않는다.
+            # Gemini quota를 소모하지 않는 Antigravity 네이티브 모델(gpt-oss)로 대체한다.
+            # (정상 경로에서는 상위 AgentRunner/_execute_single_run 이 Hermes/OpenCode로 라우팅한다.)
             logger.warning(
                 f"AgyAdapter: External model '{effective_model}' is not an Antigravity native model. "
-                f"Falling back to 'gemini-3.1-pro-high' for AGY execution."
+                f"Falling back to non-Gemini native 'gpt-oss-120b-medium' to protect Gemini quota."
             )
-            effective_model = "gemini-3.1-pro-high"
+            effective_model = "gpt-oss-120b-medium"
         cmd.extend(["--model", effective_model])
+        # [⚙️ 모델별 옵션] `--effort` 는 Gemini 계열 모델만 지원합니다.
+        # gpt-oss / claude-* 등에 전달하면 'invalid model selection (--effort is not supported)' 오류가 발생합니다.
+        if "gemini" in effective_model.lower():
+            cmd.extend(["--effort", getattr(config, "AGY_EFFORT", "high")])
         if workspace:
             cmd.extend(["--add-dir", workspace])
         conv_id = kwargs.get("conversation_id")
@@ -307,6 +325,33 @@ class AgyAdapter(BaseEngineAdapter):
             cmd.extend(["--conversation", conv_id])
         cmd.extend(["--print", prompt])
         return cmd
+
+    async def execute(
+        self,
+        session: ChannelSession,
+        prompt: str,
+        on_tool_update: Optional[Callable[[str], Any]] = None,
+        model: Optional[str] = None,
+        timeout: float = 3600.0,
+        **kwargs
+    ) -> Tuple[int, str, List[str]]:
+        """[🛡️ Quota Firewall] 무인/자율 컨텍스트의 Gemini 자동 호출을 차단한 뒤 실행합니다."""
+        try:
+            from quota_firewall import check_model as _qfw_check
+            decision = _qfw_check(model, source="AgyAdapter.execute")
+            if not decision.allowed:
+                logger.warning(f"[QuotaFirewall] {decision.reason}")
+                return -3, "", [decision.reason]
+        except Exception as e:
+            logger.debug(f"QuotaFirewall check skipped: {e}")
+        return await super().execute(
+            session=session,
+            prompt=prompt,
+            on_tool_update=on_tool_update,
+            model=model,
+            timeout=timeout,
+            **kwargs
+        )
 
 
 class HermesAdapter(BaseEngineAdapter):
@@ -1007,32 +1052,555 @@ class ClaudeAdapter(BaseEngineAdapter):
         return cmd
 
 
+def _get_engine_conversation_store(session) -> Dict[str, str]:
+    """
+    [🔌 엔진별 대화 저장소 접근자]
+    ChannelSession.engine_conversations(dict)를 반환하며, 없으면 즉석에서 생성합니다.
+    key 형식: "<engine>:<conversation_id_attr>" (예: "opencode:conversation_id")
+    """
+    store = getattr(session, "engine_conversations", None)
+    if not isinstance(store, dict):
+        store = {}
+        try:
+            session.engine_conversations = store
+        except Exception:
+            pass
+    return store
+
+
 class OpenCodeAdapter(BaseEngineAdapter):
     engine_id = "opencode"
-    name = "OpenCode Interpreter"
+    name = "OpenCode CLI"
     icon = "⚡"
-    description = "오픈소스 로컬/클라우드 자율 코드 실행 인터프리터 CLI"
+    description = "오픈소스 자율 코딩 에이전트 CLI (멀티 프로바이더 라우팅 / 세션 지속 / MCP 지원)"
     env_var = "OPENCODE_PATH"
     default_paths = [
+        "/home/jangsung/.opencode/bin/opencode",
+        "~/.opencode/bin/opencode",
         "/home/jangsung/.local/bin/opencode",
-        "/home/jangsung/.local/bin/interpreter",
         "/usr/local/bin/opencode",
         "/usr/bin/opencode",
     ]
-    install_command = "pip install opencode-ai 또는 pip install open-interpreter"
-    auth_info = "로컬 LLM (Ollama, LM Studio) 또는 OPENAI_API_KEY"
-    supported_models = [
-        "ollama/qwen2.5-coder",
-        "ollama/deepseek-coder",
-        "gpt-4o",
+    install_command = "curl -fsSL https://opencode.ai/install | bash"
+    auth_info = "opencode auth login (프로바이더 인증) 또는 OPENCODE_API_KEY"
+    # 정적 폴백 카탈로그 (실시간 조회 실패 시 사용되는 최신 전체 모델 카탈로그)
+    _STATIC_MODELS = [
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/deepseek-v4-pro",
+        "opencode-go/glm-5.3-flash",
+        "opencode-go/glm-5.3",
+        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/mimo-v2.6-pro",
+        "opencode-go/qwen3.8-flash",
+        "opencode-go/qwen3.8-max",
+        "opencode-go/gpt-6-luna",
+        "opencode-go/gpt-5.6-luna",
+        "opencode-go/kimi-k3",
+        "opencode-go/kimi-k2.7-code",
+        "opencode-go/grok-4.7",
+        "opencode-go/minimax-m3",
+        "opencode-go/qwen3.7-max",
+        "opencode-go/qwen3.7-plus",
+        "opencode-go/qwen3.6-plus",
+        "opencode-go/longcat-2.0",
+        "opencode-go/space-bunny-free",
+        "opencode-go/hy4-preview",
+        "opencode-go/muse-spark-1.3-contributor",
+        "opencode-go/deepseek-v4-flash",
+        "opencode-go/deepseek-v4-flash-vision-exp",
+        "opencode-go/omen-alpha",
+        "opencode-go/mimo-v2.5-pro",
+        "opencode-go/mimo-v2.5",
+        "opencode-go/minimax-m2.7",
+        "opencode-go/minimax-m2.5",
+        "opencode-go/kimi-k2.6",
+        "opencode-go/glm-5.2",
+        "opencode-go/glm-5.1",
+        "opencode-go/grok-4.6",
+        "opencode-go/hy3",
+        "opencode-go/muse-spark-1.2-contributor",
+        "opencode-go/deepseek-flash",
     ]
+    _models_cache: Tuple[float, List[str]] = (0.0, [])
+    _MODELS_CACHE_TTL = 600.0
+
+    @property
+    def supported_models(self) -> List[str]:
+        """
+        [🔄 AGY 패턴 준수] OpenCode Go API 및 'opencode models' 를 통해
+        실시간 프로바이더/모델 카탈로그를 가져옵니다(10분 캐시). 실패 시 정적 폴백 목록을 반환합니다.
+        """
+        now = time.time()
+        cached_at, cached = OpenCodeAdapter._models_cache
+        if cached and (now - cached_at) < self._MODELS_CACHE_TTL:
+            return list(cached)
+
+        # 1. OpenCode Go API 실시간 모델 카탈로그 조회 (가장 정확한 최신 카탈로그)
+        try:
+            from telemetry_status_manager import _get_opencode_go_api_key
+            key = _get_opencode_go_api_key()
+            if key:
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://opencode.ai/zen/go/v1/models",
+                    headers={"Authorization": f"Bearer {key}", "User-Agent": "opencode/2.0.12"},
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                        api_models = []
+                        for item in payload.get("data", []):
+                            mid = item.get("id")
+                            if mid:
+                                api_models.append(f"opencode-go/{mid}")
+                        if api_models:
+                            order_map = {m: idx for idx, m in enumerate(self._STATIC_MODELS)}
+                            api_models.sort(key=lambda m: (order_map.get(m, 999), m))
+                            OpenCodeAdapter._models_cache = (now, api_models)
+                            return list(api_models)
+        except Exception as e:
+            logger.debug(f"OpenCodeAdapter: OpenCode Go API 실시간 조회 실패: {e}")
+
+        # 2. CLI `opencode models` 조회 시도
+        bin_path = self.get_binary_path()
+        if bin_path:
+            try:
+                out = subprocess.check_output(
+                    [bin_path, "models"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                )
+                models = [ln.strip() for ln in out.splitlines() if ln.strip() and "/" in ln]
+                if models:
+                    OpenCodeAdapter._models_cache = (now, models)
+                    return list(models)
+            except Exception as e:
+                logger.warning(f"OpenCodeAdapter: 'opencode models' 카탈로그 조회 실패: {e}")
+
+        # 3. 정적 폴백 목록 반환
+        return list(self._STATIC_MODELS)
 
     def check_auth_status(self) -> Tuple[bool, str]:
-        return True, "✅ 오픈소스 로컬 인터프리터 모드 지원"
+        data_dir = os.path.expanduser("~/.local/share/opencode")
+        if os.path.isdir(data_dir) or os.getenv("OPENCODE_API_KEY"):
+            return True, "✅ OpenCode 인증/세션 데이터 감지 (`opencode auth login`)"
+        return False, "⚠️ OpenCode 인증 미확인 (`opencode auth login` 필요)"
 
-    def build_command(self, prompt: str, workspace: str, model: Optional[str] = None, **kwargs) -> List[str]:
+    def _resolve_model(self, model: Optional[str]) -> Optional[str]:
+        """OpenCode CLI 는 'provider/model' 형식만 허용하므로 타 엔진 모델은 무시합니다."""
+        if not model:
+            return None
+        clean = str(model).strip()
+        if "/" not in clean:
+            return None
+        return clean
+
+    # [🔒 채널 격리 샌드박스] opencode의 permission.external_directory 를
+    # OPENCODE_CONFIG_CONTENT(최고 우선순위 인라인 설정)로 주입합니다.
+    # 이 설정은 opencode가 시작된 작업 디렉토리(cwd) 밖 경로의 접근을 기본 차단합니다.
+    # (실제 정책은 _build_env() 가 "상위 deny / 하위 링크 대상 allow" 로 동적 구성합니다.
+    #  아래 상수는 workspace 정보가 없을 때의 보수적 기본(전체 차단) 폴백입니다.)
+    SANDBOX_CONFIG_CONTENT = json.dumps({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "external_directory": "deny",
+        },
+    })
+
+    # [🔒 채널 격리 경계 정책]
+    #  • 상위/형제 디렉토리(워크스페이스 밖)  → 접근 금지(deny)
+    #  • 워크스페이스 및 그 '하위'에 있는 심볼릭 링크가 가리키는 실제 대상 → 접근 허용(allow)
+    #    즉, "상위폴더는 막고 하위폴더(링크 대상 포함)는 열어주는" 정책입니다.
+    MAX_LINKED_ALLOWED_ROOTS = 64
+
+    # 심볼릭 링크 탐색 시 통째로 건너뛸 대용량/무관 디렉토리 (탐색 비용 방지)
+    _SCAN_SKIP_DIRS = {
+        ".git", "node_modules", ".venv", "venv", "__pycache__",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache",
+        "dist", "build", ".next", "target",
+    }
+
+    @classmethod
+    def _collect_linked_allowed_roots(cls, workspace: str) -> List[str]:
+        """
+        워크스페이스 '하위'에 위치한 심볼릭 링크가 가리키는 실제 경로를 수집합니다.
+
+        정책: 상위폴더(조상)와 홈 루트는 절대 허용하지 않고, 워크스페이스 하위에서
+        링크로 연결된 실제 대상(하위폴더/파일)만 허용 목록에 추가합니다.
+        이미 워크스페이스 내부에 있는 대상은 별도 허용이 필요 없으므로 제외합니다.
+        """
+        ws = os.path.abspath(os.path.expanduser(workspace or ""))
+        if not os.path.isdir(ws):
+            return []
+        try:
+            ws_real = os.path.realpath(ws)
+            home_real = os.path.realpath(os.path.expanduser("~"))
+        except OSError:
+            return []
+
+        allowed: List[str] = []
+        seen_dirs: set = set()
+        stack: List[str] = [ws]
+        budget = 8192
+        while stack and budget > 0:
+            current = stack.pop()
+            try:
+                current_real = os.path.realpath(current)
+            except OSError:
+                continue
+            if current_real in seen_dirs:
+                continue
+            seen_dirs.add(current_real)
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            for entry in entries:
+                budget -= 1
+                if budget <= 0:
+                    break
+                try:
+                    is_link = entry.is_symlink()
+                except OSError:
+                    continue
+                if is_link:
+                    try:
+                        target = os.path.realpath(entry.path)
+                    except OSError:
+                        continue
+                    if not target or target == os.sep or target == home_real:
+                        continue
+                    # 상위(조상) 디렉토리 및 워크스페이스 자신은 절대 허용 금지
+                    if target == ws_real or ws_real.startswith(target.rstrip(os.sep) + os.sep):
+                        continue
+                    # 이미 워크스페이스 내부면 별도 허용 불필요
+                    if target.startswith(ws_real.rstrip(os.sep) + os.sep):
+                        continue
+                    if target not in allowed:
+                        if len(allowed) >= cls.MAX_LINKED_ALLOWED_ROOTS:
+                            continue
+                        allowed.append(target)
+                    if os.path.isdir(target):
+                        stack.append(target)
+                else:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if entry.name in cls._SCAN_SKIP_DIRS or entry.name.startswith(".git"):
+                        continue
+                    stack.append(entry.path)
+        return allowed
+
+    @staticmethod
+    def _build_permission_patterns(allowed_roots: List[str]) -> Dict[str, str]:
+        """
+        external_directory 허용/차단 패턴을 구성합니다.
+        OpenCode 권한 규칙은 '마지막으로 일치한 규칙'이 승리하므로,
+        전체 차단(`*`)을 먼저 두고 허용 대상(하위 경로 포함)을 뒤에 둡니다.
+        """
+        patterns: Dict[str, str] = {"*": "deny"}
+        for root in allowed_roots:
+            clean_root = root.rstrip("/") or "/"
+            if os.path.isdir(root):
+                patterns[f"{clean_root}/*"] = "allow"
+                patterns[clean_root] = "allow"
+            else:
+                patterns[clean_root] = "allow"
+        return patterns
+
+    def _build_env(self, workspace: str = "") -> Dict[str, str]:
+        """opencode 서브프로세스용 환경변수(채널 격리 샌드박스 포함)를 구성합니다."""
+        env = os.environ.copy()
+        # 사용자가 OPENCODE_SANDBOX=0 으로 명시적으로 끄지 않는 한 격리를 강제합니다.
+        if str(os.getenv("OPENCODE_SANDBOX", "1")).lower() in ("0", "false", "off", "no"):
+            return env
+        merged: Dict[str, Any] = {}
+        existing = env.get("OPENCODE_CONFIG_CONTENT")
+        if existing:
+            try:
+                parsed = json.loads(existing)
+                if isinstance(parsed, dict):
+                    merged = parsed
+            except Exception:
+                merged = {}
+        perm = dict(merged.get("permission") or {})
+        # [🔒 경계 재정의] 무조건 deny → "상위는 deny, 하위(링크 대상 포함)는 allow"
+        allowed_roots = self._collect_linked_allowed_roots(workspace)
+        perm["external_directory"] = self._build_permission_patterns(allowed_roots)
+        merged["permission"] = perm
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(merged)
+        return env
+
+    def _sandbox_enabled(self) -> bool:
+        """bwrap 기반 파일시스템 샌드박스 사용 여부 (OPENCODE_BWRAP=0 으로 비활성화)."""
+        if str(os.getenv("OPENCODE_BWRAP", "1")).lower() in ("0", "false", "off", "no"):
+            return False
+        return shutil.which("bwrap") is not None
+
+    def _wrap_sandbox(self, cmd: List[str], workspace: str) -> List[str]:
+        """
+        [🔒 채널 격리] bubblewrap(bwrap)로 파일시스템을 격리합니다.
+        - 루트 전체(`/`)는 읽기 전용으로 바인딩 → 다른 프로젝트 디렉토리 수정 원천 차단
+        - 채널 워크스페이스 + opencode 자체 상태 디렉토리만 쓰기 허용
+        - 워크스페이스 '하위'의 심볼릭 링크가 가리키는 실제 대상도 쓰기 허용
+          (상위폴더/형제 디렉토리는 계속 읽기 전용 = 상위 deny, 하위 allow)
+        - --standalone(전용 서버)과 함께 써야 도구 실행(셸 포함)이 샌드박스 안에서 이뤄집니다.
+        bwrap 미설치 시 원본 명령을 그대로 반환합니다(권한 설정 폴백).
+        """
+        if not self._sandbox_enabled():
+            return cmd
+        bwrap = shutil.which("bwrap")
+        ws = os.path.abspath(os.path.expanduser(workspace or ""))
+        if not bwrap or not os.path.isdir(ws):
+            return cmd
+
+        # opencode 자체가 쓰기를 필요로 하는 상태 디렉토리만 추가로 허용
+        writable_dirs: List[str] = [ws]
+        for d in (
+            "~/.local/share/opencode",
+            "~/.local/state/opencode",
+            "~/.config/opencode",
+            "~/.cache/opencode",
+        ):
+            p = os.path.abspath(os.path.expanduser(d))
+            try:
+                os.makedirs(p, exist_ok=True)
+            except Exception:
+                continue
+            if os.path.isdir(p) and p not in writable_dirs:
+                writable_dirs.append(p)
+
+        # [🔌 MCP 런타임 허용] stdio MCP(npx 등) 사용 시 필요한 경로를 OPENCODE_MCP_DIRS 로 추가 허용
+        #   예: OPENCODE_MCP_DIRS=~/.npm:~/.cache/npm
+        #   (http 원격 MCP 는 localhost 네트워크만 필요하므로 설정 불필요)
+        for d in (os.getenv("OPENCODE_MCP_DIRS", "") or "").split(":"):
+            d = d.strip()
+            if not d:
+                continue
+            p = os.path.abspath(os.path.expanduser(d))
+            try:
+                os.makedirs(p, exist_ok=True)
+            except Exception:
+                continue
+            if os.path.isdir(p) and p not in writable_dirs:
+                writable_dirs.append(p)
+
+        # [🔗 하위 심볼릭 링크 허용] 워크스페이스 '하위'의 링크가 가리키는 실제 대상도 쓰기 허용
+        #   (상위폴더/형제 디렉토리는 계속 읽기 전용으로 차단 → "상위 deny, 하위 allow")
+        for d in self._collect_linked_allowed_roots(ws):
+            if d not in writable_dirs:
+                writable_dirs.append(d)
+
+        wrapped: List[str] = [
+            bwrap,
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--unshare-pid",
+            "--die-with-parent",
+        ]
+        # /tmp 는 임시 tmpfs 로 격리 (워크스페이스가 /tmp 하위여도 별도 바인딩으로 보존)
+        wrapped.extend(["--tmpfs", "/tmp"])
+        for d in writable_dirs:
+            wrapped.extend(["--bind", d, d])
+        wrapped.extend(["--chdir", ws, "--"])
+        wrapped.extend(cmd)
+        return wrapped
+
+    def build_command(
+        self,
+        prompt: str,
+        workspace: str,
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+        **kwargs,
+    ) -> List[str]:
         bin_path = self.get_binary_path() or "opencode"
-        return [bin_path, "run", prompt, "-y"]
+        # [📁 CWD 명시] 에이전트가 자신의 절대 작업 경로와 격리 경계를 정확히 인지하도록 주입합니다.
+        scoped_prompt = (
+            f"📁 **작업 디렉토리(절대경로):** `{workspace}`\n"
+            f"- 위 경로가 당신의 **유일한 작업 공간(워크스페이스)**이며, 이 디렉토리 밖의 경로는 접근이 차단됩니다.\n"
+            f"- \"현재 디렉토리\"를 물으면 위 절대경로를 그대로 답하세요.\n\n{prompt}"
+        )
+        cmd = [
+            bin_path,
+            "run", scoped_prompt,
+            "--format", "json",
+            "--auto",
+            "--standalone",
+        ]
+        target_model = self._resolve_model(model)
+        if target_model:
+            cmd.extend(["--model", target_model])
+        if session_id:
+            cmd.extend(["--session", session_id])
+        return cmd
+
+    async def execute(
+        self,
+        session: ChannelSession,
+        prompt: str,
+        on_tool_update: Optional[Callable[[str], Any]] = None,
+        model: Optional[str] = None,
+        timeout: float = 3600.0,
+        **kwargs
+    ) -> Tuple[int, str, List[str]]:
+        """
+        [🧠 AGY 패턴 준수] OpenCode CLI 를 JSON 이벤트 스트림으로 실행하고,
+        반환된 sessionID 를 엔진별 저장소(engine_conversations)에 보관하여
+        다음 턴에서 `--session <id>` 로 대화를 이어갑니다.
+        """
+        bin_path = self.get_binary_path()
+        if not bin_path:
+            return -1, "", [f"[{self.name}] 바이너리를 찾을 수 없습니다. ({self.install_command})"]
+
+        conversation_id_attr = kwargs.get("conversation_id_attr") or "conversation_id"
+        store = _get_engine_conversation_store(session)
+        store_key = f"opencode:{conversation_id_attr}"
+        session_id = store.get(store_key)
+
+        async def _run_once(use_session: bool) -> Tuple[int, str, List[str], Optional[str], bool]:
+            cmd = self.build_command(
+                prompt,
+                session.workspace,
+                model=model,
+                session_id=session_id if use_session else None,
+            )
+            cmd = self._wrap_sandbox(cmd, session.workspace)
+            logger.info(f"Executing {self.name} command: {' '.join(cmd[:6])}...")
+            await safe_tool_notify(on_tool_update, f"{self.icon} **[{self.name}] 작업 시작 중...**")
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=session.workspace,
+                env=self._build_env(session.workspace),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=30 * 1024 * 1024,
+                start_new_session=True,
+            )
+            session.current_process = proc
+
+            text_parts: List[str] = []
+            stderr_lines: List[str] = []
+            captured_sid: Optional[str] = None
+            session_not_found = False
+
+            async def read_stderr():
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if decoded:
+                        stderr_lines.append(decoded)
+                        if len(stderr_lines) > 40:
+                            stderr_lines.pop(0)
+
+            stderr_task = asyncio.create_task(read_stderr())
+            start_time = time.time()
+            last_activity_time = time.time()
+            last_update_time = time.time()
+
+            try:
+                while True:
+                    now = time.time()
+                    if now - start_time > timeout:
+                        stderr_lines.append(f"⚠️ 실행 제한 시간({int(timeout)}초) 초과로 안전 종료되었습니다.")
+                        break
+                    try:
+                        line = await asyncio.wait_for(proc.stdout.readline(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        if now - last_activity_time > 600.0:
+                            stderr_lines.append("⚠️ 무응답 상태 지속(600초)으로 안전 종료되었습니다.")
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            break
+                        if proc.returncode is not None:
+                            break
+                        continue
+                    if not line:
+                        break
+
+                    last_activity_time = time.time()
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if not decoded:
+                        continue
+                    try:
+                        event = json.loads(decoded)
+                    except json.JSONDecodeError:
+                        text_parts.append(decoded)
+                        continue
+
+                    etype = event.get("type")
+                    part = event.get("part") or {}
+                    sid = event.get("sessionID") or part.get("sessionID")
+                    if sid:
+                        captured_sid = sid
+
+                    if etype == "text":
+                        txt = part.get("text")
+                        if txt:
+                            text_parts.append(str(txt))
+                    elif etype == "tool_use":
+                        state = part.get("state") or {}
+                        if state.get("status") == "completed":
+                            title = state.get("title") or part.get("tool") or "tool"
+                            await safe_tool_notify(
+                                on_tool_update,
+                                f"{self.icon} **[OpenCode 도구 완료]** `{str(title)[:60]}`",
+                            )
+                    elif etype == "error":
+                        err_obj = event.get("error") or {}
+                        err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
+                        if err_msg:
+                            stderr_lines.append(f"OpenCode Error: {err_msg}")
+                            if "session not found" in str(err_msg).lower():
+                                session_not_found = True
+
+                    if time.time() - last_update_time >= 4.0:
+                        last_update_time = time.time()
+                        elapsed = int(time.time() - start_time)
+                        preview = (text_parts[-1][:60] if text_parts else decoded[:60]).replace("`", "")
+                        await safe_tool_notify(
+                            on_tool_update,
+                            f"{self.icon} **[{self.name} 실행 중 ({elapsed}s)]**\n`{preview}`",
+                        )
+
+                await proc.wait()
+                await stderr_task
+            except asyncio.CancelledError:
+                if proc.pid:
+                    kill_process_tree(proc.pid)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                raise
+            finally:
+                if proc.pid:
+                    kill_process_tree(proc.pid)
+
+            return proc.returncode, "\n".join(text_parts).strip(), stderr_lines, captured_sid, session_not_found
+
+        code, text, errors, captured_sid, session_not_found = await _run_once(use_session=bool(session_id))
+
+        # [🛡️ Self-Healing] 저장된 세션이 현재 프로젝트에 존재하지 않으면 새 세션으로 1회 재시도
+        if session_id and session_not_found:
+            logger.warning(f"OpenCode 세션 '{session_id}' 을 찾을 수 없어 새 세션으로 재시작합니다.")
+            store.pop(store_key, None)
+            code, text, errors, captured_sid, _ = await _run_once(use_session=False)
+
+        if captured_sid:
+            store[store_key] = captured_sid
+
+        return code, text, errors
 
 
 class CopilotAdapter(BaseEngineAdapter):
