@@ -3307,9 +3307,66 @@ class Commander:
     _FEEDBACK_DIRECTIVE_KEYWORDS: Tuple[str, ...] = (
         "edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr",
         "리브랜딩", "앱명", "아이콘", "그레이톤", "대시보드",
-        "크래시", "튕김", "디자인 통일성", "디자인 연결성"
+        "크래시", "튕김", "디자인 통일성", "디자인 연결성",
+        "불편", "고쳐", "피드백", "별로", "개선"
+    )
+    _VAGUE_COMPLAINT_KEYWORDS: Tuple[str, ...] = (
+        "불편", "고쳐", "피드백", "별로", "이상해", "안돼", "안되", "수정해줘", "개선해", "바꿔줘"
+    )
+    _SPECIFIC_DOMAIN_KEYWORDS: Tuple[str, ...] = (
+        "로고", "아이콘", "대시보드", "ocr", "크래시", "튕김", "색상", "팔레트", "버튼",
+        "텍스트", "스트림", "검색", "하이라이트", "주석", "북마크", "인쇄", "내보내기",
+        "그레이톤", "리브랜딩", "도큐크래프트", "디자인 통일성", "4대", "다크모드", "야간",
+        "패스워드", "보안", "서명", "필터", "회전", "썸네일", "글자", "에디터", "폰트", "크기"
     )
     _deferred_signal_rounds: Dict[str, int] = {}
+
+    @classmethod
+    def _is_vague_complaint(cls, prompt: str) -> bool:
+        """Determines whether a user prompt represents a vague complaint without concrete domain targets."""
+        if not prompt:
+            return False
+        p_lower = prompt.lower()
+        has_vague = any(k in p_lower for k in cls._VAGUE_COMPLAINT_KEYWORDS)
+        has_specific = any(k in p_lower for k in cls._SPECIFIC_DOMAIN_KEYWORDS)
+        return has_vague and not has_specific
+
+    @classmethod
+    def _get_deferred_signal_cache_key(cls, workspace: Optional[str], area: str) -> str:
+        ws_key = os.path.abspath(workspace) if workspace else "__default__"
+        return f"{ws_key}::{area}"
+
+    @classmethod
+    def _reset_deferred_signal_rounds_for_workspace(
+        cls,
+        workspace: Optional[str],
+        active_area: Optional[str] = None
+    ) -> None:
+        """Resets deferred rounds for all areas in workspace except optionally active_area.
+        Enforces true consecutive deferral: if an intermediate round has no signal gap
+        or a different signal gap, the deferral chain for other areas is broken and reset.
+        """
+        ws_key = os.path.abspath(workspace) if workspace else "__default__"
+        prefix = f"{ws_key}::"
+        for k in list(cls._deferred_signal_rounds.keys()):
+            if k.startswith(prefix):
+                cached_area = k[len(prefix):]
+                if active_area is None or cached_area != active_area:
+                    cls._deferred_signal_rounds[k] = 0
+        if workspace:
+            try:
+                q_state = QualityStateManager.load_state(workspace)
+                deferred = q_state.get("deferred_signal_rounds", {})
+                changed = False
+                for a in list(deferred.keys()):
+                    if active_area is None or a != active_area:
+                        if deferred[a] != 0:
+                            deferred[a] = 0
+                            changed = True
+                if changed:
+                    QualityStateManager.save_state(workspace, q_state)
+            except Exception:
+                pass
 
     @classmethod
     def _detect_user_feedback_intent(cls, root_user_goal: str) -> bool:
@@ -3354,7 +3411,7 @@ class Commander:
         if getattr(plan, "source", "") == "feedback":
             return True
         title = getattr(plan, "title", "") or ""
-        return any(k in title for k in ("사용자 피드백", "사용자 요구사항", "피드백 긴급 반영"))
+        return any(k in title for k in ("사용자 피드백", "피드백 긴급 반영"))
 
     @classmethod
     def _merge_signal_gap_into_feedback_plan(
@@ -3381,6 +3438,8 @@ class Commander:
         evidence_str = getattr(signal_gap, "evidence", "")
         actions = getattr(signal_gap, "actions", []) or []
 
+        cache_key = cls._get_deferred_signal_cache_key(workspace, area)
+
         if area in ("crash", "stability") and any(k in p_low for k in crash_keywords):
             is_relevant = True
         elif area in ("test", "regression") and any(k in p_low for k in (crash_keywords + test_keywords)):
@@ -3397,7 +3456,7 @@ class Commander:
                     if act and act not in plan.when_acceptance:
                         plan.when_acceptance.append(f"결손 조치 검증: {act}")
             # Reset deferred count for this area
-            cls._deferred_signal_rounds[area] = 0
+            cls._deferred_signal_rounds[cache_key] = 0
             if workspace:
                 try:
                     q_state = QualityStateManager.load_state(workspace)
@@ -3410,7 +3469,7 @@ class Commander:
             )
         else:
             # Defect 3: Deferral counter to prevent infinite deferral of unrelated high-severity signals
-            in_memory_count = cls._deferred_signal_rounds.get(area, 0)
+            in_memory_count = cls._deferred_signal_rounds.get(cache_key, 0)
             persisted_count = 0
             q_state = None
             if workspace:
@@ -3420,7 +3479,7 @@ class Commander:
                 except Exception:
                     pass
             current_count = max(in_memory_count, persisted_count) + 1
-            cls._deferred_signal_rounds[area] = current_count
+            cls._deferred_signal_rounds[cache_key] = current_count
             if q_state is not None and workspace:
                 try:
                     q_state.setdefault("deferred_signal_rounds", {})[area] = current_count
@@ -3445,7 +3504,7 @@ class Commander:
                     f"[Commander] 연속 이연 임계치({current_count}회) 도달: "
                     f"고위험 신호 결손 [{area}] {title_str} -> 사용자 피드백 계획에 [신호 기반 필수 병합]으로 승격 완료"
                 )
-                cls._deferred_signal_rounds[area] = 0
+                cls._deferred_signal_rounds[cache_key] = 0
                 if q_state is not None and workspace:
                     try:
                         q_state.setdefault("deferred_signal_rounds", {})[area] = 0
@@ -3468,9 +3527,16 @@ class Commander:
         reality: Optional[CodebaseReality] = None,
         macro_memory_text: str = "",
         workspace: Optional[str] = None,
+        target_text: str = "",
     ) -> bool:
         delivered = cls._delivered_feedback_areas(reality, macro_memory_text, workspace)
         legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
+        new_areas = {"design_cohesion", "naming_rebrand", "icon_renewal", "dashboard_actions", "crash_stability"}
+
+        low = (target_text or "").lower()
+        is_5point = any(k in low for k in ["디자인 통일성", "도큐크래프트", "명칭 리브랜딩", "그레이톤", "4대 핵심"])
+        if is_5point:
+            return new_areas.issubset(delivered)
         return legacy_areas.issubset(delivered)
 
     @classmethod
@@ -3497,7 +3563,8 @@ class Commander:
 
         combined = f"{plan.title} {' '.join(plan.what or [])}"
         if cls._feedback_signature_matches(combined) and cls._feedback_all_delivered(
-            reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+            reality=reality, macro_memory_text=macro_memory_text, workspace=workspace,
+            target_text=combined
         ):
             return True
 
@@ -3810,6 +3877,17 @@ class Commander:
                     "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
                 )
                 visual_approved = True
+            elif cls._is_vague_complaint(root_user_goal):
+                title = "사용자 피드백 구체화 및 개선 포인트 식별"
+                what = [
+                    "불편 사항 및 개선 희망 기능 구체적 요구사항 파악 (화면/동작/에러 식별)",
+                    "기존 핵심 기능 안정성 및 동작 상태 점검",
+                    "구체화된 피드백 기반 단일 타깃 개선 마일스톤 도출"
+                ]
+                how = "사용자 인터랙션 점검 및 불만 사항을 단일 타깃 기능 요구사항으로 구체화합니다."
+                why = "사용자의 개선 피드백을 허공 치지 않고 정확하게 목표를 타깃하여 명확한 개선 포인트를 잡기 위함입니다."
+                visual_asset_spec = "불필요 (피드백 구체화 및 분석 단계)"
+                visual_approved = False
             else:
                 fb_decomp = cls.decompose_user_feedback(root_user_goal, workspace=workspace, domain=domain)
                 title = fb_decomp["title"]
@@ -4166,9 +4244,12 @@ class Commander:
         # [Code/Signal-Driven Gap Discovery] 문서(PRD/ROADMAP)가 아니라 디스크의 실제
         # 코드/신호(테스트 실패·Lint Error·크래시 로그·스텁 잔재)에서 결손을 찾는다.
         signal_gap = cls._discover_signal_gap(reality, dom, workspace)
+        active_area = getattr(signal_gap, "area", None) if signal_gap else None
+        cls._reset_deferred_signal_rounds_for_workspace(workspace, active_area=active_area)
 
         # 고위험(high) 신호 결손 처리: 사용자 피드백이 활성인 경우 피드백 계획을 폐기하지 않고 병합
-        is_fb_active = feedback_locked and cls._is_feedback_plan(heuristic_plan)
+        is_vague = cls._is_vague_complaint(root_user_goal)
+        is_fb_active = feedback_locked and cls._is_feedback_plan(heuristic_plan) and not is_vague
         if signal_gap is not None and signal_gap.severity == "high":
             if is_fb_active:
                 cls._merge_signal_gap_into_feedback_plan(heuristic_plan, signal_gap, root_user_goal, workspace=workspace)
@@ -4292,7 +4373,7 @@ class Commander:
                         if not parsed_qcs or not isinstance(parsed_qcs, list):
                             parsed_qcs = heuristic_plan.quality_contracts
 
-                        is_locked = cls._is_feedback_plan(heuristic_plan)
+                        is_locked = feedback_locked and cls._is_feedback_plan(heuristic_plan)
                         if is_locked:
                             target_title = heuristic_plan.title
                             target_what = heuristic_plan.what
@@ -4318,6 +4399,16 @@ class Commander:
                             user_prompt=root_user_goal or "",
                             is_feedback_or_locked=is_locked
                         )
+                        final_thinking = extracted_thinking or str(data.get("thinking_process", heuristic_plan.thinking_process)).strip()
+                        signal_notes = [
+                            line for line in (heuristic_plan.thinking_process or "").split("\n")
+                            if line.startswith("[신호 결손")
+                        ]
+                        if signal_notes:
+                            existing_text = final_thinking
+                            missing_notes = [note for note in signal_notes if note not in existing_text]
+                            if missing_notes:
+                                final_thinking = f"{existing_text}\n" + "\n".join(missing_notes)
                         ai_plan = Milestone5W1HPlan(
                             version=target_version,
                             title=target_title,
@@ -4332,7 +4423,7 @@ class Commander:
                             source="feedback" if is_locked else "ai",
                             quality_contracts=parsed_qcs,
                             delta_analysis=delta_analysis,
-                            thinking_process=extracted_thinking or str(data.get("thinking_process", heuristic_plan.thinking_process)).strip()
+                            thinking_process=final_thinking
                         )
                         ai_plan.directive_for_coder = ai_plan.build_directive_for_coder(
                             macro_memory_text=macro_memory_text,
@@ -4417,7 +4508,11 @@ class Commander:
 
         # [Code/Signal-Driven Gap Discovery] 고위험 신호 결손을 역량 진화보다 우선한다 (단, 활성 피드백 계획 제외).
         signal_gap = cls._discover_signal_gap(reality, dom, workspace)
-        is_fb_locked = feedback_locked and cls._is_feedback_plan(plan)
+        active_area = getattr(signal_gap, "area", None) if signal_gap else None
+        cls._reset_deferred_signal_rounds_for_workspace(workspace, active_area=active_area)
+
+        is_vague = cls._is_vague_complaint(root_user_goal)
+        is_fb_locked = feedback_locked and cls._is_feedback_plan(plan) and not is_vague
         if signal_gap is not None and signal_gap.severity == "high":
             if not is_fb_locked:
                 try:

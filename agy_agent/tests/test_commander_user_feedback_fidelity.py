@@ -1400,6 +1400,205 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
         self.assertTrue(any("Lint" in t for t in plan_r2.what))
         self.assertIn("[신호 결손 필수 승격]", plan_r2.thinking_process)
 
+    def test_reconcile_completed_ledger_does_not_falsely_mark_5point_feedback_done_due_to_legacy_artifacts(self):
+        """QA1 Defect: Pre-fix bug where legacy files (BrandButtons.kt, PdfContentStreamEditor.kt) caused
+        _reconcile_completed_ledger to mark 5-point feedback milestone as DONE, skipping user feedback
+        and jumping to Phase 3 annotation.
+        Verifies that 5-point feedback is NOT marked DONE when only legacy files exist.
+        """
+        from roadmap_manager import RoadmapManager
+
+        # Create legacy artifacts in workspace
+        legacy_dir = os.path.join(self.tmp, "app", "src", "main", "java", "com", "example")
+        os.makedirs(legacy_dir, exist_ok=True)
+        with open(os.path.join(legacy_dir, "BrandButtons.kt"), "w") as f:
+            f.write("// BrandButtons")
+        with open(os.path.join(legacy_dir, "PdfContentStreamEditor.kt"), "w") as f:
+            f.write("// PdfContentStreamEditor")
+
+        # Setup ROADMAP.md with 5-point feedback milestone as pending
+        roadmap_path = os.path.join(self.tmp, "ROADMAP.md")
+        with open(roadmap_path, "w", encoding="utf-8") as f:
+            f.write(
+                "# Project Roadmap\n\n"
+                "- [ ] v1.0: 사용자 피드백 긴급 반영: 디자인 통일성 개편, 명칭 리브랜딩, 그레이톤 아이콘, 메인 대시보드 개편, PDF 크래시 최적화\n"
+                "  - [ ] 디자인 통일성 개편\n"
+                "  - [ ] 명칭 리브랜딩\n"
+            )
+
+        reality = Commander.inspect_codebase_reality(self.tmp)
+        reconciled = Commander._reconcile_completed_ledger(reality, workspace=self.tmp)
+
+        # Ensure milestone is still pending, not marked completed
+        rm = RoadmapManager(self.tmp)
+        completed = rm.get_completed_milestones()
+        self.assertNotIn("사용자 피드백 긴급 반영: 디자인 통일성 개편", str(completed))
+
+        # And user feedback precedence is still maintained
+        precedence = Commander._derive_feedback_precedence(
+            USER_COMPLAINT_PROMPT, reality=reconciled, workspace=self.tmp
+        )
+        self.assertTrue(precedence)
+
+    def test_vague_complaint_without_signal_gap_routes_to_clarification_milestone(self):
+        """QA1 Defect: Vague complaints without signal gap on disk (e.g. '이거 불편해')
+        must NOT fall through to domain expansion ladder ('v11.0: 주석 레이어 렌더링').
+        Must route to a deterministic clarification milestone: '사용자 피드백 구체화 및 개선 포인트 식별'.
+        """
+        import asyncio
+
+        # 1. Sync planning without signal gap
+        plan_sync = Commander.plan_adaptive_next_milestone(
+            root_user_goal="이거 불편해",
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        self.assertEqual(plan_sync.source, "feedback")
+        self.assertEqual(plan_sync.title, "사용자 피드백 구체화 및 개선 포인트 식별")
+        self.assertIn("불편 사항 및 개선 희망 기능 구체적 요구사항 파악", plan_sync.what[0])
+        self.assertNotIn("주석", plan_sync.title)
+
+        # 2. Async planning without signal gap
+        async def _run():
+            plan_async = await Commander.plan_adaptive_next_milestone_async(
+                root_user_goal="이거 불편해",
+                workspace=self.tmp,
+                domain="mobile_app"
+            )
+            self.assertEqual(plan_async.source, "feedback")
+            self.assertEqual(plan_async.title, "사용자 피드백 구체화 및 개선 포인트 식별")
+            self.assertIn("불편 사항 및 개선 희망 기능 구체적 요구사항 파악", plan_async.what[0])
+            self.assertNotIn("주석", plan_async.title)
+
+        asyncio.run(_run())
+
+    def test_deferred_signal_rounds_isolated_per_workspace_and_resets_on_gap_disappearance(self):
+        """QA1 Defect: Deferral counter must be workspace-isolated and true-consecutive.
+        1. Workspace A deferring an area must NOT increment Workspace B's counter.
+        2. If signal gap disappears in intermediate round, the counter must reset to 0.
+        """
+        tmp_b = tempfile.mkdtemp(prefix="test_feedback_ws_b_")
+        self.addCleanup(lambda: shutil.rmtree(tmp_b, ignore_errors=True))
+
+        Commander._deferred_signal_rounds.clear()
+
+        # Workspace A: Setup lint error
+        lint_dir_a = os.path.join(self.tmp, "build", "reports")
+        os.makedirs(lint_dir_a, exist_ok=True)
+        lint_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<issues format="6" by="lint 8.0.0">\n'
+            '    <issue id="HardcodedText" severity="Error" message="Hardcoded string" />\n'
+            '</issues>\n'
+        )
+        lint_file_a = os.path.join(lint_dir_a, "lint-results.xml")
+        with open(lint_file_a, "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        # WS-A Round 1: defers lint
+        plan_a1 = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        self.assertIn("[신호 결손 감지 알림]", plan_a1.thinking_process)
+
+        # Check Workspace B: has lint error but has NOT deferred yet
+        lint_dir_b = os.path.join(tmp_b, "build", "reports")
+        os.makedirs(lint_dir_b, exist_ok=True)
+        with open(os.path.join(lint_dir_b, "lint-results.xml"), "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        plan_b1 = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=tmp_b,
+            domain="mobile_app"
+        )
+        # WS-B should be at Round 1 (NOT promoted to mandatory merge!)
+        self.assertIn("[신호 결손 감지 알림]", plan_b1.thinking_process)
+        self.assertFalse(any("[신호 기반 필수 병합]" in t for t in plan_b1.what))
+
+        # Consecutive Deferral Reset Check:
+        # In Workspace A, remove the lint error for Round 2 (signal gap disappears)
+        os.remove(lint_file_a)
+        plan_a2 = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        # No signal gap in Round 2
+        self.assertNotIn("[신호 결손 감지 알림]", plan_a2.thinking_process)
+
+        # Now re-introduce the lint error in Workspace A for Round 3
+        with open(lint_file_a, "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        plan_a3 = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        # Because Round 2 broke the consecutive chain, Round 3 must be count=1 (NOT mandatory merge!)
+        self.assertIn("[신호 결손 감지 알림]", plan_a3.thinking_process)
+        self.assertFalse(
+            any("[신호 기반 필수 병합]" in t for t in plan_a3.what),
+            "Non-consecutive deferral was falsely promoted to mandatory merge"
+        )
+
+    def test_async_planning_preserves_signal_notes_in_thinking_process(self):
+        """QA1 Defect: When LLM outputs <thinking>...</thinking>, signal deferral notes
+        ([신호 결손...]) must not be erased from final thinking_process.
+        """
+        import asyncio
+        from unittest.mock import patch
+
+        lint_dir = os.path.join(self.tmp, "build", "reports")
+        os.makedirs(lint_dir, exist_ok=True)
+        lint_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<issues format="6" by="lint 8.0.0">\n'
+            '    <issue id="HardcodedText" severity="Error" message="Hardcoded string" />\n'
+            '</issues>\n'
+        )
+        with open(os.path.join(lint_dir, "lint-results.xml"), "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        Commander._deferred_signal_rounds.clear()
+
+        llm_response = (
+            "<thinking>\n"
+            "1. Base Invariance: Preserving core.\n"
+            "2. Quality State: Checking lint.\n"
+            "3. Idea Convergence: Tuning buttons.\n"
+            "4. Action Type: Refactoring.\n"
+            "5. Verification: Level 1 and 2.\n"
+            "</thinking>\n"
+            "```json\n"
+            "{\n"
+            '  "title": "사용자 피드백 긴급 반영: 디자인 통일성 개편, 명칭 리브랜딩, 그레이톤 아이콘, 메인 대시보드 개편, PDF 크래시 최적화",\n'
+            '  "what": ["디자인 개편", "아이콘 갱신"],\n'
+            '  "why": "피드백 반영",\n'
+            '  "how": "정밀 수정",\n'
+            '  "who_where": "app/src/main",\n'
+            '  "when_acceptance": ["빌드 통과"]\n'
+            "}\n"
+            "```"
+        )
+
+        async def _run():
+            from unittest.mock import AsyncMock, patch
+            with patch.object(Commander, "_run_raw_llm_query", new_callable=AsyncMock) as mock_llm:
+                mock_llm.return_value = llm_response
+                plan = await Commander.plan_adaptive_next_milestone_async(
+                    root_user_goal=USER_COMPLAINT_PROMPT,
+                    workspace=self.tmp,
+                    domain="mobile_app"
+                )
+                self.assertIn("1. Base Invariance", plan.thinking_process)
+                self.assertIn("[신호 결손 감지 알림]", plan.thinking_process)
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -663,7 +663,12 @@ class TestEarlyTerminationAndMockCompletionDefense(unittest.TestCase):
             with patch.object(TrioAgentRunner, "run_coder_turn", side_effect=mock_coder), \
                  patch("trio_agent_runner.safe_send_discord_message", new_callable=AsyncMock) as mock_send, \
                  patch.object(TrioAgentRunner, "run_qa_turn", new_callable=AsyncMock) as mock_qa, \
-                 patch.object(TrioAgentRunner, "run_auditor_turn", new_callable=AsyncMock) as mock_aud:
+                 patch.object(TrioAgentRunner, "run_auditor_turn", new_callable=AsyncMock) as mock_aud, \
+                 patch("trio_agent_runner.EvidenceValidator.inspect_production_diff", return_value={"is_zero_production_diff": False, "prod_changed_files": ["PageManagerDialog.kt"], "non_prod_files": []}), \
+                 patch("trio_agent_runner.EvidenceValidator.verify_anti_mocking_and_authenticity", return_value=(True, [], {})), \
+                 patch("trio_agent_runner.QualityStateManager.evaluate_and_update", return_value={"regression": {"has_regression": False}, "overall_score": 100.0, "delta": 0.0}), \
+                 patch("trio_agent_runner.EvidenceValidator.check_visual_asset_presence", return_value={"has_assets": True}), \
+                 patch("vision_attachment_analyzer.VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa", new_callable=AsyncMock, return_value={"has_screenshots": True}):
                 
                 mock_qa.return_value = (
                     "[STATUS: APPROVED]\n\n"
