@@ -3209,7 +3209,7 @@ class Commander:
         "design_cohesion": {"branddesignsystem", "semanticuitoken", "nightreadingtheme", "designsystem"},
         "naming_rebrand": {"branddesignsystem", "brandlogo", "rebrand"},
         "icon_renewal": {"ic_launcher", "brandlogo", "appicon"},
-        "dashboard_actions": {"maindashboard", "dashboardscreen", "actionbuttons", "mainactiondashboard"},
+        "dashboard_actions": {"actionbuttons", "mainactiondashboard"},
         "crash_stability": {"rebuiltpdfstructuretest", "atomicjsonstore", "safepdf", "pdfdocumenthandler"},
     }
 
@@ -3304,6 +3304,31 @@ class Commander:
 
         return False
 
+    _FEEDBACK_DIRECTIVE_KEYWORDS: Tuple[str, ...] = (
+        "edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr",
+        "리브랜딩", "앱명", "아이콘", "그레이톤", "대시보드",
+        "크래시", "튕김", "디자인 통일성", "디자인 연결성"
+    )
+    _deferred_signal_rounds: Dict[str, int] = {}
+
+    @classmethod
+    def _detect_user_feedback_intent(cls, root_user_goal: str) -> bool:
+        """Single Source of Truth (SSOT) helper to detect actionable user feedback directives.
+        Guarantees that _derive_feedback_precedence and _build_heuristic_adaptive_plan
+        never drift in their feedback intent classification.
+        """
+        if not root_user_goal:
+            return False
+        p_lower = root_user_goal.lower()
+        try:
+            from feedback_classifier import FeedbackIntentClassifier
+            intent_verdict = FeedbackIntentClassifier.classify(root_user_goal, project_initialized=True)
+            if intent_verdict.has_feedback_signal or intent_verdict.intent_type in ("defect", "design"):
+                return True
+        except Exception:
+            pass
+        return any(k in p_lower for k in cls._FEEDBACK_DIRECTIVE_KEYWORDS)
+
     @classmethod
     def _derive_feedback_precedence(
         cls,
@@ -3313,26 +3338,7 @@ class Commander:
         workspace: Optional[str] = None,
     ) -> bool:
         """Determines whether active, undelivered user feedback has absolute precedence over autonomous policies."""
-        if not root_user_goal:
-            return False
-        p_lower = root_user_goal.lower()
-        try:
-            from feedback_classifier import FeedbackIntentClassifier
-            intent_verdict = FeedbackIntentClassifier.classify(root_user_goal, project_initialized=True)
-            has_feedback = (
-                intent_verdict.has_feedback_signal
-                or intent_verdict.intent_type in ("defect", "design")
-                or any(k in p_lower for k in [
-                    "edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr",
-                    "리브랜딩", "앱명", "아이콘", "그레이톤", "대시보드", "크래시", "피드백", "불편", "고쳐"
-                ])
-            )
-        except Exception:
-            has_feedback = any(k in p_lower for k in [
-                "edit", "에디트", "수정", "글자", "텍스트", "리브랜딩", "아이콘", "대시보드", "크래시", "피드백"
-            ])
-
-        if not has_feedback:
+        if not cls._detect_user_feedback_intent(root_user_goal):
             return False
 
         delivered = cls._is_user_feedback_delivered(
@@ -3355,9 +3361,13 @@ class Commander:
         cls,
         plan: "Milestone5W1HPlan",
         signal_gap,
-        user_prompt: str
+        user_prompt: str,
+        workspace: Optional[str] = None
     ) -> None:
-        """Merges relevant high-severity signal gap into user feedback plan without overriding it."""
+        """Merges relevant high-severity signal gap into user feedback plan without overriding it.
+        If unrelated, tracks deferred rounds in QualityStateManager / memory, and promotes to mandatory
+        merge when deferred threshold (>= 2 rounds) is reached to prevent infinite deferral.
+        """
         if plan is None or signal_gap is None:
             return
         p_low = (user_prompt or "").lower()
@@ -3366,34 +3376,91 @@ class Commander:
 
         is_relevant = False
         area = getattr(signal_gap, "area", "")
+        title_str = getattr(signal_gap, "title", "")
+        detail_str = getattr(signal_gap, "detail", "")
+        evidence_str = getattr(signal_gap, "evidence", "")
+        actions = getattr(signal_gap, "actions", []) or []
+
         if area in ("crash", "stability") and any(k in p_low for k in crash_keywords):
             is_relevant = True
         elif area in ("test", "regression") and any(k in p_low for k in (crash_keywords + test_keywords)):
             is_relevant = True
 
         if is_relevant:
-            action_item = f"[신호 기반 병합] {signal_gap.title} ({signal_gap.detail})"
-            if not any(signal_gap.title in t for t in plan.what):
+            action_item = f"[신호 기반 병합] {title_str} ({detail_str})"
+            if not any(title_str in t for t in plan.what):
                 plan.what.append(action_item)
-            if getattr(signal_gap, "evidence", None):
-                plan.thinking_process += f"\n[신호 결손 연계 병합] {signal_gap.area}: {signal_gap.evidence}"
-            if getattr(signal_gap, "verification", None):
-                for v in signal_gap.verification:
-                    if v not in plan.when_acceptance:
-                        plan.when_acceptance.append(v)
+            if evidence_str:
+                plan.thinking_process += f"\n[신호 결손 연계 병합] {area}: {evidence_str}"
+            if actions:
+                for act in actions:
+                    if act and act not in plan.when_acceptance:
+                        plan.when_acceptance.append(f"결손 조치 검증: {act}")
+            # Reset deferred count for this area
+            cls._deferred_signal_rounds[area] = 0
+            if workspace:
+                try:
+                    q_state = QualityStateManager.load_state(workspace)
+                    q_state.setdefault("deferred_signal_rounds", {})[area] = 0
+                    QualityStateManager.save_state(workspace, q_state)
+                except Exception:
+                    pass
             logger.info(
-                f"[Commander] 피드백 연관 고위험 신호 결손 병합: [{signal_gap.area}] {signal_gap.title} -> 사용자 피드백 계획에 통합 완료"
+                f"[Commander] 피드백 연관 고위험 신호 결손 병합: [{area}] {title_str} -> 사용자 피드백 계획에 통합 완료"
             )
         else:
-            evidence_str = getattr(signal_gap, 'evidence', '')
-            plan.thinking_process += (
-                f"\n[신호 결손 감지 알림] {signal_gap.area} ({signal_gap.title}) — "
-                f"사용자 명시적 피드백 구현 완료 후 후속 회차에서 자동 해결 예정 (증거: {evidence_str})."
-            )
-            logger.info(
-                f"[Commander] 피드백 우선 유지: 고위험 신호 결손 [{signal_gap.area}] {signal_gap.title} 감지되었으나, "
-                f"사용자 피드백이 우선하므로 사고과정(thinking_process)에만 기록하고 피드백 계획을 유지합니다."
-            )
+            # Defect 3: Deferral counter to prevent infinite deferral of unrelated high-severity signals
+            in_memory_count = cls._deferred_signal_rounds.get(area, 0)
+            persisted_count = 0
+            q_state = None
+            if workspace:
+                try:
+                    q_state = QualityStateManager.load_state(workspace)
+                    persisted_count = q_state.get("deferred_signal_rounds", {}).get(area, 0)
+                except Exception:
+                    pass
+            current_count = max(in_memory_count, persisted_count) + 1
+            cls._deferred_signal_rounds[area] = current_count
+            if q_state is not None and workspace:
+                try:
+                    q_state.setdefault("deferred_signal_rounds", {})[area] = current_count
+                    QualityStateManager.save_state(workspace, q_state)
+                except Exception:
+                    pass
+
+            if current_count >= 2:
+                # 연속 이연 2회 이상 -> [신호 기반 필수 병합]으로 승격
+                action_item = f"[신호 기반 필수 병합] {title_str} ({detail_str})"
+                if not any(title_str in t for t in plan.what):
+                    plan.what.append(action_item)
+                if actions:
+                    for act in actions:
+                        if act and act not in plan.when_acceptance:
+                            plan.when_acceptance.append(f"결손 조치 검증: {act}")
+                plan.thinking_process += (
+                    f"\n[신호 결손 필수 승격] {area} ({title_str}) — "
+                    f"{current_count}회 연속 이연 한계 도달로 피드백 계획에 필수 작업으로 승격되었습니다 (증거: {evidence_str})."
+                )
+                logger.info(
+                    f"[Commander] 연속 이연 임계치({current_count}회) 도달: "
+                    f"고위험 신호 결손 [{area}] {title_str} -> 사용자 피드백 계획에 [신호 기반 필수 병합]으로 승격 완료"
+                )
+                cls._deferred_signal_rounds[area] = 0
+                if q_state is not None and workspace:
+                    try:
+                        q_state.setdefault("deferred_signal_rounds", {})[area] = 0
+                        QualityStateManager.save_state(workspace, q_state)
+                    except Exception:
+                        pass
+            else:
+                plan.thinking_process += (
+                    f"\n[신호 결손 감지 알림] {area} ({title_str}) — "
+                    f"사용자 명시적 피드백 구현 완료 후 후속 회차에서 자동 해결 예정 (현재 이연 {current_count}회/임계치 2회, 증거: {evidence_str})."
+                )
+                logger.info(
+                    f"[Commander] 피드백 우선 유지 (이연 {current_count}회): 고위험 신호 결손 [{area}] {title_str} 감지되었으나, "
+                    f"사용자 피드백이 우선하므로 사고과정(thinking_process)에만 기록하고 피드백 계획을 유지합니다."
+                )
 
     @classmethod
     def _feedback_all_delivered(
@@ -3465,13 +3532,25 @@ class Commander:
             )
             legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
             new_areas = {"design_cohesion", "naming_rebrand", "icon_renewal", "dashboard_actions", "crash_stability"}
-            if not (legacy_areas.issubset(delivered_now) or new_areas.issubset(delivered_now) or len(delivered_now) >= 4):
-                return reality
+
+            def _is_milestone_delivered(title: str, tasks) -> bool:
+                full_text = f"{title} {' '.join(tasks)}".lower()
+                is_legacy = any(k in full_text for k in ["첨부파일 컬러 팔레트", "글자를 넣어도 크기", "텍스트 스트림 직접 수정", "no-ocr"])
+                if is_legacy:
+                    return legacy_areas.issubset(delivered_now)
+                is_5point = any(k in full_text for k in ["디자인 통일성", "도큐크래프트", "명칭 리브랜딩", "그레이톤", "4대 핵심"])
+                if is_5point:
+                    return new_areas.issubset(delivered_now)
+                matched_areas = {
+                    area for area, kws in cls._FEEDBACK_AREA_KEYWORDS.items()
+                    if any(k.lower() in full_text for k in kws)
+                }
+                if len(matched_areas) >= 3 and matched_areas.issubset(delivered_now):
+                    return True
+                return False
 
             rm = RoadmapManager(workspace)
-            marked = rm.reconcile_delivered_capabilities(
-                lambda title, tasks: cls._feedback_signature_matches(f"{title} {' '.join(tasks)}")
-            )
+            marked = rm.reconcile_delivered_capabilities(_is_milestone_delivered)
             if marked:
                 logger.info(f"[Commander] 실구현 원장 동기화: {marked} 개 마일스톤 [x] 처리 완료")
                 return cls.inspect_codebase_reality(workspace)
@@ -3708,12 +3787,7 @@ class Commander:
         quality_contracts: List[Dict[str, Any]] = []
 
         # 0. User Feedback & Directive Priority: User directives always supersede autonomous ladders
-        intent_verdict = FeedbackIntentClassifier.classify(root_user_goal, project_initialized=True)
-        has_root_feedback = (
-            intent_verdict.has_feedback_signal
-            or intent_verdict.intent_type in ("defect", "design")
-            or any(k in p_lower for k in ["edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr", "리브랜딩", "앱명", "아이콘", "그레이톤", "대시보드"])
-        )
+        has_root_feedback = cls._detect_user_feedback_intent(root_user_goal)
         is_legacy_feedback_goal = ("글자를 넣어도 크기가 조절되지 않는" in p_lower or "첨부파일 컬러 팔레트" in p_lower)
         feedback_delivered = cls._is_user_feedback_delivered(
             root_user_goal, reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
@@ -4094,10 +4168,10 @@ class Commander:
         signal_gap = cls._discover_signal_gap(reality, dom, workspace)
 
         # 고위험(high) 신호 결손 처리: 사용자 피드백이 활성인 경우 피드백 계획을 폐기하지 않고 병합
-        is_fb_active = feedback_locked or cls._is_feedback_plan(heuristic_plan)
+        is_fb_active = feedback_locked and cls._is_feedback_plan(heuristic_plan)
         if signal_gap is not None and signal_gap.severity == "high":
             if is_fb_active:
-                cls._merge_signal_gap_into_feedback_plan(heuristic_plan, signal_gap, root_user_goal)
+                cls._merge_signal_gap_into_feedback_plan(heuristic_plan, signal_gap, root_user_goal, workspace=workspace)
             else:
                 try:
                     plan = cls._build_signal_hardening_plan(
@@ -4218,7 +4292,7 @@ class Commander:
                         if not parsed_qcs or not isinstance(parsed_qcs, list):
                             parsed_qcs = heuristic_plan.quality_contracts
 
-                        is_locked = is_fb_active
+                        is_locked = cls._is_feedback_plan(heuristic_plan)
                         if is_locked:
                             target_title = heuristic_plan.title
                             target_what = heuristic_plan.what
@@ -4320,19 +4394,6 @@ class Commander:
             root_user_goal, reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
         )
 
-        # [Code/Signal-Driven Gap Discovery] 고위험 신호 결손을 역량 진화보다 우선한다 (단, 활성 피드백 제외).
-        signal_gap = cls._discover_signal_gap(reality, dom, workspace)
-        if signal_gap is not None and signal_gap.severity == "high" and not feedback_locked:
-            try:
-                plan = cls._build_signal_hardening_plan(
-                    signal_gap, dom, target_version, workspace, macro_memory_text
-                )
-                cls._persist_adaptive_plan(workspace, plan)
-                logger.info(f"[Commander] 코드/신호 기반 결손 우선 발주: [{signal_gap.area}] {signal_gap.title}")
-                return plan
-            except Exception as sig_err:
-                logger.warning(f"[Commander] signal hardening plan fallback: {sig_err}")
-
         try:
             plan = cls._build_heuristic_adaptive_plan(
                 root_user_goal=root_user_goal,
@@ -4354,16 +4415,30 @@ class Commander:
                 macro_memory_text=macro_memory_text
             )
 
+        # [Code/Signal-Driven Gap Discovery] 고위험 신호 결손을 역량 진화보다 우선한다 (단, 활성 피드백 계획 제외).
+        signal_gap = cls._discover_signal_gap(reality, dom, workspace)
+        is_fb_locked = feedback_locked and cls._is_feedback_plan(plan)
+        if signal_gap is not None and signal_gap.severity == "high":
+            if not is_fb_locked:
+                try:
+                    sig_plan = cls._build_signal_hardening_plan(
+                        signal_gap, dom, target_version, workspace, macro_memory_text
+                    )
+                    cls._persist_adaptive_plan(workspace, sig_plan)
+                    logger.info(f"[Commander] 코드/신호 기반 결손 우선 발주: [{signal_gap.area}] {signal_gap.title}")
+                    return sig_plan
+                except Exception as sig_err:
+                    logger.warning(f"[Commander] signal hardening plan fallback: {sig_err}")
+            else:
+                # 활성 피드백 계획인 경우 신호 결손을 피드백 계획에 병합
+                cls._merge_signal_gap_into_feedback_plan(plan, signal_gap, root_user_goal, workspace=workspace)
+
         # [Depth-First Product Refinement] 기존 표면 심도가 낮으면 신규 확장(D) 대신
         # 기존 기능 심화(A1/B1/C1)를 강제한다 (스코프 크립 원천 차단).
         depth_verdict = cls._evaluate_depth_governor(reality, dom, workspace)
         plan = cls._apply_depth_gate(
             plan, depth_verdict, reality, dom, target_version, workspace, macro_memory_text
         )
-
-        # 고위험 신호 결손이 있고 피드백 계획인 경우 연관 결손 병합
-        if signal_gap is not None and signal_gap.severity == "high" and (feedback_locked or cls._is_feedback_plan(plan)):
-            cls._merge_signal_gap_into_feedback_plan(plan, signal_gap, root_user_goal)
 
         cls._persist_adaptive_plan(workspace, plan)
         return plan

@@ -1254,6 +1254,152 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
         self.assertTrue(any(k in tasks_str for k in ["디자인 통일성", "연결성"]))
         self.assertTrue(any(k in tasks_str for k in ["PDF", "크래시", "안정성", "최적화"]))
 
+    def test_async_llm_query_divergent_response_is_rejected_and_locked_to_feedback_plan(self):
+        """QA1 Defect 2: Verifies that when the LLM returns an off-target divergent candidate
+        (e.g. '주석 레이어 렌더링 & 무손실 내보내기 (Phase 3: 주석 코어)'),
+        Commander locks the plan to user feedback, discards divergent title/what,
+        assigns source='feedback', and bypasses depth governor.
+        """
+        import asyncio
+        from unittest.mock import patch
+
+        fake_llm_json = json.dumps({
+            "title": "주석 레이어 렌더링 & 무손실 내보내기 (Phase 3: 주석 코어)",
+            "delta_analysis": "주석 코어 기능 신규 개발",
+            "why": "스마트폰에서 기본 조작과 데이터 저장이 원활히 동작하는지 확인하기 위함입니다.",
+            "what": [
+                "주석(형광펜, 펜 필기, 텍스트) 레이어 분리 저장 및 캔버스 렌더링",
+                "터치 제스처 충돌 방지(스크롤 vs 드로잉) 및 Undo/Redo 제어 무결성",
+                "원본 문서 훼손 없는 무손실 주석 병합 및 표준 PDF 내보내기"
+            ],
+            "how": "Compose Canvas 및 PointerInput 기반 벡터 드로잉",
+            "who_where": "core/AnnotationCanvas.kt",
+            "when_acceptance": [
+                "컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
+                "주석 레이어 렌더링 실체 구현 완료",
+                "Auditor 최종 승인"
+            ],
+            "quality_contracts": []
+        })
+
+        async def _run():
+            with patch.object(Commander, "_run_raw_llm_query", return_value=f"```json\n{fake_llm_json}\n```"):
+                plan = await Commander.plan_adaptive_next_milestone_async(
+                    root_user_goal=USER_COMPLAINT_PROMPT,
+                    workspace=self.tmp,
+                    domain="mobile_app"
+                )
+                # LLM's off-target divergent title MUST be rejected
+                self.assertNotIn("주석 레이어", plan.title)
+                self.assertNotIn("Phase 3", plan.title)
+
+                # Must be locked to the user feedback title and tasks
+                self.assertEqual(plan.source, "feedback")
+                self.assertIn("사용자 피드백 긴급 반영", plan.title)
+                tasks_str = " ".join(plan.what)
+                self.assertTrue(any(k in tasks_str for k in ["디자인 통일성", "연결성"]))
+                self.assertTrue(any(k in tasks_str for k in ["도큐크래프트", "명칭", "리브랜딩"]))
+                self.assertTrue(any(k in tasks_str for k in ["그레이톤", "아이콘"]))
+                self.assertTrue(any(b in tasks_str for b in ["열기", "빈페이지", "합치기", "변환하기"]))
+                self.assertTrue(any(k in tasks_str for k in ["PDF", "크래시", "안정성", "최적화"]))
+
+        asyncio.run(_run())
+
+    def test_vague_complaint_with_high_severity_signal_does_not_skip_hardening_and_source_not_feedback(self):
+        """QA1 Defect 1 & 2: Vague complaints without specific actionable feedback items (e.g. '이거 불편해')
+        must NOT trigger feedback precedence or label plans as source='feedback'.
+        High-severity signal gaps (e.g. JUnit test failure) MUST NOT be skipped.
+        """
+        import asyncio
+        from gap_signal_scanner import GapSignalScanner
+
+        # 1. Setup a failing test in build/test-results/test/
+        test_results_dir = os.path.join(self.tmp, "build", "test-results", "test")
+        os.makedirs(test_results_dir, exist_ok=True)
+        junit_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<testsuite name="com.example.CriticalTest" tests="2" failures="1" errors="0">\n'
+            '    <testcase name="testFail"><failure message="crash on startup"/></testcase>\n'
+            '</testsuite>\n'
+        )
+        with open(os.path.join(test_results_dir, "TEST-CriticalTest.xml"), "w", encoding="utf-8") as f:
+            f.write(junit_xml)
+
+        signal = GapSignalScanner.select_next(self.tmp, "mobile_app")
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.severity, "high")
+
+        # 2. Synchronous test: hardening must NOT be skipped, source != 'feedback'
+        plan_sync = Commander.plan_adaptive_next_milestone(
+            root_user_goal="이거 불편해",
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        self.assertNotEqual(plan_sync.source, "feedback")
+        self.assertIn("테스트 실패/에러 0건 복구", plan_sync.title)
+
+        # 3. Asynchronous test: hardening must NOT be skipped, source != 'feedback'
+        async def _run():
+            plan_async = await Commander.plan_adaptive_next_milestone_async(
+                root_user_goal="이거 불편해",
+                workspace=self.tmp,
+                domain="mobile_app"
+            )
+            self.assertNotEqual(plan_async.source, "feedback")
+            self.assertIn("테스트 실패/에러 0건 복구", plan_async.title)
+
+        asyncio.run(_run())
+
+    def test_unrelated_signal_consecutive_deferral_promotes_to_mandatory_merge(self):
+        """QA1 Defect 3: Unrelated high-severity signals (e.g. Lint error) must not be infinitely deferred.
+        On round 1: recorded in thinking_process without overriding feedback.
+        On round 2 (consecutive deferral): promoted to [신호 기반 필수 병합] in what.
+        """
+        from gap_signal_scanner import GapSignalScanner
+
+        # Reset in-memory deferred signal rounds for clean test run
+        Commander._deferred_signal_rounds.clear()
+
+        lint_dir = os.path.join(self.tmp, "build", "reports")
+        os.makedirs(lint_dir, exist_ok=True)
+        lint_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<issues format="6" by="lint 8.0.0">\n'
+            '    <issue id="HardcodedText" severity="Error" message="Hardcoded string in layout" />\n'
+            '</issues>\n'
+        )
+        with open(os.path.join(lint_dir, "lint-results.xml"), "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        signal = GapSignalScanner.select_next(self.tmp, "mobile_app")
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.severity, "high")
+        self.assertEqual(signal.area, "lint")
+
+        # Round 1: first deferral -> recorded in thinking_process only
+        plan_r1 = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        self.assertEqual(plan_r1.source, "feedback")
+        self.assertFalse(any("Lint" in t for t in plan_r1.what))
+        self.assertIn("[신호 결손 감지 알림]", plan_r1.thinking_process)
+
+        # Round 2: consecutive deferral -> promoted to [신호 기반 필수 병합] in what
+        plan_r2 = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        self.assertEqual(plan_r2.source, "feedback")
+        self.assertTrue(
+            any("[신호 기반 필수 병합]" in t for t in plan_r2.what),
+            f"Expected [신호 기반 필수 병합] in plan_r2.what, got: {plan_r2.what}"
+        )
+        self.assertTrue(any("Lint" in t for t in plan_r2.what))
+        self.assertIn("[신호 결손 필수 승격]", plan_r2.thinking_process)
+
 
 if __name__ == "__main__":
     unittest.main()
