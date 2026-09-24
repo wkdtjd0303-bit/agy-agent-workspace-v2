@@ -1,5 +1,5 @@
 {
-  "timestamp": 1789956175,
+  "timestamp": 1790232856,
   "test_suite": "PRD Feature & E2E Requirements Traceability Matrix",
   "total_tests": 7,
   "passed_tests": 7,
@@ -69,8 +69,8 @@
       "details": "단순 껍데기가 아닌, 1:1 ROI 시각 크롭 분석 및 UIVisualDiffer를 통해 실제 대상 앱의 디자인(터치 타깃 48dp, 폰트/여백 가독성, 반응형 레이아웃)을 소스코",
       "evidence_files": [
         "android_build_manager.py",
-        "qa_hub.py",
-        "help_manager.py"
+        "quality_state_manager.py",
+        "qa_hub.py"
       ]
     },
     {
@@ -80,17 +80,17 @@
       "details": "사용자가 플랫폼을 명시하지 않아도 워크스페이스 프로젝트와 실행 환경을 자율 탐색(Web, Android, Windows Native, iOS)하여 적합한 E2E Adapter를 자",
       "evidence_files": [
         "quality_state_manager.py",
-        "telemetry_status_manager.py",
-        "windows_vm_manager.py"
+        "windows_vm_manager.py",
+        "platform_discovery_engine.py"
       ]
     }
   ],
   "next_target": {
     "type": "OPTIMIZATION",
-    "target_id": "OPT-03",
-    "title": "비정상 네트워크 및 ANR 크래시 방어 예외 처리 강화",
-    "description": "네트워크 지연, 타임아웃, 예기치 못한 입력을 처리할 수 있도록 내구성 방어 로직과 로딩 피드백을 고도화합니다.",
-    "coder_action_plan": "5초 이상 지연 시 작업 취소 및 안전 롤백 메커니즘을 테스트하고 방어하십시오.",
+    "target_id": "OPT-01",
+    "title": "다크 모드 색상 대비 및 WCAG 4.5:1 가독성 최적화",
+    "description": "다크 모드와 라이트 모드 간 텍스트와 배경 간 WCAG 4.5:1 이상 대비율을 확보하고 디자인 토큰을 정교화합니다.",
+    "coder_action_plan": "테마 전환 시 텍스트 딤(Dim) 현상과 배경색 번짐을 방지하고 시인성을 극대화하십시오.",
     "qa_acceptance_criteria": "극단적 입력값(Boundary conditions)과 비정상 환경에서의 복원력을 검증하십시오."
   }
 }

@@ -125,6 +125,50 @@ class QuotaManager:
         return min_ratio
 
     @classmethod
+    def _pick_qa_fallback(cls, base_model: str, preferred_fallback: str, preferred_display: str) -> Tuple[str, str]:
+        """[🔋 토큰 절약] QA 폴백 모델을 고른다.
+
+        - base 가 Gemini 계열이면: 설정된 백업 QA 모델을 우선 사용(기존 동작 유지)
+        - base 가 비-Gemini(예: opencode-go/*)면: Gemini 로 우회하지 않는다.
+          (해제: AGY_ALLOW_GEMINI_FALLBACK=1)
+        - 사용할 후보가 없으면 원본 모델을 그대로 돌려준다(불필요한 풀컨텍스트 호출 방지).
+        """
+        try:
+            from agent_runner import build_fallback_candidates
+        except Exception:
+            build_fallback_candidates = None
+
+        base_is_gemini = "gemini" in (base_model or "").lower()
+        allow_gemini = bool(getattr(config, "AGY_ALLOW_GEMINI_FALLBACK", False))
+        fallback_candidates = build_fallback_candidates(base_model) if build_fallback_candidates else []
+
+        if base_is_gemini or allow_gemini:
+            ordered: list = [(preferred_fallback or "").strip()]
+            ordered += [c for c in fallback_candidates if c not in ordered]
+            for candidate in ordered:
+                if candidate and not cls.is_model_exhausted(candidate):
+                    display = preferred_display if candidate == preferred_fallback else f"{candidate} (Backup QA)"
+                    return candidate, display
+            logger.warning(
+                f"[QA Fallback] '{base_model}' 소진 → 사용 가능한 백업 QA 후보 없음. 원본 모델을 유지합니다."
+            )
+            return base_model, f"{base_model} (원본 유지)"
+
+        if fallback_candidates:
+            chosen = fallback_candidates[0]
+            logger.info(
+                f"[QA Fallback] 비-Gemini QA 모델 '{base_model}' 소진 → 동일 계열 '{chosen}' 로 전환 "
+                f"(Gemini 한도 보호)."
+            )
+            return chosen, f"{chosen} (Backup QA)"
+
+        logger.warning(
+            f"[QA Fallback] 비-Gemini QA 모델 '{base_model}' 소진 → Gemini 우회 없이 원본 모델을 유지합니다. "
+            f"(해제: AGY_ALLOW_GEMINI_FALLBACK=1)"
+        )
+        return base_model, f"{base_model} (원본 유지)"
+
+    @classmethod
     async def resolve_qa_model(
         cls,
         is_auto: bool = False,
@@ -154,12 +198,7 @@ class QuotaManager:
             fallback_display = f"{fallback_model} (Backup QA)"
 
         if cls.is_model_exhausted(base_model):
-            safe_fallback = fallback_model
-            if cls.is_model_exhausted(safe_fallback):
-                for alt in ("gemini-3.7-flash-high", "gemini-3.8-flash-high", "gemini-3-flash"):
-                    if not cls.is_model_exhausted(alt):
-                        safe_fallback = alt
-                        break
+            safe_fallback, fallback_display = cls._pick_qa_fallback(base_model, fallback_model, fallback_display)
             notice = (
                 f"ℹ️ **[스마트 QA 모델 전환]** `{base_model}` 할당량이 소진되어 시니어 QA 리뷰어를 "
                 f"**{fallback_display}**로 자동 전환합니다. 🚀"
@@ -173,12 +212,7 @@ class QuotaManager:
                 if mid == base_model.lower() or base_model.lower() in mid:
                     if m.get("isExhausted"):
                         cls.mark_model_exhausted(base_model)
-                        safe_fallback = fallback_model
-                        if cls.is_model_exhausted(safe_fallback):
-                            for alt in ("gemini-3.7-flash-high", "gemini-3.8-flash-high", "gemini-3-flash"):
-                                if not cls.is_model_exhausted(alt):
-                                    safe_fallback = alt
-                                    break
+                        safe_fallback, fallback_display = cls._pick_qa_fallback(base_model, fallback_model, fallback_display)
                         notice = (
                             f"ℹ️ **[스마트 QA 모델 전환]** `{base_model}` 할당량 한도 도달로 인해 "
                             f"시니어 QA 리뷰어를 **{fallback_display}**로 자동 전환합니다. 🚀"

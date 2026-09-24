@@ -1,0 +1,43 @@
+{
+  "manifest_version": 2,
+  "kind": "depth_gate_anti_gaming_provenance",
+  "round": "3/20",
+  "generated_at_utc": "2026-09-24T01:30:00Z",
+  "repository": "/home/jangsung/Desktop/autocoding/!05_agy_agent",
+  "base_head": "869998928345807d15b32e9e3e5857c6e79416e8",
+  "commit_object": {
+    "sha": "04e8e124cdb11ae61733ff894f1064aebe741e94",
+    "tree": "44eb7867936d3d5d3c30664b7afc7dcd45e1c077",
+    "parent": "869998928345807d15b32e9e3e5857c6e79416e8",
+    "state": "dangling",
+    "verified": "git ls-tree blob == git hash-object of working file (c09f39447aa172cf76e239f374fc7b3626567cdf)",
+    "note": "A real git commit object (tree = base HEAD + the 5 changed files) was created via a writable GIT_OBJECT_DIRECTORY. The sandbox mounts the repository .git read-only, so the branch ref could not be advanced here (cannot create .git/index.lock nor .git/refs/heads/main.lock). Operator/pipeline finalization command: git -C /home/jangsung/Desktop/autocoding/!05_agy_agent add agy_agent/product_refinement_governor.py agy_agent/tests/test_depth_first_scope_governor.py agy_agent/android_vision_inspector.py agy_agent/ui_visual_differ.py agy_agent/commander.py && git -C /home/jangsung/Desktop/autocoding/!05_agy_agent commit -m 'fix(depth-gate): harden runtime evidence against gaming (D1-D4)'"
+  },
+  "files": [
+    {
+      "path": "agy_agent/product_refinement_governor.py",
+      "sha256": "431ead3d5cca30c93f827fb95ccc9e7537c773274f9c9e3f8f48d2542b06f0c4",
+      "role": "D1/D2/D4: evidence basis+attestation, fail-closed EXPAND, freshness TTL, runtime-verification gap"
+    },
+    {
+      "path": "agy_agent/tests/test_depth_first_scope_governor.py",
+      "sha256": "441c5d961b0d577b02f8873aa0bd8561be44d7ce1150e71c7a0bc6e4cf6a7e79",
+      "role": "29 tests incl. D1-D4 regression + attestation"
+    },
+    {
+      "path": "agy_agent/android_vision_inspector.py",
+      "sha256": "f35683dafc40516c7dc2a6cfc6b763db2db3da12e31bdfc462565e63714adfc7",
+      "role": "D1/D2: Gate5 wiring to real pixel diff; WARNING on missing evidence"
+    },
+    {
+      "path": "agy_agent/ui_visual_differ.py",
+      "sha256": "b7cda41182eb5f4ab22a0934c7f74924c6ab1b72c63e0fafa355718b93acde8a",
+      "role": "D1: measure_pixel_diff / count_distinct_states / is_blank_frame"
+    },
+    {
+      "path": "agy_agent/commander.py",
+      "sha256": "1d454ebf76c0fe2efd38c824c7a2e2b4b8efd0e0e8eaa7e916362586a56f7afe",
+      "role": "D2: fail-closed guard on evidence_missing (async + deterministic sync paths)"
+    }
+  ]
+}

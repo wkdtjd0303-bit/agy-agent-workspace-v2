@@ -1,6 +1,6 @@
 {
   "version": "v1.0",
-  "updated_at": 1789956546.9120414,
+  "updated_at": 1790232865.2682514,
   "categories": {
     "gameplay": {
       "passed": 0,
@@ -8,8 +8,8 @@
       "score": 0.0
     },
     "visual": {
-      "passed": 1,
-      "total": 1,
+      "passed": 0,
+      "total": 0,
       "score": 100.0
     },
     "ux": {
@@ -29,14 +29,280 @@
     }
   },
   "overall_score": 100.0,
-  "previous_overall_score": 0.0,
-  "delta": 100.0,
+  "previous_overall_score": 100.0,
+  "delta": 0.0,
   "history": [
     {
       "milestone": "v1.0",
-      "timestamp": 1789956546.9120378,
+      "timestamp": 1790219521.080193,
       "overall_score": 100.0,
-      "delta": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790219769.6708324,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790220452.216749,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790221148.1001337,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790222014.4994688,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790224221.3783374,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790226217.2912154,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790226414.5622432,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790226877.087699,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790227877.6912136,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790228092.092573,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790228984.0513175,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790229305.903174,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790229511.2928536,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790230421.5321007,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790230931.5995963,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790231610.5619304,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790232218.4444444,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790232666.3448899,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 100.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790232865.2682483,
+      "overall_score": 100.0,
+      "delta": 0.0,
       "categories": {
         "gameplay": 0.0,
         "visual": 100.0,
@@ -54,40 +320,31 @@
   },
   "active_qcs": [
     {
-      "id": "QC-V-01",
-      "category": "visual",
-      "description": "반응형 레이아웃 및 뷰포트 오버플로우 방어",
-      "level": 2,
-      "verification_rule": "모바일(390px) ~ 데스크톱(1280px) 가로 스크롤 버그 없이 flex/grid 반응형 처리",
+      "id": "QC-A-01",
+      "category": "architecture",
+      "description": "명령행 인자(Argparse/Click) 유효성 검증 및 도움말(--help) 출력 완결",
+      "level": 1,
+      "verification_rule": "인자 누락 시 크래시 없이 적절한 사용법 안내 및 exit code != 0 처리",
       "status": "PASS",
-      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+      "evidence": "[기계적 디스크 검증] android_build_manager.py 소스코드 내 'exit' 물리적 토큰 검출 완료"
     },
     {
       "id": "QC-U-01",
       "category": "ux",
-      "description": "입력 폼 유효성 검증 및 사용자 친화적 에러 메시지 노출",
+      "description": "장시간 작업 시 실시간 진행률(Progress Bar or Spinner or Step Indicator) 피드백",
       "level": 1,
-      "verification_rule": "비어있거나 잘못된 입력 시 브라우저 기본 alert 대신 인라인 에러 피드백 표시",
+      "verification_rule": "침묵(Silent freeze) 없이 터미널에 현재 작업 단계가 ANSI/컬러로 실시간 출력되는가?",
       "status": "PASS",
-      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
-    },
-    {
-      "id": "QC-A-01",
-      "category": "architecture",
-      "description": "상수 및 설정값(Config/Env)의 하드코딩 완전 분리",
-      "level": 1,
-      "verification_rule": "URL, API 키, 색상 토큰이 컴포넌트 내부에 인라인 하드코딩되지 않고 별도 파일로 분리",
-      "status": "PASS",
-      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+      "evidence": "[기계적 디스크 검증] quality_state_manager.py 소스코드 내 'Silent' 물리적 토큰 검출 완료"
     },
     {
       "id": "QC-P-01",
       "category": "performance",
-      "description": "렌더링 지연 방어 및 자원 정리(Cleanup Hook)",
+      "description": "Graceful Shutdown (SIGINT/Ctrl+C) 프로세스 및 리소스 정상 해제",
       "level": 1,
-      "verification_rule": "이벤트 리스너/타이머가 unmount 시 안전하게 removeEventListener/clearTimeout 되는가?",
+      "verification_rule": "SIGINT 시 임시 파일 정리 및 자식 프로세스 안전 종료 핸들러 존재",
       "status": "PASS",
-      "evidence": "QA 전체 승인 컨텍스트에 따라 통과로 자동 집계됨"
+      "evidence": "[기계적 디스크 검증] android_build_manager.py 소스코드 내 'cleanup' 물리적 토큰 검출 완료"
     }
   ]
 }

@@ -300,8 +300,35 @@ class EvidenceValidator:
 
         binary_excludes = [
             ":!*.apk", ":!*.aab", ":!*.png", ":!*.jpg", ":!*.jpeg",
-            ":!*.zip", ":!*.jar", ":!*.bin", ":!*.so"
+            ":!*.zip", ":!*.jar", ":!*.bin", ":!*.so",
+            ":!*.pyc", ":!*__pycache__*", ":!*.class", ":!*.o"
         ]
+
+        def _is_git_dir(d_path: str) -> bool:
+            if not os.path.isdir(d_path):
+                return False
+            real_d = os.path.realpath(d_path)
+            if (
+                os.path.exists(os.path.join(d_path, ".git"))
+                or os.path.isfile(os.path.join(d_path, ".git"))
+                or os.path.exists(os.path.join(real_d, ".git"))
+                or os.path.isfile(os.path.join(real_d, ".git"))
+            ):
+                return True
+            if os.path.islink(d_path) or os.path.basename(d_path) == "agy_agent":
+                try:
+                    r = subprocess.run(
+                        ["git", "rev-parse", "--is-inside-work-tree"],
+                        cwd=d_path,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=1.5
+                    )
+                    return r.returncode == 0 and r.stdout.strip() == "true"
+                except Exception:
+                    return False
+            return False
 
         try:
             # 1. Check git status scoped to workspace (unstaged / staged changes)
@@ -323,10 +350,12 @@ class EvidenceValidator:
                 raw_changed = [
                     l.split()[-1] for l in status_lines
                     if not l.startswith("D ") and "삭제예정" not in l and not l.split()[-1].startswith("..")
+                    and not l.split()[-1].endswith(".pyc") and "__pycache__" not in l.split()[-1]
                 ]
                 raw_deleted = [
                     l.split()[-1] for l in status_lines
                     if l.startswith("D ") and not l.split()[-1].startswith("..")
+                    and not l.split()[-1].endswith(".pyc") and "__pycache__" not in l.split()[-1]
                 ]
 
             # Expand nested git repositories / submodules (e.g. agy_agent)
@@ -334,7 +363,7 @@ class EvidenceValidator:
             seen_sub_repos = set()
             for fpath in raw_changed:
                 full_path = os.path.join(workspace, fpath)
-                if os.path.isdir(full_path) and (os.path.exists(os.path.join(full_path, ".git")) or os.path.isfile(os.path.join(full_path, ".git"))):
+                if os.path.isdir(full_path) and _is_git_dir(full_path):
                     seen_sub_repos.add(fpath)
                     sub_st = subprocess.run(
                         ["git", "status", "--short", "--", "."],
@@ -348,14 +377,19 @@ class EvidenceValidator:
                     if sub_st.returncode == 0 and sub_st.stdout.strip():
                         for sl in sub_st.stdout.splitlines():
                             sl_s = sl.strip()
+                            rel_target = sl_s.split()[-1]
+                            if rel_target.endswith(".pyc") or "__pycache__" in rel_target:
+                                continue
                             if sl_s and not sl_s.startswith("D ") and "삭제예정" not in sl_s:
-                                expanded_changed.append(os.path.join(fpath, sl_s.split()[-1]).replace("\\", "/"))
+                                expanded_changed.append(os.path.join(fpath, rel_target).replace("\\", "/"))
                             elif sl_s and sl_s.startswith("D "):
-                                raw_deleted.append(os.path.join(fpath, sl_s.split()[-1]).replace("\\", "/"))
+                                raw_deleted.append(os.path.join(fpath, rel_target).replace("\\", "/"))
                     else:
-                        expanded_changed.append(fpath)
+                        if not fpath.endswith(".pyc") and "__pycache__" not in fpath:
+                            expanded_changed.append(fpath)
                 else:
-                    expanded_changed.append(fpath)
+                    if not fpath.endswith(".pyc") and "__pycache__" not in fpath:
+                        expanded_changed.append(fpath)
 
             # Also check immediate subdirectories that might be sub-repos
             try:
@@ -363,7 +397,7 @@ class EvidenceValidator:
                     if d in (".git", ".gemini", "node_modules", "build", "dist") or d in seen_sub_repos:
                         continue
                     full_d = os.path.join(workspace, d)
-                    if os.path.isdir(full_d) and (os.path.exists(os.path.join(full_d, ".git")) or os.path.isfile(os.path.join(full_d, ".git"))):
+                    if os.path.isdir(full_d) and _is_git_dir(full_d):
                         sub_st = subprocess.run(
                             ["git", "status", "--short", "--", "."],
                             cwd=full_d,
@@ -376,10 +410,13 @@ class EvidenceValidator:
                         if sub_st.returncode == 0 and sub_st.stdout.strip():
                             for sl in sub_st.stdout.splitlines():
                                 sl_s = sl.strip()
+                                rel_target = sl_s.split()[-1]
+                                if rel_target.endswith(".pyc") or "__pycache__" in rel_target:
+                                    continue
                                 if sl_s and not sl_s.startswith("D ") and "삭제예정" not in sl_s:
-                                    expanded_changed.append(os.path.join(d, sl_s.split()[-1]).replace("\\", "/"))
+                                    expanded_changed.append(os.path.join(d, rel_target).replace("\\", "/"))
                                 elif sl_s and sl_s.startswith("D "):
-                                    raw_deleted.append(os.path.join(d, sl_s.split()[-1]).replace("\\", "/"))
+                                    raw_deleted.append(os.path.join(d, rel_target).replace("\\", "/"))
             except Exception:
                 pass
 
@@ -411,32 +448,73 @@ class EvidenceValidator:
                 raw_diff_text = diff_un.stdout if diff_un.returncode == 0 else ""
 
             # If sub-repositories exist, also collect their diffs
-            for sr in (list(seen_sub_repos) or ["agy_agent"]):
+            candidate_sub_repos = set(seen_sub_repos)
+            if os.path.isdir(os.path.join(workspace, "agy_agent")):
+                candidate_sub_repos.add("agy_agent")
+            sub_repo_diff_text = ""
+            for sr in (candidate_sub_repos or ["agy_agent"]):
                 full_sr = os.path.join(workspace, sr)
-                if os.path.isdir(full_sr) and (os.path.exists(os.path.join(full_sr, ".git")) or os.path.isfile(os.path.join(full_sr, ".git"))):
-                    sub_diff = subprocess.run(
-                        ["git", "diff", "HEAD", "--", "."] + binary_excludes,
-                        cwd=full_sr,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        errors="replace",
-                        timeout=5.0
-                    )
-                    if sub_diff.returncode == 0 and sub_diff.stdout.strip():
-                        raw_diff_text += "\n" + sub_diff.stdout
-                    else:
-                        sub_diff_un = subprocess.run(
-                            ["git", "diff", "--", "."] + binary_excludes,
-                            cwd=full_sr,
+                real_sr = os.path.realpath(full_sr)
+                for candidate_dir in [real_sr, full_sr]:
+                    if os.path.isdir(candidate_dir) and _is_git_dir(candidate_dir):
+                        sub_diff = subprocess.run(
+                            ["git", "diff", "HEAD", "--", "."] + binary_excludes,
+                            cwd=candidate_dir,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             text=True,
                             errors="replace",
                             timeout=5.0
                         )
-                        if sub_diff_un.returncode == 0 and sub_diff_un.stdout.strip():
-                            raw_diff_text += "\n" + sub_diff_un.stdout
+                        if sub_diff.returncode == 0 and sub_diff.stdout.strip():
+                            sub_repo_diff_text += "\n" + sub_diff.stdout
+                        else:
+                            sub_diff_un = subprocess.run(
+                                ["git", "diff", "--", "."] + binary_excludes,
+                                cwd=candidate_dir,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True,
+                                errors="replace",
+                                timeout=5.0
+                            )
+                            if sub_diff_un.returncode == 0 and sub_diff_un.stdout.strip():
+                                sub_repo_diff_text += "\n" + sub_diff_un.stdout
+
+                        # Check untracked core Python files in sub-repo
+                        try:
+                            st_un = subprocess.run(
+                                ["git", "status", "--short", "--", "."],
+                                cwd=candidate_dir,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True,
+                                timeout=3.0
+                            )
+                            if st_un.returncode == 0 and st_un.stdout.strip():
+                                untracked_files = [
+                                    line.strip().split()[-1]
+                                    for line in st_un.stdout.splitlines()
+                                    if line.strip().startswith("??")
+                                ]
+                                for uf in untracked_files:
+                                    if uf.endswith(".py") and not uf.startswith("tests/") and not uf.endswith(".pyc"):
+                                        d_res = subprocess.run(
+                                            ["git", "diff", "--no-index", "/dev/null", uf],
+                                            cwd=candidate_dir,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            text=True,
+                                            timeout=3.0
+                                        )
+                                        if d_res.stdout.strip():
+                                            sub_repo_diff_text += "\n" + d_res.stdout
+                        except Exception:
+                            pass
+                        break
+
+            if sub_repo_diff_text.strip():
+                raw_diff_text = (sub_repo_diff_text.strip() + "\n" + raw_diff_text).strip()
 
             # [🔒 Patch 2] ALWAYS check HEAD~1..HEAD (last commit) regardless of working tree state.
             # This prevents the "commit and hide" evasion: AI commits report-only changes,
@@ -503,7 +581,7 @@ class EvidenceValidator:
                             if not os.path.exists(sub_dir):
                                 sub_dir = os.path.join(repo_root, fpath)
 
-                            if os.path.isdir(sub_dir) and (os.path.exists(os.path.join(sub_dir, ".git")) or os.path.isfile(os.path.join(sub_dir, ".git"))):
+                            if os.path.isdir(sub_dir) and _is_git_dir(sub_dir):
                                 sub_diff = subprocess.run(
                                     ["git", "diff", "--name-status", "HEAD~1", "HEAD"],
                                     cwd=sub_dir,
@@ -550,8 +628,40 @@ class EvidenceValidator:
                     result["has_changes"] = len(committed_files) > 0 or len(result.get("deleted_files", [])) > 0
 
             if raw_diff_text.strip():
+                # Split diff into per-file chunks and prioritize core files
+                chunks = [c for c in re.split(r'(?=diff --git )', raw_diff_text) if c.strip()]
+                def _diff_priority(chunk_str: str) -> int:
+                    m = re.search(r'diff --git (?:a/)?([^\s]+)', chunk_str)
+                    fn = os.path.basename(m.group(1)) if m else ''
+                    if fn in ('commander.py', 'feedback_classifier.py', 'bot.py', 'roadmap_manager.py'):
+                        return 0
+                    if fn.endswith('.py') and not fn.startswith('test_'):
+                        return 1
+                    if fn.startswith('test_') or '/tests/' in (m.group(1) if m else ''):
+                        return 2
+                    return 3
+
+                sorted_chunks = sorted(chunks, key=_diff_priority)
+                budget_per_chunk = 3500 if len(sorted_chunks) > 1 else max_chars
+                formatted_chunks = []
+                for c in sorted_chunks:
+                    if len(c) > budget_per_chunk:
+                        c_lines = c.splitlines()
+                        capped = []
+                        c_len = 0
+                        for l in c_lines:
+                            if c_len + len(l) + 1 > budget_per_chunk:
+                                capped.append('... [truncated remainder of file diff]')
+                                break
+                            capped.append(l)
+                            c_len += len(l) + 1
+                        formatted_chunks.append('\n'.join(capped))
+                    else:
+                        formatted_chunks.append(c)
+                prioritized_diff = '\n'.join(formatted_chunks)
+
                 result["has_changes"] = True
-                result["raw_diff"] = raw_diff_text[:max_chars]
+                result["raw_diff"] = prioritized_diff[:max_chars]
                 result["summary"] = f"{len(result['changed_files'])} files modified ({len(raw_diff_text.splitlines())} diff lines)"
             else:
                 result["summary"] = "Clean working tree (0 unstaged diff lines)"

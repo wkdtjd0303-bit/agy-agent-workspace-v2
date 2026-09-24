@@ -54,7 +54,7 @@ class TestTelemetryStatusManager(unittest.TestCase):
         embed = build_telemetry_embed(self.sm)
         self.assertIsNotNone(embed)
         self.assertIn("Control Tower", embed.title)
-        self.assertIn(len(embed.fields), (4, 5, 6))
+        self.assertIn(len(embed.fields), (4, 5, 6, 7))
 
         field_names = [f.name for f in embed.fields]
         self.assertTrue(any("채팅방별 AI 실시간 작업 관제" in name for name in field_names))

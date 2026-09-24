@@ -227,10 +227,11 @@ class HelpManager:
                 f"  *(웹/SaaS, 2D/3D 게임, 레트로 픽셀 게임, 윈도우 네이티브, 안드로이드 모바일 등 템플릿·벤치마크·기능 1분 기획)*\n"
                 f"  💡 **실전 예시**: `{p}plan 슬더스 스타일 덱빌딩 카드 게임`\n"
                 f"• `{p}setup` : 🎯 **채널 프로젝트 맞춤형 1클릭 프리셋 UI**\n"
-                f"• `{p}setup [web|app|game|store|bot|read]` : 텍스트로 프리셋 즉시 적용\n"
+                f"• `{p}setup [web|app|windows|game|store|bot|read]` : 텍스트로 프리셋 즉시 적용\n"
                 f"  - `web` : 웹 & SaaS 풀스택 (Playwright E2E)\n"
                 f"  - `app` : 모바일 & 안드로이드 네이티브 (Android MCP 12개 도구 & !sim)\n"
-                f"  - `game` : 60fps WebGL/Canvas/Three.js 게임\n"
+                f"  - `windows` : 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6, Fluent Design)\n"
+                f"  - `game` : 게임 (Web Canvas/WebGL · Unity · Godot · Pygame, 60fps)\n"
                 f"  - `store` : 커머스/스토어 랜딩 (CRO 최적화 & OG 태그)\n"
                 f"  - `bot` : 백그라운드 자동화/데몬/봇\n"
                 f"  - `read` : 100% 무수정 기획 & 리서치 자문"
@@ -265,6 +266,7 @@ class HelpManager:
                 f"• 🪽 `{p}engine coder hermes` / `{p}engine qa hermes` : Nous Research 완전 자율형 Hermes 에이전트 연동\n"
                 f"• 🧠 `{p}engine coder codex` / `{p}engine qa codex` : OpenAI Codex CLI(o3-mini/gpt-4o) 연동\n"
                 f"• 🟣 `{p}engine coder claude` / `{p}engine qa claude` : Anthropic Claude Code 연동\n"
+                f"• ⚡ `{p}engine coder opencode` / `{p}engine qa opencode` : OpenCode CLI(멀티 프로바이더·세션 지속·MCP) 연동\n"
                 f"• 🌐 `{p}engine qa [qwen|deepseek|claude-3.7]` : OpenRouter 다양한 모델 검증관 배정\n"
                 f"• 🔄 `{p}engine coder agy` & `{p}engine qa agy` : Antigravity 기본 엔진으로 원복\n"
                 f"• 🤖 `{p}identity` (또는 `{p}whoami`) : 현재 채널 세션의 에이전트 정체성(AGY vs Hermes) 및 배정 모델 확인"
@@ -588,7 +590,7 @@ class HelpInteractiveView(discord.ui.View):
         clean = page_input.lower().strip()
         if clean in ("golden5", "golden", "골든", "핵심", "5선", "필수", "치트시트", "cheat", "essential", "core", "daily", "3선"):
             return "golden5"
-        elif clean in ("dev", "coding", "code", "개발", "코딩", "기획", "pair", "single", "read", "plan", "setup", "mode", "engine", "ai", "codex", "claude", "openrouter", "api", "엔진", "인공지능", "외부", "1"):
+        elif clean in ("dev", "coding", "code", "개발", "코딩", "기획", "pair", "single", "read", "plan", "setup", "mode", "engine", "ai", "codex", "claude", "openrouter", "opencode", "api", "엔진", "인공지능", "외부", "1"):
             return "dev"
         elif clean in ("auto", "autopilot", "오토", "오토파일럿", "loop", "evolve", "순환", "자율", "루프", "2"):
             return "auto"

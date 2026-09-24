@@ -552,6 +552,16 @@ class AndroidVisionInspector:
 
         # Build component-level crop assets and Before/After cards via UIVisualDiffer
         crop_assets = []
+        has_state_transition = False
+        # [Anti-Gaming Ground Truth] 파일명/토큰이 아니라 실 픽셀 비교로만 상태 전이·다양성을 계측한다.
+        transition_evidence: Dict[str, Any] = {
+            "has_real_diff": False, "authentic": False, "reason": "미계산",
+        }
+        state_evidence: Dict[str, Any] = {
+            "state_count": 0, "authentic_frames": 0, "reason": "미계산",
+        }
+        state_basis = "filename"
+        transition_basis = "filename"
         try:
             from ui_visual_differ import UIVisualDiffer
             crops_dir = os.path.join(workspace, "reports", "gate5", "screenshots", "crops")
@@ -567,7 +577,11 @@ class AndroidVisionInspector:
 
             # Generate Truthful State Transition or True Before/After comparison cards
             before_img, after_img, b_desc, a_desc = cls.select_before_after_pair(target_images)
+            diff_res = None
             if before_img and after_img:
+                # 실 픽셀 차분 측정(빈/검은 프레임 위조 거부 포함) — 이것이 유일한 전이 증거다.
+                transition_evidence = UIVisualDiffer.measure_pixel_diff(before_img, after_img)
+                transition_basis = "pixel" if transition_evidence.get("authentic") else "filename"
                 diff_card_path = os.path.join(crops_dir, "00_before_after_interaction_diff.png")
                 diff_res = UIVisualDiffer.create_smart_micro_diff_card(
                     before_image_path=before_img,
@@ -585,8 +599,14 @@ class AndroidVisionInspector:
                 if diff_res and os.path.exists(diff_res):
                     crop_assets.append(diff_res)
                     screenshots_tuples.insert(0, ("state_transition", "[전이] 실기기 상태 전이 (State 1 ➔ 2)", diff_res))
+            # 전이 인정 조건: 실 픽셀 차분 카드가 실제로 생성되었고, 실 차분이 존재할 때만.
+            has_state_transition = bool(diff_res) and bool(transition_evidence.get("has_real_diff"))
+
+            # 상태 다양성도 실 픽셀 클러스터링으로 계측 (파일명 무관).
+            state_evidence = UIVisualDiffer.count_distinct_states(target_images)
+            state_basis = "pixel" if int(state_evidence.get("authentic_frames", 0) or 0) >= 2 else "filename"
         except Exception as e:
-            logger.debug(f"UIVisualDiffer component cropping skipped: {e}")
+            logger.warning(f"UIVisualDiffer component cropping/evidence skipped: {e}")
 
         # Build summary markdown for 3-agent Pair collaboration and Discord embeds
         summary_md_parts = [
@@ -622,13 +642,62 @@ class AndroidVisionInspector:
                 "screenshots": found_images,
                 "component_crops": crop_assets,
                 "verdict": "PASS" if avg_score >= 80 else "WARN",
-                "summary": full_summary_md
+                "summary": full_summary_md,
+                # [Anti-Gaming Ground Truth] 실 픽셀 기반 증거 메타데이터 (파일명 아님)
+                "state_diversity": int(state_evidence.get("state_count", 0) or 0),
+                "state_transition_verified": bool(has_state_transition),
+                "state_transition_evidence": transition_evidence,
+                "state_diversity_evidence": state_evidence,
+                "evidence_basis": "pixel" if (state_basis == "pixel" or transition_basis == "pixel") else "filename",
             }
             with open(vqa_file, "w", encoding="utf-8") as f:
                 json.dump(vqa_payload, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved Gate 5 visual QA evidence to {vqa_file}")
+
+            # [Gate 5 ↔ Depth-First Governor] 실제 프레임버퍼/비전 증거를 심도 게이트에
+            # 기록하여 정적 토큰 게이밍을 차단한다 (실기기 상태 전이/터치/대비 검증).
+            try:
+                from product_refinement_governor import (
+                    ProductRefinementGovernor, _STATE_NAME_TOKENS,
+                )
+                # 실 픽셀 클러스터링 결과가 없을 때만 파일명 fallback 을 쓰되,
+                # 이 경우 evidence_grade 는 runtime_partial 로 하향된다(Proven 승격 금지).
+                effective_state_count = int(state_evidence.get("state_count", 0) or 0)
+                if state_basis == "filename":
+                    fn_tokens = set()
+                    for _p in target_images:
+                        _n = os.path.basename(_p).lower()
+                        for _t in _STATE_NAME_TOKENS:
+                            if _t in _n:
+                                fn_tokens.add(_t)
+                    effective_state_count = max(effective_state_count, len(fn_tokens))
+                    if fn_tokens:
+                        logger.warning(
+                            "[Gate5] 실 픽셀 상태 클러스터링 불가 → 파일명 fallback 증거 사용 "
+                            f"({len(fn_tokens)}종). evidence_grade 는 runtime_partial 로 하향됩니다."
+                        )
+                recorded = ProductRefinementGovernor.sync_from_vision_report(
+                    workspace=workspace,
+                    avg_score=float(avg_score),
+                    state_count=effective_state_count,
+                    has_state_transition=has_state_transition,
+                    source=vqa_file,
+                    state_basis=state_basis,
+                    transition_basis=transition_basis,
+                    score_basis="pixel" if transition_evidence.get("authentic") else "filename",
+                )
+                if not recorded:
+                    logger.warning(
+                        "[Gate5] 심도 거버너 런타임 증거가 하나도 기록되지 않았습니다 "
+                        f"(state_count={effective_state_count}, transition={has_state_transition}, "
+                        f"avg_score={avg_score}). 심도 게이트는 정적 기준선(static_baseline)으로 유지됩니다."
+                    )
+                else:
+                    logger.info(f"[Gate5] 심도 거버너 런타임 증거 기록: {recorded}")
+            except Exception as _gov_err:
+                logger.warning(f"[Gate5] 심도 거버너 런타임 증거 동기화 실패: {_gov_err}")
         except Exception as e:
-            logger.debug(f"Failed to persist visual_qa.json: {e}")
+            logger.warning(f"Failed to persist visual_qa.json: {e}")
 
         return {
             "success": True,

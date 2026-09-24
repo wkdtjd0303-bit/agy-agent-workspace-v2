@@ -26,7 +26,7 @@ class TestGitManager(unittest.TestCase):
         self.assertTrue(info["is_git"])
         self.assertIn("main", info["branch"])
         self.assertTrue(len(info["commit_hash"]) >= 7)
-        self.assertIn("wkdtjd0303-bit/agy_agent", info["remote_url"])
+        self.assertTrue(any(repo_name in info["remote_url"] for repo_name in ["wkdtjd0303-bit/agy_agent", "wkdtjd0303-bit/agy-agent-workspace-v2"]))
 
     def test_get_recent_commits(self):
         commits = GitRepoManager.get_recent_commits(self.workspace, limit=3)

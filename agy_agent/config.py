@@ -34,12 +34,12 @@ DISCORD_SERVER_MANAGER_BOT_TOKEN = (
 CONSULTANT_MODEL = (
     os.getenv("Consultant_MODEL")
     or os.getenv("CONSULTANT_MODEL")
-    or "openai/gpt-6-astra"
+    or "opencode-go/glm-5.3"
 ).strip()
 CONSULTANT_ENGINE = (
     os.getenv("Consultant_ENGINE")
     or os.getenv("CONSULTANT_ENGINE")
-    or "openrouter"
+    or "opencode"
 ).strip()
 DEFAULT_WORKSPACE = os.getenv("DEFAULT_WORKSPACE", str(Path.home() / "Desktop" / "autocoding"))
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
@@ -47,8 +47,8 @@ COMMAND_PREFIXES = tuple(p.strip() for p in os.getenv("COMMAND_PREFIXES", f"{COM
 AGY_PATH = os.getenv("AGY_PATH", "agy")
 AGY_PRINT_TIMEOUT = os.getenv("AGY_PRINT_TIMEOUT", "30m")
 AGY_EFFORT = os.getenv("AGY_EFFORT", "high").strip()
-DEFAULT_AI_ENGINE = os.getenv("DEFAULT_AI_ENGINE", "agy")
-DEFAULT_ENGINE = os.getenv("DEFAULT_ENGINE", "agy").lower().strip()
+DEFAULT_AI_ENGINE = os.getenv("DEFAULT_AI_ENGINE", "opencode")
+DEFAULT_ENGINE = os.getenv("DEFAULT_ENGINE", "opencode").lower().strip()
 HERMES_PATH = os.getenv("HERMES_PATH", "/home/jangsung/.local/bin/hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "openrouter/meta-llama/llama-3.3-70b-instruct").strip()
 HERMES_ENGINE = os.getenv("HERMES_ENGINE", "hermes").strip()
@@ -57,6 +57,8 @@ CODEX_PATH = os.getenv("CODEX_PATH", "/home/jangsung/.npm-global/bin/codex")
 COPILOT_PATH = os.getenv("COPILOT_PATH", "/home/jangsung/.npm-global/bin/copilot")
 CLAUDE_PATH = os.getenv("CLAUDE_PATH", "claude")
 OPENCODE_PATH = os.getenv("OPENCODE_PATH", "opencode")
+# OpenCode Go 구독 사용량/한도 조회용 API 키 (미설정 시 로컬 opencode 인증 저장소에서 자동 조회)
+OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY", "")
 
 def _get_clean_openrouter_key() -> str:
     raw = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -66,7 +68,7 @@ def _get_clean_openrouter_key() -> str:
     return raw.strip('"\'; ')
 
 OPENROUTER_API_KEY = _get_clean_openrouter_key()
-QA2_MODEL = os.getenv("QA2_MODEL", "upstage/solar-pro4").strip()
+QA2_MODEL = os.getenv("QA2_MODEL", "gemini-3.8-flash-high").strip()
 raw_qa2_engine = os.getenv("QA2_ENGINE", "hermes").strip()
 QA2_ENGINE = "hermes" if raw_qa2_engine in ("openrouter", "hermes") else raw_qa2_engine
 
@@ -217,10 +219,10 @@ def parse_qa_selection(
 CLAUDE_SONNET_MIN_DIFFICULTY = float(os.getenv("CLAUDE_SONNET_MIN_DIFFICULTY", "7.5"))
 CLAUDE_SONNET_MIN_QUOTA_PCT = float(os.getenv("CLAUDE_SONNET_MIN_QUOTA_PCT", "0.10"))
 
-CODER_MODEL = os.getenv("CODER_MODEL", "gemini-3.1-pro-high")
+CODER_MODEL = os.getenv("CODER_MODEL", "opencode-go/deepseek-v4.1-flash")
 CODER_FALLBACK_MODEL = os.getenv("CODER_FALLBACK_MODEL", "gemini-3.7-flash-high")
-COMMANDER_MODEL = os.getenv("COMMANDER_MODEL", "gemini-3.7-flash-middle")
-QA_MODEL = os.getenv("QA_MODEL", "gemini-3.1-pro-high")
+COMMANDER_MODEL = os.getenv("COMMANDER_MODEL", "opencode-go/mimo-v2.6-flash")
+QA_MODEL = os.getenv("QA_MODEL", "opencode-go/deepseek-v4.1-flash")
 QA_FALLBACK_MODEL = os.getenv("QA_FALLBACK_MODEL", "gemini-3.7-flash-high")
 QA_BACKUP_MODEL = os.getenv("QA_BACKUP_MODEL", "openrouter/qwen/qwen-2.5-coder-32b-instruct")
 QA_BACKUP_MODELS = [
@@ -229,12 +231,37 @@ QA_BACKUP_MODELS = [
 ]
 QA_AUTO_MODEL = os.getenv("QA_AUTO_MODEL", "gemini-3.1-pro-high")
 QA_AUTO_FALLBACK_MODEL = os.getenv("QA_AUTO_FALLBACK_MODEL", "gemini-3.7-flash-high")
-AUDITOR_MODEL = os.getenv("AUDITOR_MODEL", "gemini-3.1-pro-high")
+AUDITOR_MODEL = os.getenv("AUDITOR_MODEL", "opencode-go/deepseek-v4.1-flash")
 VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.8-flash-high")
 CLAUDE_QUOTA_THRESHOLD = float(os.getenv("CLAUDE_QUOTA_THRESHOLD", "0.05"))
 PAIR_MAX_ROUNDS = int(os.getenv("PAIR_MAX_ROUNDS", "20"))
 QA_MAX_ROUNDS = int(os.getenv("QA_MAX_ROUNDS", "20"))
 HOTFIX_MAX_ROUNDS = int(os.getenv("HOTFIX_MAX_ROUNDS", "4"))  # 핫픽스 수렴 상한 (무한 패치 루프 방지)
+
+# ==============================================================================
+# [🔋 토큰 절약] 인플라이트 재시도/폴백 예산 (In-flight Retry & Fallback Budget)
+# ------------------------------------------------------------------------------
+# 기존 구조는 한 스텝이 실패하면 최대 8회까지 풀컨텍스트 재호출을 발생시켰습니다.
+#   (503 백오프 3회 → Gemini 폴백 후보 4회 순회)
+# 아래 값으로 상한을 두어 재시도 폭주를 원천 차단합니다.
+# ==============================================================================
+AGY_OVERLOAD_RETRY_DELAYS = [
+    int(s) for s in os.getenv("AGY_OVERLOAD_RETRY_DELAYS", "30,90").split(",") if s.strip().isdigit()
+] or [30, 90]  # 503/과부하 시 동일 모델 백오프 재시도 (기존 30,60,90 → 30,90)
+
+AGY_FALLBACK_MAX_CANDIDATES = int(os.getenv("AGY_FALLBACK_MAX_CANDIDATES", "1"))  # 모델 폴백 후보 최대 개수 (기존 4)
+
+AGY_RETRY_MAX_ATTEMPTS = int(os.getenv("AGY_RETRY_MAX_ATTEMPTS", "2"))  # 자가복구 재시도 최대 횟수 (세션유지 + 새세션)
+
+# [🛡️ Gemini 한도 보호] 원본 모델이 Gemini 가 아닐 때(예: opencode-go/*, gpt-oss)
+# 재시도/폴백 과정에서 Antigravity Gemini 로 넘어갈지 여부. 기본 0(금지).
+AGY_ALLOW_GEMINI_FALLBACK = os.getenv("AGY_ALLOW_GEMINI_FALLBACK", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# 비-Gemini 원본 모델이 소진되었을 때 시도할 대체 모델(쉼표 구분). Gemini 가 아닌 네이티브 모델만 권장.
+AGY_NON_GEMINI_FALLBACK_CHAIN = [
+    s.strip() for s in os.getenv("AGY_NON_GEMINI_FALLBACK_CHAIN", "gpt-oss-120b-medium").split(",") if s.strip()
+]
+
 AUTOPILOT_MAX_CYCLES = int(os.getenv("AUTOPILOT_MAX_CYCLES", "0"))  # Decommissioned legacy compatibility
 ENABLE_SELF_HEALING = False  # Decommissioned legacy compatibility
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "1538529408703266902"))

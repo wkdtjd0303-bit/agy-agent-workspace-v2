@@ -2333,9 +2333,45 @@ class Commander:
 
         how_summary = ", ".join(how_steps) + "을(를) 적용합니다."
 
-        ws_label = workspace or "작업 디렉토리"
+        # Determine authentic physical path from reality, key_directories, entrypoints, or domain
+        src_path = ""
+        if workspace and os.path.isdir(workspace):
+            try:
+                reality = cls.inspect_codebase_reality(workspace)
+                # 1. Entrypoints directory
+                if reality.entrypoints:
+                    primary_entry = reality.entrypoints[0]
+                    src_dir = os.path.dirname(primary_entry).replace("\\", "/")
+                    if src_dir and src_dir != ".":
+                        src_path = f"{src_dir}/"
+                # 2. Key source directories
+                if not src_path and reality.key_directories:
+                    src_dirs = [
+                        d for d in reality.key_directories
+                        if any(k in d.lower() for k in ["src/main", "src", "app/src", "lib", "core", "ui"])
+                    ]
+                    if src_dirs:
+                        src_dirs.sort(key=lambda d: len(d), reverse=True)
+                        src_path = src_dirs[0].rstrip("/") + "/"
+                # 3. Source files directory
+                if not src_path and reality.source_files:
+                    primary_src = reality.source_files[0]
+                    src_dir = os.path.dirname(primary_src).replace("\\", "/")
+                    if src_dir and src_dir != ".":
+                        src_path = f"{src_dir}/"
+            except Exception:
+                pass
+
+        if not src_path or src_path in ("./", "/", "작업 디렉토리/"):
+            ws_label = os.path.basename(os.path.abspath(workspace)) if workspace else ""
+            if domain == "mobile_app" or ("pdf" in p_lower or "앱" in p_lower):
+                src_path = "app/src/main/"
+            elif ws_label and ws_label not in (".", "/"):
+                src_path = f"{ws_label}/src/" if not ws_label.endswith("/") else f"{ws_label}src/"
+            else:
+                src_path = "src/"
+
         target_scope = " / ".join(dict.fromkeys(targeted_keywords[:3])) if targeted_keywords else "사용자 피드백 요구사항"
-        src_path = "app/src/main/" if (domain == "mobile_app" or ("app" in ws_label.lower() and "pdf" in p_lower)) else f"{ws_label}/"
         who_where = (
             f"• Coder: {target_scope} 실체 구현 및 비동기/UI 인터랙션 최적화\n"
             f"• QA: 사용자 제기 결손 검증, 회귀 방어 및 런타임 안정성 검수\n"
@@ -3152,16 +3188,16 @@ class Commander:
     # ── Feedback Capability Delivery Guard (중복 기획 원천 차단) ─────────────
     _FEEDBACK_AREA_KEYWORDS: Dict[str, tuple] = {
         # Legacy areas
-        "brand_renewal": ("브랜드", "로고", "앱 이름", "앱명", "팔레트", "컬러", "리뉴얼", "브랜드 테마"),
-        "button_readability": ("버튼", "가독성", "wcag", "48dp", "고대비", "터치 타깃"),
-        "inplace_text_edit": ("인플레이스", "in-place", "텍스트 스트림", "no-ocr", "원본 텍스트", "글자 수정", "content stream"),
-        "lossless_save": ("무손실", "내보내기", "손실 없", "lossless"),
-        # New 5-point areas (Dynamic & Comprehensive user feedback)
-        "design_cohesion": ("디자인", "통일성", "연결성", "매칭", "디자인 시스템", "일관성", "디자인 통일성"),
-        "naming_rebrand": ("명칭", "리브랜딩", "도큐크래프트", "docucraft", "앱 이름", "신규 브랜드", "이름"),
-        "icon_renewal": ("아이콘", "그레이톤", "라이트 그레이", "gray", "icon", "런처 아이콘"),
-        "dashboard_actions": ("대시보드", "메인 화면", "홈 화면", "메인 페이지", "4대", "열기", "빈페이지", "합치기", "변환하기"),
-        "crash_stability": ("크래시", "튕김", "튕겨", "안정성", "crash", "비정상 종료", "최적화"),
+        "brand_renewal": ("브랜드 리뉴얼", "신규 로고 및 앱 이름", "첨부파일 컬러 팔레트", "브랜드 테마"),
+        "button_readability": ("버튼 가독성 개선", "터치 타깃 크기 48dp", "wcag aa 명도 대비"),
+        "inplace_text_edit": ("pdf 원본 텍스트 직접 편집", "in-place text stream", "텍스트 스트림 직접 수정", "no-ocr"),
+        "lossless_save": ("무손실 내보내기", "무손실 주석 병합", "무손실 파일 저장"),
+        # 5-point User Feedback Areas (Specific multi-token domain signatures)
+        "design_cohesion": ("디자인 통일성 개편", "시각 요소 매칭", "디자인 통일성·연결성", "디자인 통일성"),
+        "naming_rebrand": ("명칭 리브랜딩", "도큐크래프트 대체", "신규 브랜드 네이밍 확정", "전역 식별자·ui 리브랜딩"),
+        "icon_renewal": ("라이트 그레이톤", "신규 앱 아이콘 및 시각 에셋", "그레이톤 아이콘", "아이콘 리뉴얼"),
+        "dashboard_actions": ("메인 대시보드 개편", "4대 핵심 기능 버튼 전면 배치", "메인 화면 ui 리뉴얼"),
+        "crash_stability": ("pdf 크래시 최적화", "런타임 크래시 최적화", "안정성 및 크래시 방어", "비정상 종료/멈춤 원인 분석"),
     }
     _FEEDBACK_AREA_COMPONENTS: Dict[str, set] = {
         "brand_renewal": {"brandbuttons", "branddesignsystem", "brandlogo"},
@@ -3182,14 +3218,7 @@ class Commander:
         macro_memory_text: str = "",
         workspace: Optional[str] = None,
     ) -> set:
-        """Detects which user-feedback capabilities are ALREADY delivered.
-
-        Evidence sources (never the static root goal, so a completed milestone is
-        never re-planned):
-          1. Components physically present on disk (CodebaseReality).
-          2. Completed milestone headers recorded in ROADMAP.md.
-          3. Macro cycle memory (Commander directive / Auditor conclusion).
-        """
+        """Detects which user-feedback capabilities are ALREADY delivered on disk."""
         if reality is None:
             reality = cls.inspect_codebase_reality(workspace)
 
@@ -3205,9 +3234,9 @@ class Commander:
 
         delivered: set = set()
         for area, keywords in cls._FEEDBACK_AREA_KEYWORDS.items():
-            if cls._FEEDBACK_AREA_COMPONENTS.get(area, set()) & comps:
-                delivered.add(area)
-            elif any(k.lower() in recorded for k in keywords):
+            has_disk = bool(cls._FEEDBACK_AREA_COMPONENTS.get(area, set()) & comps)
+            has_recorded = any(k.lower() in recorded for k in keywords)
+            if has_disk and has_recorded:
                 delivered.add(area)
         return delivered
 
@@ -3220,8 +3249,12 @@ class Commander:
         workspace: Optional[str] = None,
     ) -> bool:
         """
-        [Defect 1 Guard] Determines whether the user feedback directive has already been delivered.
-        Avoids infinite re-planning of identical feedback across consecutive cycles in !mode 3.
+        [Defect 1 Guard] Determines whether THIS specific user feedback directive has ALREADY been delivered.
+        Grounded strictly in:
+          1. Equivalent completed milestone in ROADMAP.md (similarity >= 0.70).
+          2. Explicit Macro Memory showing this exact feedback milestone was executed and approved.
+          3. Physical disk components matching the required deliverables.
+        NEVER falsely matches on generic keywords in past milestones.
         """
         if not user_prompt:
             return False
@@ -3230,42 +3263,46 @@ class Commander:
             reality = cls.inspect_codebase_reality(workspace)
 
         prompt_low = user_prompt.lower()
-        recorded = " ".join([
-            " ".join(reality.completed_milestones or []),
-            macro_memory_text or "",
-        ]).lower()
 
-        # 1. Check legacy feedback goal
+        # 1. Legacy feedback goal check (requires physical components + specific completed milestone)
         is_legacy = ("글자를 넣어도 크기가 조절되지 않는" in prompt_low or "첨부파일 컬러 팔레트" in prompt_low)
-        delivered_areas = cls._delivered_feedback_areas(reality, macro_memory_text, workspace)
         if is_legacy:
-            legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
-            return legacy_areas.issubset(delivered_areas)
+            try:
+                comps = {str(c).lower() for c in (reality.implemented_components or [])}
+            except Exception:
+                comps = set()
+            legacy_comps = {"brandbuttons", "pdfcontentstreameditor", "pdfexportengine"}
+            if not legacy_comps.issubset(comps):
+                return False
+            has_legacy_done = any(
+                ("브랜드 리뉴얼" in m and "텍스트 직접 편집" in m)
+                for m in (reality.completed_milestones or [])
+            ) or ("브랜드 리뉴얼" in macro_memory_text and "감사관" in macro_memory_text)
+            return bool(has_legacy_done)
 
         # 2. Decompose user feedback to obtain dynamic signature
         decomp = cls.decompose_user_feedback(user_prompt, workspace=workspace)
-        target_title = (decomp.get("title") or "").strip().lower()
-        title_core = target_title.replace("사용자 피드백 긴급 반영:", "").strip()
+        decomp_title = decomp.get("title", "").strip()
+        if not decomp_title:
+            return False
 
-        # Direct title or core check in recorded completed milestones or macro memory
-        if title_core and title_core in recorded:
-            return True
+        from roadmap_manager import capability_similarity
 
+        # 3. Check if an equivalent milestone has actually been COMPLETED in ROADMAP
         for done_title in (reality.completed_milestones or []):
-            try:
-                from roadmap_manager import capability_similarity
-                if capability_similarity(decomp.get("title", ""), done_title) >= 0.55:
-                    return True
-            except Exception:
-                pass
+            sim = capability_similarity(decomp_title, done_title)
+            if sim >= 0.70:
+                return True
+            title_core = decomp_title.replace("사용자 피드백 긴급 반영:", "").strip()
+            if len(title_core) >= 15 and title_core.lower() in done_title.lower():
+                return True
 
-        # 3. Check dynamic active areas
-        active_areas = {
-            area for area, keywords in cls._FEEDBACK_AREA_KEYWORDS.items()
-            if any(k.lower() in prompt_low for k in keywords)
-        }
-        if active_areas and active_areas.issubset(delivered_areas):
-            return True
+        # 4. Check Macro Memory: must show this feedback milestone was completed & approved in a past cycle
+        if macro_memory_text:
+            title_core = decomp_title.replace("사용자 피드백 긴급 반영:", "").strip().lower()
+            if title_core and title_core in macro_memory_text.lower():
+                if any(k in macro_memory_text for k in ["감사관 승인", "PASS", "승인 완료", "확정 승인"]):
+                    return True
 
         return False
 
@@ -3278,8 +3315,7 @@ class Commander:
     ) -> bool:
         delivered = cls._delivered_feedback_areas(reality, macro_memory_text, workspace)
         legacy_areas = {"brand_renewal", "button_readability", "inplace_text_edit", "lossless_save"}
-        new_areas = {"design_cohesion", "naming_rebrand", "icon_renewal", "dashboard_actions", "crash_stability"}
-        return legacy_areas.issubset(delivered) or new_areas.issubset(delivered) or len(delivered) >= 4
+        return legacy_areas.issubset(delivered)
 
     @classmethod
     def _feedback_signature_matches(cls, text: str) -> bool:

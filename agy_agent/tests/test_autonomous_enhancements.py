@@ -2,8 +2,8 @@
 """
 Unit tests for Autonomous Evolution & 95% Intent Anchor System.
 Tests:
-  1. RoadmapManager generates milestones from PRD.md requirements.
-  2. RoadmapManager auto-expansion prioritizes unmapped PRD requirements before generic templates.
+  1. RoadmapManager does NOT use PRD.md as a priority source (PRD = execution journal).
+  2. RoadmapManager auto-expansion is driven by codebase reality, not unmapped PRD REQs.
   3. EvidenceValidator evaluates PRD feature coverage with strict code syntax checks.
   4. Commander plan_e2e_operation integrates active roadmap milestone.
 """
@@ -33,7 +33,8 @@ class TestAutonomousEnhancements(unittest.TestCase):
         import shutil
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_roadmap_generated_from_prd(self):
+    def test_roadmap_does_not_use_prd_as_priority_source(self):
+        """[PRD=일기장] PRD의 REQ 목록은 초기 사다리로 변환되지 않는다."""
         prd_content = """# PRD
 ## Core Requirements
 * **REQ-001 (Telemetry Dashboard)**: Collect CPU, RAM, and battery stats every minute.
@@ -42,17 +43,35 @@ class TestAutonomousEnhancements(unittest.TestCase):
         with open(os.path.join(self.test_dir, "PRD.md"), "w", encoding="utf-8") as f:
             f.write(prd_content)
 
+        # No production source on disk -> fall back to the generic template, never PRD REQs.
         rm = RoadmapManager(self.test_dir)
         created = rm.ensure_exists()
         self.assertTrue(created)
         self.assertTrue(rm.load())
 
-        cur_ms = rm.get_current_milestone(auto_expand=False)
-        self.assertIsNotNone(cur_ms)
-        self.assertIn("REQ-001", cur_ms.title)
-        self.assertIn("Telemetry Dashboard", cur_ms.title)
+        all_titles = " ".join(ms.title for ms in rm._milestones)
+        self.assertNotIn("REQ-001", all_titles)
+        self.assertNotIn("Telemetry Dashboard", all_titles)
 
-    def test_roadmap_auto_expand_prioritizes_unmapped_prd(self):
+    def test_roadmap_generated_from_codebase_not_prd(self):
+        """소스 코드가 있으면 ROADMAP은 코드 실사 기반으로 생성된다(PRD REQ 아님)."""
+        with open(os.path.join(self.test_dir, "PRD.md"), "w", encoding="utf-8") as f:
+            f.write("* **REQ-001 (Unrelated Requirement)**: Something from the old plan.\n")
+        src = os.path.join(self.test_dir, "app", "src", "main", "java", "com", "example", "pdfviewer")
+        os.makedirs(src, exist_ok=True)
+        with open(os.path.join(src, "PdfViewerScreen.kt"), "w", encoding="utf-8") as f:
+            f.write("class PdfViewerScreen")
+
+        rm = RoadmapManager(self.test_dir)
+        self.assertTrue(rm.ensure_exists())
+        self.assertTrue(rm.load())
+
+        all_titles = " ".join(ms.title for ms in rm._milestones)
+        self.assertNotIn("REQ-001", all_titles)
+        self.assertIn("문서", all_titles)  # codebase-aware PDF synthesis
+
+    def test_roadmap_auto_expand_ignores_unmapped_prd(self):
+        """auto_expand는 미매핑 PRD REQ를 우선하지 않고 코드 실사로 사다리를 확장한다."""
         prd_content = """# PRD
 ## Requirements
 * **REQ-001 (Initial Feature)**: Do initial work.
@@ -62,7 +81,6 @@ class TestAutonomousEnhancements(unittest.TestCase):
         with open(os.path.join(self.test_dir, "PRD.md"), "w", encoding="utf-8") as f:
             f.write(prd_content)
 
-        # Existing roadmap only has REQ-001
         roadmap_content = """# 🗺️ Roadmap
 ## v1.0 — [REQ-001] Initial Feature ✅
 - [x] Initial task
@@ -76,10 +94,10 @@ class TestAutonomousEnhancements(unittest.TestCase):
 
         new_milestones = rm.auto_expand_roadmap()
         self.assertTrue(len(new_milestones) > 0)
-        # Should include REQ-002 and REQ-003
-        expanded_titles = [m.title for m in new_milestones]
-        self.assertTrue(any("REQ-002" in t for t in expanded_titles))
-        self.assertTrue(any("REQ-003" in t for t in expanded_titles))
+        expanded_titles = " ".join(m.title for m in new_milestones)
+        # PRD REQs must NOT drive prioritization any more.
+        self.assertNotIn("REQ-002", expanded_titles)
+        self.assertNotIn("REQ-003", expanded_titles)
 
     def test_evidence_validator_code_syntax_and_mock_rejection(self):
         prd_content = """# PRD

@@ -59,16 +59,69 @@ TOOL_SAFETY_HEADER = (
 )
 
 TOOL_SAFETY_FOOTER = (
-    "\n\n[MANDATORY TOOL SAFETY & REASONING REMINDER]\n"
-    "- STRICT DIRECTORY BOUNDARY: NEVER access or modify files outside designated workspace.\n"
-    "- NO VERBOSE ABSOLUTE PATHS: Use compact relative paths (./...) or filenames only.\n"
-    "- THOROUGH REASONING & DIRECT ANSWER FIRST: Answer questions thoroughly, show key diffs/summaries without dumping whole source files.\n"
-    "- `find_by_name`: ALWAYS supply `Pattern`.\n"
-    "- `write_to_file`: OMIT `ArtifactMetadata` on workspace files.\n"
-    "- Modifying files: Use `replace_file_content`.\n"
-    "- PHYSICAL INTEGRITY: Execute builds and tests to verify code compilation and runtime stability.\n"
-    "- Clean URLs only; Do NOT use `ask_question`, `wait`, `sleep`, or `schedule` tools. (Subagents via `invoke_subagent` are fully supported).\n"
+    "\n\n[TOOL SAFETY REMINDER — CRITICAL]\n"
+    "- Do NOT use `ask_question`, `wait`, `sleep`, or `schedule` tools. (Subagents via `invoke_subagent` are supported.)\n"
+    "- STRICT DIRECTORY BOUNDARY: never access or modify files outside the designated workspace.\n"
+    "- `find_by_name`: ALWAYS supply `Pattern`. `write_to_file`: OMIT `ArtifactMetadata` on workspace files.\n"
+    "- Modify existing files with `replace_file_content`. Use compact relative paths and clean URLs.\n"
 )
+
+
+# ==============================================================================
+# [🔋 토큰 절약] 재시도/폴백 예산 가드 (Retry & Fallback Budget Guard)
+# ------------------------------------------------------------------------------
+# 배경: 기존 구조는 원본 모델이 opencode-go/* 같은 비-Gemini 여도 소진/과부하 시
+#       하드코딩된 Gemini 후보(gemini-3.8/3.7/3.1-pro/3-flash)를 최대 4개까지 순회하며
+#       Antigravity Gemini 한도를 조용히 소모했습니다. (1스텝 최대 8회 풀컨텍스트 호출)
+# 원칙: 원본이 Gemini 가 아니면 Gemini 로 넘어가지 않는다.
+#       (해제: AGY_ALLOW_GEMINI_FALLBACK=1 / 후보 수: AGY_FALLBACK_MAX_CANDIDATES)
+# ==============================================================================
+
+_GEMINI_FALLBACK_CHAIN: Tuple[str, ...] = (
+    "gemini-3.8-flash-high",
+    "gemini-3.7-flash-high",
+    "gemini-3.1-pro-high",
+    "gemini-3-flash",
+)
+
+
+def is_gemini_model(model: Optional[str]) -> bool:
+    """Gemini(퍼스트파티) 계열 모델 여부."""
+    return "gemini" in (model or "").lower()
+
+
+def build_fallback_candidates(original_model: Optional[str]) -> List[str]:
+    """쿼터 소진/서버 과부하 시 시도할 대체 모델 후보를 계산한다.
+
+    - 원본이 Gemini      → 아직 소진되지 않은 Gemini 후보 (최대 AGY_FALLBACK_MAX_CANDIDATES 개)
+    - 원본이 비-Gemini   → Gemini 로 우회하지 않는다(기본). AGY_ALLOW_GEMINI_FALLBACK=1 이면 Gemini 허용.
+    - 원본 자신/중복 후보는 제외하며, 후보가 없으면 빈 리스트를 반환한다(호출측에서 폴백 생략).
+    """
+    original = (original_model or "").strip()
+    try:
+        limit = max(0, int(getattr(config, "AGY_FALLBACK_MAX_CANDIDATES", 1)))
+    except Exception:
+        limit = 1
+
+    if is_gemini_model(original) or getattr(config, "AGY_ALLOW_GEMINI_FALLBACK", False):
+        chain = list(_GEMINI_FALLBACK_CHAIN)
+    else:
+        chain = list(getattr(config, "AGY_NON_GEMINI_FALLBACK_CHAIN", ["gpt-oss-120b-medium"]))
+
+    candidates: List[str] = []
+    for candidate in chain:
+        candidate = (candidate or "").strip()
+        if not candidate or candidate == original or candidate in candidates:
+            continue
+        try:
+            from trio_agent_runner import QuotaManager
+            if QuotaManager.is_model_exhausted(candidate):
+                continue
+        except Exception:
+            pass
+        candidates.append(candidate)
+
+    return candidates[:limit]
 
 
 async def safe_on_tool_update(on_tool_update_fn, msg: str):
@@ -198,6 +251,7 @@ def get_workspace_grounding_context(workspace: Optional[str], prompt: str = "") 
         parts.append(qa_summary)
     if diag_notice:
         parts.append(diag_notice)
+
     parts.append("────────────────────────────────────────\n")
 
     return "\n".join(parts) + "\n"
@@ -303,10 +357,10 @@ class AgentRunner:
             eff_lower = effective_model.lower().strip()
 
         session_role = (getattr(session, "role", None) or "coder").lower().strip()
-        default_gemini = "gemini-3.1-pro-high"
 
         # [Quota Guard] Check if the requested model is exhausted.
-        # If exhausted, redirect to a healthy first-party Gemini model before CLI dispatch.
+        # If exhausted, redirect ONLY to a healthy fallback of the SAME family.
+        # 비-Gemini 역할(opencode-go/* 등)을 Gemini 로 조용히 우회시키지 않는다 (Antigravity 한도 누수 차단).
         try:
             from trio_agent_runner import QuotaManager
             is_exhausted = QuotaManager.is_model_exhausted(effective_model)
@@ -315,26 +369,27 @@ class AgentRunner:
 
         if is_exhausted:
             redirect_reason = "할당량 소진(Quota Exhaustion)"
-            fallback_gemini = default_gemini
-            try:
-                from trio_agent_runner import QuotaManager
-                candidates = [default_gemini, "gemini-3.8-flash-high", "gemini-3.7-flash-high", "gemini-3.1-pro-high", "gemini-3-flash"]
-                for candidate in candidates:
-                    if not QuotaManager.is_model_exhausted(candidate):
-                        fallback_gemini = candidate
-                        break
-            except Exception:
-                pass
-            logger.warning(
-                f"[Quota Guard] "
-                f"Model '{effective_model}' ({redirect_reason}) -> Redirecting to healthy '{fallback_gemini}'."
-            )
-            await safe_tool_notify(
-                on_tool_update,
-                f"🛡️ **[쿼터 가드]** `{effective_model}`({redirect_reason}) ➔ 대체 모델(`{fallback_gemini}`)로 안전 자동 재라우팅되었습니다."
-            )
-            effective_model = fallback_gemini
-            eff_lower = effective_model.lower().strip()
+            candidates = build_fallback_candidates(effective_model)
+            if candidates:
+                fallback_model = candidates[0]
+                logger.warning(
+                    f"[Quota Guard] Model '{effective_model}' ({redirect_reason}) "
+                    f"-> Redirecting to healthy '{fallback_model}'."
+                )
+                await safe_tool_notify(
+                    on_tool_update,
+                    f"🛡️ **[쿼터 가드]** `{effective_model}`({redirect_reason}) ➔ 대체 모델(`{fallback_model}`)로 안전 자동 재라우팅되었습니다."
+                )
+                effective_model = fallback_model
+                eff_lower = effective_model.lower().strip()
+            else:
+                reason = (
+                    f"🛡️ **[쿼터 가드]** `{effective_model}` 가 소진되었고 대체 후보가 없습니다. "
+                    f"Gemini 한도 보호를 위해 우회 호출을 중단합니다. (해제: AGY_ALLOW_GEMINI_FALLBACK=1)"
+                )
+                logger.warning(f"[Quota Guard] {reason}")
+                await safe_tool_notify(on_tool_update, reason)
+                return -4, "", [reason], [reason]
 
         # AGY CLI Guard: Native Antigravity models (Gemini 3.x, claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium) pass directly to AGY CLI.
         # Non-native OpenRouter/third-party models are dispatched directly to Hermes Agent (OpenRouter API)
@@ -347,6 +402,23 @@ class AgentRunner:
 
         if is_native:
             pass
+        elif effective_model.lower().startswith(("opencode-go/", "opencode/")):
+            # [FIX] OpenCode Go 모델은 AGY CLI / OpenRouter(Hermes) 가 아니라 OpenCode 어댑터로 직접 전송합니다.
+            # (기존 버그: '/' 포함 조건에 걸려 Hermes(OpenRouter)로 오전송 -> HTTP 400 not a valid model ID)
+            from engine_manager import EngineManager
+            opencode_adapter = EngineManager.get_adapter("opencode")
+            if opencode_adapter:
+                logger.info(
+                    f"Direct Dispatch: OpenCode model '{effective_model}' dispatched directly to OpenCode adapter (opencode CLI session)."
+                )
+                code, resp, errors = await opencode_adapter.execute(
+                    session=session,
+                    prompt=prompt,
+                    on_tool_update=on_tool_update,
+                    model=effective_model,
+                    role=session_role
+                )
+                return code, resp, errors, []
         elif (
             effective_model.lower().startswith("openrouter/")
             or ("/" in effective_model and not any(k in effective_model.lower() for k in ("claude", "gpt-oss", "gemini")))
@@ -367,6 +439,18 @@ class AgentRunner:
                 )
                 return code, resp, errors, []
 
+        # [🛡️ Quota Firewall] 무인/자율 컨텍스트(Mode 3 Auto-Cycle 등)에서
+        # Gemini 계열 모델을 조용히 자동 호출하여 한도가 소모되는 것을 원천 차단합니다.
+        try:
+            from quota_firewall import check_model as _qfw_check
+            _qfw = _qfw_check(effective_model, source=f"AgentRunner._execute_single_run[{session_role}]")
+            if not _qfw.allowed:
+                logger.warning(f"[QuotaFirewall] {_qfw.reason}")
+                await safe_tool_notify(on_tool_update, f"🛡️ **{_qfw.reason}**")
+                return -3, "", [_qfw.reason], [_qfw.reason]
+        except Exception as _qfw_err:
+            logger.debug(f"QuotaFirewall check skipped: {_qfw_err}")
+
         cmd.extend(["--model", effective_model])
 
         if session.workspace:
@@ -381,7 +465,12 @@ class AgentRunner:
             cmd.extend(["--conversation", conv_id_to_use])
 
         grounding_ctx = get_workspace_grounding_context(session.workspace, prompt)
-        final_prompt = TOOL_SAFETY_HEADER + grounding_ctx + prompt + TOOL_SAFETY_FOOTER
+        # [📁 CWD 명시] 에이전트가 자신의 절대 작업 경로를 정확히 인지하도록 주입합니다.
+        workspace_line = (
+            f"\n[작업 디렉토리(절대경로)] {session.workspace}\n"
+            f"- '현재 디렉토리'를 물으면 위 절대경로를 그대로 답하세요.\n"
+        )
+        final_prompt = TOOL_SAFETY_HEADER + workspace_line + grounding_ctx + prompt + TOOL_SAFETY_FOOTER
         cmd.extend(["--print", final_prompt])
 
         accumulated_response = ""
@@ -731,6 +820,15 @@ class AgentRunner:
                     effective_model = model or getattr(session, "consultant_model", None) or getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
                 else:
                     effective_model = model or getattr(session, "engine_model", None)
+                # [FIX] opencode-go/* · opencode/* 모델은 배정 엔진과 무관하게 OpenCode CLI 로 직행합니다.
+                # (엔진이 hermes/openrouter 로 남아 있어도 OpenRouter HTTP 400 "not a valid model ID" 방지)
+                if effective_model and str(effective_model).lower().startswith(("opencode-go/", "opencode/")):
+                    opencode_adapter = EngineManager.get_adapter("opencode")
+                    if opencode_adapter:
+                        logger.info(
+                            f"Direct Dispatch: OpenCode model '{effective_model}' rerouted from engine '{engine_id}' to OpenCode adapter."
+                        )
+                        adapter = opencode_adapter
                 code, resp, errors = await adapter.execute(
                     session=session,
                     prompt=prompt,
@@ -923,20 +1021,13 @@ class AgentRunner:
                 except Exception:
                     pass
 
-                # Build healthy fallback candidates
-                fallback_candidates = [
-                    "gemini-3.8-flash-high",
-                    "gemini-3.7-flash-high",
-                    "gemini-3.1-pro-high",
-                    "gemini-3-flash"
-                ]
-                try:
-                    from trio_agent_runner import QuotaManager
-                    fallback_candidates = [c for c in fallback_candidates if not QuotaManager.is_model_exhausted(c)]
-                except Exception:
-                    pass
+                # Build healthy fallback candidates (동일 계열만 / 최대 AGY_FALLBACK_MAX_CANDIDATES 개)
+                fallback_candidates = build_fallback_candidates(current_model)
                 if not fallback_candidates:
-                    fallback_candidates = ["gemini-3.8-flash-high", "gemini-3.7-flash-high", "gemini-3-flash"]
+                    logger.warning(
+                        f"[Quota Fallback] '{current_model}' 소진 → 동일 계열 대체 후보 없음. "
+                        f"Gemini 한도 보호를 위해 추가 폴백 호출을 생략합니다."
+                    )
 
                 for fb_idx, fallback_model in enumerate(fallback_candidates):
                     logger.warning(f"Detected quota exhaustion for '{current_model}'. Smart in-flight switching to fallback candidate {fb_idx+1}/{len(fallback_candidates)}: '{fallback_model}'...")
@@ -979,7 +1070,7 @@ class AgentRunner:
             elif is_server_overload and not getattr(session, "is_stopped", False):
                 # [Self-Healing] Transient 503 / capacity overload: retry with exponential backoff, then model fallback
                 current_model = (model or "default").strip()
-                overload_retry_delays = [30, 60, 90]  # seconds
+                overload_retry_delays = list(getattr(config, "AGY_OVERLOAD_RETRY_DELAYS", [30, 90]))  # seconds (토큰 절약: 기본 30,90)
                 overload_recovered = False
 
                 for attempt_idx, delay_sec in enumerate(overload_retry_delays):
@@ -1024,21 +1115,14 @@ class AgentRunner:
                         break
 
                 if not overload_recovered:
-                    # All backoff retries exhausted or different error - fall through to Gemini model fallback
-                    logger.warning(f"[503 Overload Recovery] All backoff retries exhausted for '{current_model}'. Switching to Gemini fallback model...")
-                    fallback_candidates = [
-                        "gemini-3.8-flash-high",
-                        "gemini-3.7-flash-high",
-                        "gemini-3.1-pro-high",
-                        "gemini-3-flash"
-                    ]
-                    try:
-                        from trio_agent_runner import QuotaManager
-                        fallback_candidates = [c for c in fallback_candidates if not QuotaManager.is_model_exhausted(c)]
-                    except Exception:
-                        pass
+                    # All backoff retries exhausted or different error - same-family fallback only (Gemini 누수 차단)
+                    logger.warning(f"[503 Overload Recovery] All backoff retries exhausted for '{current_model}'. Trying same-family fallback model...")
+                    fallback_candidates = build_fallback_candidates(current_model)
                     if not fallback_candidates:
-                        fallback_candidates = ["gemini-3.8-flash-high", "gemini-3-flash"]
+                        logger.warning(
+                            f"[503 Overload Recovery] '{current_model}' 대체 후보 없음 → "
+                            f"Gemini 한도 보호를 위해 모델 폴백을 생략합니다."
+                        )
 
                     for fb_model in fallback_candidates:
                         await safe_on_tool_update(
@@ -1122,19 +1206,27 @@ class AgentRunner:
                         f"User's task:\n{prompt}"
                     )
 
-                # Ensure retry model is healthy and not exhausted
+                # Ensure retry model is healthy and not exhausted (동일 계열만 / Gemini 누수 차단)
                 safe_retry_model = model
                 try:
                     from trio_agent_runner import QuotaManager
-                    if not safe_retry_model or QuotaManager.is_model_exhausted(safe_retry_model):
-                        safe_retry_model = "gemini-3.8-flash-high"
+                    needs_switch = (not safe_retry_model) or QuotaManager.is_model_exhausted(safe_retry_model)
+                except Exception:
+                    needs_switch = not safe_retry_model
+                if needs_switch:
+                    retry_candidates = build_fallback_candidates(safe_retry_model)
+                    if retry_candidates:
+                        switched_model = retry_candidates[0]
                         await safe_on_tool_update(
                             on_tool_update,
-                            f"🔄 **[자동 복구 모델 전환]** 원본 모델(`{model or 'default'}`) 일시 소진/비응답 → 복구 재시도에 `{safe_retry_model}` 사용 중"
+                            f"🔄 **[자동 복구 모델 전환]** 원본 모델(`{model or 'default'}`) 일시 소진/비응답 → 복구 재시도에 `{switched_model}` 사용 중"
                         )
-                except Exception:
-                    if not safe_retry_model:
-                        safe_retry_model = "gemini-3.8-flash-high"
+                        safe_retry_model = switched_model
+                    else:
+                        logger.warning(
+                            f"[Self-Healing] '{safe_retry_model}' 소진 → 동일 계열 대체 후보 없음. "
+                            f"Gemini 우회 없이 원본 모델로 재시도합니다."
+                        )
 
                 if getattr(session, "is_stopped", False):
                     session.is_busy = False
@@ -1157,30 +1249,42 @@ class AgentRunner:
                     session.is_busy = False
                     return "🛑 **작업이 중단(취소)되었습니다.**"
 
-                # Attempt 2: If session context was corrupted, try with a fresh conversation session
-                logger.warning("Retry 1 failed. Attempting fresh conversation session fallback...")
-                await safe_on_tool_update(on_tool_update, "🔄 **[자가 치유] 세션 상태 복구 후 최종 재시도 중...**")
+                # Attempt 2: If session context was corrupted, try with a fresh conversation session.
+                # [🔋 토큰 절약] AGY_RETRY_MAX_ATTEMPTS=1 로 두면 이 재시도(풀컨텍스트 1회 추가)를 생략합니다.
+                max_attempts = 2
+                try:
+                    max_attempts = max(1, int(getattr(config, "AGY_RETRY_MAX_ATTEMPTS", 2)))
+                except Exception:
+                    max_attempts = 2
 
-                if conversation_id_attr:
-                    setattr(session, conversation_id_attr, None)
+                if max_attempts < 2:
+                    logger.info("[Self-Healing] AGY_RETRY_MAX_ATTEMPTS=1 → 새 세션 재시도 생략 (토큰 절약)")
+                    err_msg = "\n".join(retry_errors or all_errors).strip()
+                    returncode = retry_code if retry_code != 0 else returncode
                 else:
-                    session.conversation_id = None
+                    logger.warning("Retry 1 failed. Attempting fresh conversation session fallback...")
+                    await safe_on_tool_update(on_tool_update, "🔄 **[자가 치유] 세션 상태 복구 후 최종 재시도 중...**")
 
-                fresh_code, fresh_resp, _, fresh_errors = await cls._execute_single_run(
-                    session=session,
-                    prompt=recovery_prompt,
-                    on_tool_update=on_tool_update,
-                    model=safe_retry_model,
-                    conversation_id_override=None,
-                    conversation_id_attr=conversation_id_attr
-                )
+                    if conversation_id_attr:
+                        setattr(session, conversation_id_attr, None)
+                    else:
+                        session.conversation_id = None
 
-                if fresh_code == 0 and fresh_resp and fresh_resp.strip():
-                    logger.info("In-flight self-recovery retry succeeded with fresh session!")
-                    return fresh_resp
+                    fresh_code, fresh_resp, _, fresh_errors = await cls._execute_single_run(
+                        session=session,
+                        prompt=recovery_prompt,
+                        on_tool_update=on_tool_update,
+                        model=safe_retry_model,
+                        conversation_id_override=None,
+                        conversation_id_attr=conversation_id_attr
+                    )
 
-                err_msg = "\n".join(fresh_errors or retry_errors or all_errors).strip()
-                returncode = fresh_code if fresh_code != 0 else (retry_code if retry_code != 0 else returncode)
+                    if fresh_code == 0 and fresh_resp and fresh_resp.strip():
+                        logger.info("In-flight self-recovery retry succeeded with fresh session!")
+                        return fresh_resp
+
+                    err_msg = "\n".join(fresh_errors or retry_errors or all_errors).strip()
+                    returncode = fresh_code if fresh_code != 0 else (retry_code if retry_code != 0 else returncode)
 
             if returncode != 0:
                 if not err_msg:

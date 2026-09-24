@@ -42,10 +42,10 @@ class TestHermesReadOnlyQA(unittest.IsolatedAsyncioTestCase):
             native_keywords = ("sonnet", "gemini", "gpt-oss", "claude", "opus")
             if any(kw in model_lower for kw in native_keywords):
                 continue
-            self.assertEqual(
+            self.assertIn(
                 cfg.get("engine"),
-                "hermes",
-                f"{cfg['name']} should default to 'hermes' engine"
+                ("hermes", "opencode", "openrouter"),
+                f"{cfg['name']} should default to a non-agy external engine"
             )
 
     def test_hermes_adapter_qa_command_has_readonly_toolset(self):

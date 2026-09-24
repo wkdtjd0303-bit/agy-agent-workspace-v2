@@ -406,6 +406,11 @@ class QualityStateManager:
             sc = cat_data.get("score", 0.0)
             p = cat_data.get("passed", 0)
             t = cat_data.get("total", 0)
+            # Domain relevance guard: a dimension never verified in this project
+            # (e.g. GAMEPLAY leaking into a PDF app) must not be reported as a
+            # "worst quality gap" that misdirects Commander's next milestone.
+            if t == 0 and sc == 0.0:
+                continue
             stat = f"{sc:.1f}% ({p}/{t})" if t > 0 else f"{sc:.1f}% (이전 유지)"
             cat_lines.append(f"  • **{cat_name.upper()}**: {stat}")
             if sc < lowest_score:
@@ -420,7 +425,7 @@ class QualityStateManager:
             f"- **종합 기계 점수**: `{overall:.1f}%` (직전 대비 증분 Delta: `{delta_str}%`)\n"
             f"- **회귀 상태**: {reg_status} ({reg.get('details', '정상')})\n"
             f"- **카테고리별 정량 품질 실측치**:\n"
-            + "\n".join(cat_lines) + "\n"
+            + ("\n".join(cat_lines) if cat_lines else "  • 아직 기계 검증된 품질 차원 없음 (신규/초기 프로젝트)") + "\n"
             f"- **최대 결손 품질 영역 (Worst Quality Gap)**: `{lowest_cat.upper() if lowest_cat else 'NONE'}` (`{lowest_score:.1f}%`)\n"
             f"💡 **사령관 전략 지침**: 차기 마일스톤 기획 시 결손 1위 영역(`{lowest_cat}`)과 핵심 사용자 가치를 "
             f"4D 매트릭스(Value x Risk x Cost)로 대조하여 집중 개선 QC를 발주하십시오."

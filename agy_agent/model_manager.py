@@ -43,7 +43,7 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
             ("gemini-3.8-flash-tiered", "Gemini 3.8 Flash Tiered (동적 부하분산)"),
             ("gemini-3.7-flash-high", "Gemini 3.7 Flash High (균형잡힌 코딩)"),
             ("gemini-3.7-flash-tiered", "Gemini 3.7 Flash Tiered"),
-            ("gemini-3.7-flash-middle", "Gemini 3.7 Flash Middle (경량 관제)"),
+            ("gemini-3.7-flash-medium", "Gemini 3.7 Flash Middle (경량 관제)"),
             ("gemini-3.1-pro-high", "Gemini 3.1 Pro High (심층 추론/검증)"),
             ("gemini-3.1-pro-low", "Gemini 3.1 Pro Low (경량 추론)"),
             ("gemini-3.6-flash-high", "Gemini 3.6 Flash High"),
@@ -110,6 +110,48 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
             ("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet"),
             ("claude-3-opus-20240229", "Claude 3 Opus"),
             ("claude-3-5-haiku-20241022", "Claude 3.5 Haiku"),
+        ]
+    },
+    "opencode": {
+        "name": "OpenCode CLI",
+        "icon": "⚡",
+        "description": "오픈소스 자율 코딩 에이전트 CLI (멀티 프로바이더 / 세션 지속 / MCP)",
+        "models": [
+            ("opencode-go/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (초고속 코딩)"),
+            ("opencode-go/deepseek-v4-pro", "DeepSeek V4 Pro (심층 추론/설계)"),
+            ("opencode-go/glm-5.3-flash", "GLM 5.3 Flash (초고속 추론/코딩)"),
+            ("opencode-go/glm-5.3", "GLM 5.3 (고성능 코딩/추론)"),
+            ("opencode-go/mimo-v2.6-flash", "MiMo V2.6 Flash (초고속 관제)"),
+            ("opencode-go/mimo-v2.6-pro", "MiMo V2.6 Pro (고성능 검증)"),
+            ("opencode-go/qwen3.8-flash", "Qwen 3.8 Flash (최신 초고속)"),
+            ("opencode-go/qwen3.8-max", "Qwen 3.8 Max (최상위 대형 모델)"),
+            ("opencode-go/gpt-6-luna", "GPT-6 Luna (최신 수석 자문/코딩)"),
+            ("opencode-go/gpt-5.6-luna", "GPT-5.6 Luna (차세대 추론)"),
+            ("opencode-go/kimi-k3", "Kimi K3 (장문 컨텍스트/코딩)"),
+            ("opencode-go/kimi-k2.7-code", "Kimi K2.7 Code (코딩 특화)"),
+            ("opencode-go/grok-4.7", "Grok 4.7 (xAI 최신 추론)"),
+            ("opencode-go/minimax-m3", "MiniMax M3 (대규모 멀티모달)"),
+            ("opencode-go/qwen3.7-max", "Qwen 3.7 Max (고성능 추론)"),
+            ("opencode-go/qwen3.7-plus", "Qwen 3.7 Plus (균형 코딩)"),
+            ("opencode-go/qwen3.6-plus", "Qwen 3.6 Plus (경량 코딩)"),
+            ("opencode-go/longcat-2.0", "LongCat 2.0 (초장문 컨텍스트)"),
+            ("opencode-go/space-bunny-free", "Space Bunny (무과금/초고속)"),
+            ("opencode-go/hy4-preview", "Hunyuan 4 Preview (신규 고성능)"),
+            ("opencode-go/muse-spark-1.3-contributor", "Muse Spark 1.3 (창의적 추론)"),
+            ("opencode-go/deepseek-v4-flash", "DeepSeek V4 Flash"),
+            ("opencode-go/deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision Exp"),
+            ("opencode-go/omen-alpha", "Omen Alpha (실험적 추론)"),
+            ("opencode-go/mimo-v2.5-pro", "MiMo V2.5 Pro"),
+            ("opencode-go/mimo-v2.5", "MiMo V2.5"),
+            ("opencode-go/minimax-m2.7", "MiniMax M2.7"),
+            ("opencode-go/minimax-m2.5", "MiniMax M2.5"),
+            ("opencode-go/kimi-k2.6", "Kimi K2.6"),
+            ("opencode-go/glm-5.2", "GLM 5.2"),
+            ("opencode-go/glm-5.1", "GLM 5.1"),
+            ("opencode-go/grok-4.6", "Grok 4.6"),
+            ("opencode-go/hy3", "Hunyuan 3"),
+            ("opencode-go/muse-spark-1.2-contributor", "Muse Spark 1.2"),
+            ("opencode-go/deepseek-flash", "DeepSeek Flash"),
         ]
     }
 }
@@ -212,6 +254,24 @@ def get_engine_models(engine: str) -> List[Tuple[str, str]]:
         except Exception as e:
             logger.debug(f"Could not load dynamic Antigravity models: {e}")
 
+    if canonical_eng == "opencode":
+        # [🔄 AGY 패턴 준수] OpenCode 실시간 프로바이더/모델 카탈로그를 우선 사용하고,
+        # 조회 실패 시 정적 프리셋으로 폴백합니다.
+        try:
+            from engine_manager import EngineManager
+            adapter = EngineManager.get_adapter("opencode")
+            live_models = list(adapter.supported_models) if adapter else []
+        except Exception as e:
+            logger.debug(f"Could not load dynamic OpenCode models: {e}")
+            live_models = []
+        if live_models:
+            preset_list = ENGINE_PRESETS.get("opencode", {}).get("models", [])
+            label_map = {mid: lbl for mid, lbl in preset_list}
+            order_map = {mid: idx for idx, (mid, _) in enumerate(preset_list)}
+            # 프리셋 정렬 순서를 우선 존중하여 정렬
+            sorted_live = sorted(live_models, key=lambda m: (order_map.get(m, 999), m))
+            return [(m, label_map.get(m, m.replace("opencode-go/", "").title())) for m in sorted_live]
+
     return list(ENGINE_PRESETS.get(canonical_eng, {}).get("models", []))
 
 
@@ -313,8 +373,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "coder",
         "icon": "👨‍💻",
         "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.8-flash-high",
+        "engine": "opencode",
+        "model": "opencode-go/deepseek-v4.1-flash",
         "env_model_key": "CODER_MODEL",
         "env_engine_key": "DEFAULT_AI_ENGINE",
         "persona": "general",
@@ -325,8 +385,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa1",
         "icon": "🕵️",
         "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.1-pro-high",
+        "engine": "opencode",
+        "model": "opencode-go/deepseek-v4.1-flash",
         "env_model_key": "QA_MODEL",
         "env_engine_key": None,
         "persona": "general",
@@ -337,8 +397,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa2",
         "icon": "🕵️‍♂️",
         "enabled": True,
-        "engine": "hermes",
-        "model": "upstage/solar-pro4",
+        "engine": "agy",
+        "model": "gemini-3.8-flash-high",
         "env_model_key": "QA2_MODEL",
         "env_engine_key": "QA2_ENGINE",
         "index": 2,
@@ -350,8 +410,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa3",
         "icon": "🕵️‍♂️",
         "enabled": True,
-        "engine": "hermes",
-        "model": "deepseek/deepseek-v4-flash-0731",
+        "engine": "opencode",
+        "model": "opencode-go/mimo-v2.6-flash",
         "env_model_key": "QA3_MODEL",
         "env_engine_key": "QA3_ENGINE",
         "index": 3,
@@ -363,8 +423,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa4",
         "icon": "🕵️‍♂️",
         "enabled": True,
-        "engine": "hermes",
-        "model": "qwen/qwen3-235b-a22b-2507",
+        "engine": "agy",
+        "model": "gpt-oss-120b-medium",
         "env_model_key": "QA4_MODEL",
         "env_engine_key": "QA4_ENGINE",
         "index": 4,
@@ -376,8 +436,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa5",
         "icon": "🕵️‍♂️",
         "enabled": True,
-        "engine": "hermes",
-        "model": "meta-llama/llama-3.3-70b-instruct",
+        "engine": "agy",
+        "model": "gemini-3.1-pro-high",
         "env_model_key": "QA5_MODEL",
         "env_engine_key": "QA5_ENGINE",
         "index": 5,
@@ -389,8 +449,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa6",
         "icon": "🕵️‍♂️",
         "enabled": True,
-        "engine": "hermes",
-        "model": "inclusionai/ling-3.0-flash-fin:free",
+        "engine": "agy",
+        "model": "gemini-3.8-flash-high",
         "env_model_key": "QA6_MODEL",
         "env_engine_key": "QA6_ENGINE",
         "index": 6,
@@ -402,8 +462,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "auditor",
         "icon": "⚖️",
         "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.1-pro-high",
+        "engine": "opencode",
+        "model": "opencode-go/deepseek-v4.1-flash",
         "env_model_key": "AUDITOR_MODEL",
         "env_engine_key": None,
         "persona": "architect",
@@ -413,9 +473,9 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "name": "Senior Consultant (수석 자문)",
         "role_key": "consultant",
         "icon": "🧙‍♂️",
-        "enabled": True,
-        "engine": "hermes",
-        "model": "openai/gpt-6-astra",
+        "enabled": False,
+        "engine": "opencode",
+        "model": "opencode-go/glm-5.3",
         "env_model_key": "CONSULTANT_MODEL",
         "env_engine_key": "CONSULTANT_ENGINE",
         "persona": "general",
@@ -426,8 +486,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "commander",
         "icon": "👑",
         "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.7-flash-middle",
+        "engine": "opencode",
+        "model": "opencode-go/mimo-v2.6-flash",
         "env_model_key": "COMMANDER_MODEL",
         "env_engine_key": None,
         "persona": "general",
@@ -506,14 +566,48 @@ class GlobalModelManager:
             return "Gemini 3 Flash"
         if "solar-pro" in m_lower:
             return "Solar Pro 4"
+        if "deepseek-v4.1" in m_lower or "deepseek v4.1" in m_lower:
+            return "DeepSeek V4.1 Pro" if "pro" in m_lower else "DeepSeek V4.1 Flash"
+        if "deepseek-v4-pro" in m_lower or "deepseek v4 pro" in m_lower:
+            return "DeepSeek V4 Pro"
         if "deepseek-v4" in m_lower:
             return "DeepSeek V4 Flash"
         if "deepseek-r1" in m_lower:
             return "DeepSeek R1"
         if "deepseek-chat" in m_lower or "deepseek-v3" in m_lower:
             return "DeepSeek V3"
+        if "qwen3.8-max" in m_lower or "qwen-3.8-max" in m_lower:
+            return "Qwen 3.8 Max"
+        if "qwen3.8" in m_lower or "qwen-3.8" in m_lower:
+            return "Qwen 3.8 Flash"
+        if "qwen3.7-max" in m_lower:
+            return "Qwen 3.7 Max"
+        if "qwen3.7" in m_lower:
+            return "Qwen 3.7 Plus"
         if "qwen3-235b" in m_lower or "qwen-3" in m_lower:
             return "Qwen 3 235B"
+        if "glm-5.3-flash" in m_lower:
+            return "GLM 5.3 Flash"
+        if "glm-5.3" in m_lower:
+            return "GLM 5.3"
+        if "mimo-v2.6-flash" in m_lower:
+            return "MiMo 2.6 Flash"
+        if "mimo-v2.6-pro" in m_lower:
+            return "MiMo 2.6 Pro"
+        if "gpt-6-luna" in m_lower:
+            return "GPT-6 Luna"
+        if "gpt-5.6-luna" in m_lower:
+            return "GPT-5.6 Luna"
+        if "kimi-k2.7" in m_lower:
+            return "Kimi K2.7 Code"
+        if "kimi-k3" in m_lower:
+            return "Kimi K3"
+        if "longcat" in m_lower:
+            return "LongCat 2.0"
+        if "space-bunny" in m_lower:
+            return "Space Bunny"
+        if "hy4" in m_lower:
+            return "Hunyuan 4 Preview"
         if "llama-3.3-70b" in m_lower:
             return "Meta Llama 3.3 70B"
         if "ling-3.0" in m_lower:
@@ -559,7 +653,7 @@ class GlobalModelManager:
                 elif role == "auditor":
                     model_id = getattr(config, "AUDITOR_MODEL", "gemini-3.1-pro-high")
                 elif role == "commander":
-                    model_id = getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-middle")
+                    model_id = getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-medium")
                 elif role == "consultant":
                     model_id = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
                 elif role == "qa2":
@@ -572,7 +666,14 @@ class GlobalModelManager:
     def initialize(cls):
         """Initializes global model config from disk, falling back to .env / defaults."""
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        cls._roles = {k: dict(v) for k, v in DEFAULT_ROLES.items()}
+
+        # [🔁 Hot-Reload Safety] _roles 딕셔너리는 importlib.reload() 를 넘어 공유되는 객체이므로
+        # '새 dict 로 교체'하지 않고 제자리(in-place)에서 갱신한다. 새로 교체하면 bot.py 등
+        # 기존 참조가 옛 상태를 계속 들고 있어 모델 변경이 반영되지 않는 stale 버그가 생긴다.
+        if not isinstance(cls._roles, dict):
+            cls._roles = {}
+        cls._roles.clear()
+        cls._roles.update({k: dict(v) for k, v in DEFAULT_ROLES.items()})
 
         # 1. Read existing config file if present
         if CONFIG_FILE.exists():
@@ -598,7 +699,26 @@ class GlobalModelManager:
             if "persona" not in rdata:
                 rdata["persona"] = DEFAULT_ROLES.get(k, {}).get("persona", "general")
 
+        # [🧭 엔진/모델 정합성 자동 교정]
+        #   디스크에 저장된 잘못된 조합(예: opencode + gemini-3.8-flash-high)을
+        #   해당 엔진의 기본 모델로 정상화하고 .env/런타임 config 까지 동기화한다.
+        coherence_repaired = False
+        for k, rdata in cls._roles.items():
+            eng = rdata.get("engine", "agy")
+            mdl = (rdata.get("model") or "").strip()
+            if mdl and not cls.is_model_compatible_with_engine(eng, mdl):
+                default_model = cls.default_model_for_engine(eng)
+                if default_model:
+                    logger.warning(
+                        f"[ModelCoherence] Loaded role '{k}' has incompatible model '{mdl}' "
+                        f"for engine '{eng}' → repaired to '{default_model}'."
+                    )
+                    rdata["model"] = default_model
+                    coherence_repaired = True
+
         cls._initialized = True
+        if coherence_repaired:
+            cls.save()
         cls.sync_to_runtime_config()
 
     @classmethod
@@ -740,9 +860,77 @@ class GlobalModelManager:
             return True
         return False
 
+    # =========================================================================
+    # 🧭 엔진/모델 정합성 가드 (Engine-Model Coherence Guard)
+    #   - opencode 엔진에는 Gemini/Antigravity 네이티브 모델이 존재하지 않습니다.
+    #   - 엔진과 모델이 어긋난 조합(예: OPENCODE + gemini-3.8-flash-high)은
+    #     런타임에서 모델이 조용히 무시되거나, 폴백 경로에서 엉뚱한 엔진/쿼터를
+    #     소모할 수 있으므로 저장 시점/로드 시점 모두에서 자동 교정합니다.
+    # =========================================================================
+
+    @staticmethod
+    def model_owner_engine(model: Optional[str]) -> Optional[str]:
+        """모델 ID가 소속된 엔진을 판별한다 (정합성 자동 교정용)."""
+        m = (model or "").strip().lower()
+        if not m:
+            return None
+        if m.startswith(("opencode-go/", "opencode/")):
+            return "opencode"
+        if m.startswith(("openrouter/", "anthropic/", "upstage/", "openai/", "qwen/",
+                         "deepseek/", "meta-llama/", "inclusionai/", "google/", "x-ai/", "moonshotai/")):
+            return "hermes"
+        if any(k in m for k in ("gemini", "gpt-oss", "claude-sonnet-4-6", "claude-opus-4-6", "claude-3", "claude-4")):
+            return "agy"
+        if "/" in m:
+            return "hermes"
+        return None
+
+    @classmethod
+    def is_model_compatible_with_engine(cls, engine: Optional[str], model: Optional[str]) -> bool:
+        """주어진 엔진에서 해당 모델을 실제로 실행할 수 있는지 판정한다."""
+        eng = (engine or "agy").lower().strip()
+        if eng in ("openrouter", "nous"):
+            eng = "hermes"
+        m = (model or "").strip()
+        if not m:
+            return True  # 모델 미지정 → 엔진 기본값 사용
+        m_low = m.lower()
+        owner = cls.model_owner_engine(m)
+
+        if eng == "opencode":
+            # OpenCode CLI 는 'provider/model' 형식만 허용하며 Gemini 네이티브 ID는 지원하지 않는다.
+            return ("/" in m) and (owner != "agy")
+        if eng == "agy":
+            # AGY CLI 는 네이티브 모델(Gemini/Claude/GPT-OSS)만 지원한다.
+            return owner == "agy" or m_low in ("gpt-oss", "opus", "sonnet")
+        if eng == "hermes":
+            if m_low.startswith(("opencode-go/", "opencode/")):
+                return False
+            return "/" in m or owner in ("hermes",)
+        # codex/copilot/claude 등은 각 어댑터가 자체 필터링하므로 강제하지 않는다.
+        return True
+
+    @classmethod
+    def default_model_for_engine(cls, engine: Optional[str]) -> Optional[str]:
+        """해당 엔진의 기본(첫 번째) 프리셋 모델을 반환한다."""
+        eng = (engine or "agy").lower().strip()
+        if eng in ("openrouter", "nous"):
+            eng = "hermes"
+        try:
+            presets = get_engine_models(eng)
+        except Exception:
+            presets = []
+        if not presets:
+            presets = list(ENGINE_PRESETS.get(eng, {}).get("models", []))
+        return presets[0][0] if presets else None
+
     @classmethod
     def set_role_engine(cls, role: str, engine: str) -> bool:
-        """Sets the router/engine for a role globally."""
+        """Sets the router/engine for a role globally.
+
+        [🧭 정합성 가드] 새 엔진이 현재 모델을 지원하지 못하면(예: OpenCode 엔진 + Gemini 모델)
+        해당 엔진의 기본 모델로 자동 교체하여 '엔진≠모델' 불일치 상태를 원천 차단합니다.
+        """
         if not cls._initialized:
             cls.initialize()
         role = role.lower().strip()
@@ -751,6 +939,15 @@ class GlobalModelManager:
             engine = "hermes"
         if role in cls._roles:
             cls._roles[role]["engine"] = engine
+            curr_model = cls._roles[role].get("model", "")
+            if curr_model and not cls.is_model_compatible_with_engine(engine, curr_model):
+                default_model = cls.default_model_for_engine(engine)
+                if default_model:
+                    logger.warning(
+                        f"[ModelCoherence] Role '{role}': engine '{engine}' cannot run model "
+                        f"'{curr_model}' → auto-replaced with engine default '{default_model}'."
+                    )
+                    cls._roles[role]["model"] = default_model
             cls.save()
             return True
         return False
@@ -770,12 +967,33 @@ class GlobalModelManager:
             eng = "hermes"
 
         # 1. Exact preset lookup across all engines first
-        for check_eng in ("agy", "hermes", "codex", "copilot", "claude"):
+        for check_eng in ("agy", "hermes", "codex", "copilot", "claude", "opencode"):
             for mid, _ in get_engine_models(check_eng):
                 if mid.lower() == inp_lower:
                     return mid
+                if mid.lower().endswith("/" + inp_lower):
+                    return mid
 
         # 2. Fuzzy alias mapping based on engine
+        resolved = cls._resolve_alias_for_engine(eng, inp_lower)
+        if resolved:
+            return resolved
+
+        # 3. [🧭 Cross-engine fallback] 현재 엔진에 규칙이 없어도 입력이 다른 엔진의 모델을
+        #    가리키면 유효한 모델 ID로 해석한다. (예: OpenCode 엔진에서 'gemini 3.8' 입력 →
+        #    'gemini-3.8-flash-high' 로 해석되고, 엔진은 정합성 가드가 AGY 로 자동 교정)
+        for fallback_eng in ("agy", "hermes", "opencode"):
+            if fallback_eng == eng:
+                continue
+            resolved = cls._resolve_alias_for_engine(fallback_eng, inp_lower)
+            if resolved:
+                return resolved
+
+        return inp
+
+    @classmethod
+    def _resolve_alias_for_engine(cls, eng: str, inp_lower: str) -> Optional[str]:
+        """엔진별 퍼지 별칭 해석 규칙 (순수 함수)."""
         if eng == "agy":
             if any(k in inp_lower for k in ("gpt-oss", "gpt oss", "oss-120b", "oss 120b", "gptoss")):
                 return "gpt-oss-120b-medium"
@@ -784,7 +1002,7 @@ class GlobalModelManager:
             if "3.8" in inp_lower or "gemini-3.8" in inp_lower or "gemini 3.8" in inp_lower:
                 return "gemini-3.8-flash-high"
             if "3.7" in inp_lower and "middle" in inp_lower:
-                return "gemini-3.7-flash-middle"
+                return "gemini-3.7-flash-medium"
             if "3.7" in inp_lower and "tiered" in inp_lower:
                 return "gemini-3.7-flash-tiered"
             if "3.7" in inp_lower or "gemini-3.7" in inp_lower or "gemini 3.7" in inp_lower:
@@ -824,8 +1042,93 @@ class GlobalModelManager:
                 return "anthropic/claude-3.7-sonnet"
             if "claude" in inp_lower:
                 return "anthropic/claude-3.5-sonnet"
+        elif eng == "opencode":
+            # 1. Qwen 계열 (Qwen 3.8 Flash, Qwen 3.8 Max, Qwen 3.7 등)
+            if "qwen" in inp_lower and "3.8" in inp_lower and "max" in inp_lower:
+                return "opencode-go/qwen3.8-max"
+            if "qwen" in inp_lower and ("3.8" in inp_lower or "flash" in inp_lower):
+                return "opencode-go/qwen3.8-flash"
+            if "qwen" in inp_lower and "3.7" in inp_lower and "max" in inp_lower:
+                return "opencode-go/qwen3.7-max"
+            if "qwen" in inp_lower and "3.7" in inp_lower:
+                return "opencode-go/qwen3.7-plus"
+            if "qwen" in inp_lower and "3.6" in inp_lower:
+                return "opencode-go/qwen3.6-plus"
+            if "qwen" in inp_lower:
+                return "opencode-go/qwen3.8-flash"
 
-        return inp
+            # 2. GLM 계열 (GLM 5.3 Flash, GLM 5.3, GLM 5.2, GLM 5.1)
+            if "glm" in inp_lower and "flash" in inp_lower:
+                return "opencode-go/glm-5.3-flash"
+            if "glm" in inp_lower and "5.2" in inp_lower:
+                return "opencode-go/glm-5.2"
+            if "glm" in inp_lower and "5.1" in inp_lower:
+                return "opencode-go/glm-5.1"
+            if "glm" in inp_lower and "5.3" in inp_lower:
+                return "opencode-go/glm-5.3"
+            if "glm" in inp_lower:
+                return "opencode-go/glm-5.3-flash"
+
+            # 3. MiMo 계열 (MiMo V2.6 Flash, MiMo V2.6 Pro, MiMo V2.5)
+            if "mimo" in inp_lower and "pro" in inp_lower:
+                return "opencode-go/mimo-v2.6-pro"
+            if "mimo" in inp_lower and "2.5" in inp_lower:
+                return "opencode-go/mimo-v2.5"
+            if "mimo" in inp_lower:
+                return "opencode-go/mimo-v2.6-flash"
+
+            # 4. GPT Luna 계열 (GPT-6 Luna, GPT-5.6 Luna)
+            if ("gpt-6" in inp_lower or "gpt6" in inp_lower) and "luna" in inp_lower:
+                return "opencode-go/gpt-6-luna"
+            if "gpt-5.6" in inp_lower or ("gpt5" in inp_lower and "luna" in inp_lower):
+                return "opencode-go/gpt-5.6-luna"
+            if "luna" in inp_lower:
+                return "opencode-go/gpt-6-luna"
+
+            # 5. DeepSeek 계열 (DeepSeek V4.1 Flash, DeepSeek V4 Pro, Vision Exp 등)
+            if "deepseek" in inp_lower and ("pro" in inp_lower or "r1" in inp_lower):
+                return "opencode-go/deepseek-v4-pro"
+            if "deepseek" in inp_lower and "vision" in inp_lower:
+                return "opencode-go/deepseek-v4-flash-vision-exp"
+            if "deepseek" in inp_lower:
+                return "opencode-go/deepseek-v4.1-flash"
+
+            # 6. Kimi 계열 (Kimi K3, Kimi K2.7 Code, Kimi K2.6)
+            if "kimi" in inp_lower and "code" in inp_lower:
+                return "opencode-go/kimi-k2.7-code"
+            if "kimi" in inp_lower and "2.6" in inp_lower:
+                return "opencode-go/kimi-k2.6"
+            if "kimi" in inp_lower:
+                return "opencode-go/kimi-k3"
+
+            # 7. Grok 계열 (Grok 4.7, Grok 4.6)
+            if "grok" in inp_lower and "4.6" in inp_lower:
+                return "opencode-go/grok-4.6"
+            if "grok" in inp_lower:
+                return "opencode-go/grok-4.7"
+
+            # 8. MiniMax 계열 (MiniMax M3, M2.7, M2.5)
+            if "minimax" in inp_lower and "2.7" in inp_lower:
+                return "opencode-go/minimax-m2.7"
+            if "minimax" in inp_lower and "2.5" in inp_lower:
+                return "opencode-go/minimax-m2.5"
+            if "minimax" in inp_lower:
+                return "opencode-go/minimax-m3"
+
+            # 9. 초장문 / 특화 / 무과금 모델
+            if "longcat" in inp_lower:
+                return "opencode-go/longcat-2.0"
+            if "bunny" in inp_lower or "space" in inp_lower:
+                return "opencode-go/space-bunny-free"
+            if "hy4" in inp_lower or "hunyuan" in inp_lower:
+                return "opencode-go/hy4-preview"
+            if "hy3" in inp_lower:
+                return "opencode-go/hy3"
+            if "muse" in inp_lower:
+                return "opencode-go/muse-spark-1.3-contributor"
+            if "omen" in inp_lower:
+                return "opencode-go/omen-alpha"
+        return None
 
     @classmethod
     def set_role_model(cls, role: str, model: str) -> bool:
@@ -839,12 +1142,20 @@ class GlobalModelManager:
             resolved_model = cls.resolve_model_id(curr_engine, model)
             cls._roles[role]["model"] = resolved_model
 
-            # Auto-harmonize engine based on model type
-            r_lower = resolved_model.lower()
-            if "/" in resolved_model and not any(r_lower.startswith(p) for p in ("google/", "gemini/")):
-                cls._roles[role]["engine"] = "hermes"
-            elif any(k in r_lower for k in ("gemini", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b-medium", "gemini-3")):
-                cls._roles[role]["engine"] = "agy"
+            # [🧭 Auto-harmonize engine based on model type]
+            #  • opencode-go/…  → OpenCode 엔진으로 귀속
+            #  • Gemini/Claude/GPT-OSS 네이티브 → AGY 엔진으로 귀속 (OpenCode 엔진이어도 교정)
+            #  • 그 외 provider/model → Hermes(OpenRouter)
+            # 즉, 사용자가 명시적으로 고른 '모델'의 소속 엔진으로 엔진을 정합화하여
+            # 'OPENCODE + Gemini' 같은 실행 불가능한 조합이 저장되지 않게 한다.
+            owner = cls.model_owner_engine(resolved_model)
+            curr_eng = cls._roles[role].get("engine", "agy")
+            if owner and owner != curr_eng and not cls.is_model_compatible_with_engine(curr_eng, resolved_model):
+                cls._roles[role]["engine"] = owner
+                logger.info(
+                    f"[ModelCoherence] Role '{role}': model '{resolved_model}' cannot run on engine "
+                    f"'{curr_eng}' → engine auto-harmonized to '{owner}'."
+                )
 
             cls.save()
             return True
@@ -946,7 +1257,7 @@ class GlobalModelManager:
 
             # Commander
             cmd_cfg = cls._roles.get("commander", {})
-            config.COMMANDER_MODEL = cmd_cfg.get("model", getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-middle"))
+            config.COMMANDER_MODEL = cmd_cfg.get("model", getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-medium"))
 
             # Consultant
             cons_cfg = cls._roles.get("consultant", {})
@@ -1218,6 +1529,7 @@ class EngineSelectDropdown(Select):
             ("codex", ENGINE_PRESETS["codex"]),
             ("copilot", ENGINE_PRESETS["copilot"]),
             ("claude", ENGINE_PRESETS["claude"]),
+            ("opencode", ENGINE_PRESETS["opencode"]),
         ]
         for eng_id, info in canonical_engines:
             desc = "OpenRouter API = Hermes Agent (통합 라우터)" if eng_id == "hermes" else f"라우터: {eng_id.upper()}"
@@ -1287,9 +1599,9 @@ class ModelPresetDropdown(Select):
                 found_current = True
             options.append(
                 discord.SelectOption(
-                    label=f"{mid[:30]}",
+                    label=f"{mid[:100]}",
                     value=mid,
-                    description=label[:45],
+                    description=label[:100],
                     default=is_def
                 )
             )
@@ -1297,7 +1609,7 @@ class ModelPresetDropdown(Select):
         # If current model is custom and not in presets, add it at the top
         if curr_model and not found_current:
             options.insert(0, discord.SelectOption(
-                label=f"{curr_model[:30]} (현재 사용자 지정)",
+                label=f"{curr_model[:75]} (현재 사용자 지정)",
                 value=curr_model,
                 description="직접 입력된 커스텀 모델",
                 default=True

@@ -108,6 +108,10 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
         self.assertIn("AI 생성 이미지 배제", dash_tasks[0])
         self.assertIn("4대 핵심 기능 버튼", dash_tasks[0])
 
+        # (c) who_where must bind to authentic physical path, never placeholder './'
+        self.assertNotIn("대상 경로: ./", decomp["who_where"])
+        self.assertTrue("app/src/main" in decomp["who_where"], f"Expected app/src/main in who_where, got: {decomp['who_where']}")
+
     def test_plan_milestone_never_defaults_to_generic_annotation_on_user_input(self):
         """When user provides feedback, plan_milestone_5w1h must target user feedback, NOT generic Phase 3 annotation."""
         plan = Commander.plan_milestone_5w1h(
@@ -998,6 +1002,54 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
             # Plan title MUST change and NOT repeat the user feedback milestone
             self.assertNotEqual(plan1.title, plan2.title, f"Commander looped on identical title: {plan1.title}")
             self.assertNotIn("사용자 피드백", plan2.title, f"Commander failed to transition to next capability: {plan2.title}")
+
+        asyncio.run(_run())
+
+    def test_mature_project_with_generic_keywords_does_not_falsely_skip_new_feedback(self):
+        """QA1 Prohibited Scenario: Completed milestones containing '디자인'/'최적화'/'아이콘'/'버튼'/'이름'
+        must NEVER cause new user feedback to be falsely marked delivered or skipped.
+        """
+        import asyncio
+        from roadmap_manager import RoadmapManager, RoadmapMilestone, RoadmapTask
+
+        rm = RoadmapManager(self.tmp)
+        # Pre-seed realistic completed milestones on a mature project containing generic keywords
+        rm.append_milestones([
+            RoadmapMilestone(
+                version="v1.0",
+                title="코어 PDF 비동기 렌더링 엔진 (디자인 토큰, 대시보드 컴포넌트)",
+                tasks=[RoadmapTask(text="초기 디자인 토큰 및 대시보드 버튼 배치", done=True)],
+                status="DONE"
+            ),
+            RoadmapMilestone(
+                version="v1.1",
+                title="메인 뷰어 아이콘 정비 및 버튼 인터랙션 최적화",
+                tasks=[RoadmapTask(text="아이콘 리소스 등록 및 이름 식별자 정리", done=True)],
+                status="DONE"
+            ),
+            RoadmapMilestone(
+                version="v5.0",
+                title="대용량 문서 렌더링 최적화 및 비동기 캐시 풀",
+                tasks=[RoadmapTask(text="프레임 드롭 최적화 및 런타임 방어", done=True)],
+                status="DONE"
+            )
+        ])
+
+        async def _run():
+            # Brand new 5-point user feedback arrives
+            plan = await Commander.plan_adaptive_next_milestone_async(
+                root_user_goal=USER_COMPLAINT_PROMPT,
+                workspace=self.tmp,
+                domain="mobile_app"
+            )
+            # MUST target the new user feedback, NOT falsely skip to maintenance/cs ladder!
+            self.assertIn("사용자 피드백", plan.title, f"Falsely skipped feedback! Got: {plan.title}")
+            self.assertNotIn("유지보수", plan.title)
+            self.assertNotIn("CS 대응", plan.title)
+            self.assertTrue(
+                any(k in plan.title for k in ["디자인 통일성", "명칭 리브랜딩", "아이콘", "대시보드", "크래시"]),
+                f"Expected user feedback targets in title, got: {plan.title}"
+            )
 
         asyncio.run(_run())
 

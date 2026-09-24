@@ -15,6 +15,7 @@ import os
 import sys
 import re
 import json
+import time
 import asyncio
 import logging
 from dataclasses import dataclass, field
@@ -126,6 +127,48 @@ def _serialize_roadmap(milestones: List[RoadmapMilestone], preamble: str = "") -
         parts.append(ms.to_md())
         parts.append("")
     return "\n".join(parts).rstrip() + "\n"
+
+
+# ──────────────────────────────────────────────
+# Capability Fingerprint (중복 기획 차단)
+# ──────────────────────────────────────────────
+
+# 마일스톤 제목/태스크에서 의미 없는 수식어. 역량 비교 시 제거한다.
+_CAPABILITY_STOPWORDS = re.compile(
+    r"(사용자|피드백|긴급|반영|차기|고도화|완성|완결|구현|검증|"
+    r"최적화|개선|강화|보강|확보|정비|정합화|엔진|시스템|기능|처리|대응|지원|"
+    r"phase|v\d+(?:\.\d+)?|req-\d+)",
+    re.IGNORECASE,
+)
+
+
+def canonical_capability_tokens(text: str) -> set:
+    """Normalizes a milestone title/task into a comparable capability token set.
+
+    Removes version tags, [REQ-xxx] markers, and generic filler words so that
+    '브랜드 리뉴얼(로고·앱명·컬러), 버튼 가독성' and
+    '브랜드 리뉴얼(로고·앱명·컬러)·버튼 가독성' collapse to the same fingerprint.
+    """
+    s = str(text or "").lower()
+    s = re.sub(r"\[[^\]]*\]", " ", s)              # strip [REQ-001] style tags
+    s = _CAPABILITY_STOPWORDS.sub(" ", s)
+    s = re.sub(r"[^0-9a-z가-힣]+", " ", s)          # keep alnum + hangul only
+    return {t for t in s.split() if len(t) >= 2}
+
+
+def capability_similarity(a: str, b: str, min_overlap: int = 3) -> float:
+    """Jaccard similarity between two capability fingerprints.
+
+    Returns 0.0 when fewer than `min_overlap` distinctive tokens are shared, which
+    prevents short generic titles from being treated as duplicates.
+    """
+    ta, tb = canonical_capability_tokens(a), canonical_capability_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    if inter < min_overlap:
+        return 0.0
+    return inter / float(len(ta | tb))
 
 
 # ──────────────────────────────────────────────
@@ -249,71 +292,62 @@ class RoadmapManager:
         except Exception as e:
             logger.error(f"ROADMAP.md 저장 실패: {e}")
 
-    def _generate_roadmap_from_prd(self, prd_path: str) -> Optional[str]:
-        """Parses PRD.md requirements and synthesizes initial milestones directly aligned with user intent."""
+    # NOTE: `_generate_roadmap_from_prd` was intentionally removed.
+    # [PRD=일기장 원칙] PRD의 REQ 목록은 더 이상 우선순위 사다리로 변환되지 않는다.
+    # 차기 마일스톤은 항상 `_generate_roadmap_from_codebase` /
+    # `_synthesize_codebase_aware_milestones` (디스크 코드 실사)에서 도출된다.
+
+    def _workspace_has_source(self) -> bool:
+        """True when the workspace actually contains production source files."""
+        source_exts = (".kt", ".java", ".py", ".ts", ".tsx", ".js", ".jsx", ".html", ".vue", ".rs", ".go", ".cpp")
         try:
-            with open(prd_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            req_matches = re.findall(r'[\*\-\•]?\s*\*\*([A-Z0-9\-_]+(?:\s*\([^\)]+\))?)\*\*:\s*(.+)', content)
-            if not req_matches:
-                return None
-            lines = [
-                "# 🗺️ Project Roadmap (AGY Auto-Generated from PRD.md)",
-                "> 이 파일은 AGY Roadmap Ladder System이 PRD 기획 헌법을 기반으로 자동 생성·관리합니다.",
-                "> QA 통과 시마다 자동으로 체크가 기록되고 다음 마일스톤으로 진화합니다.",
-                ""
-            ]
-            cur_maj = 1
-            cur_min = 0
-            for item in req_matches:
-                req_raw = item[0].strip()
-                req_desc = item[1].strip()
-                m = re.match(r'(REQ-\d+)\s*(?:\((.*?)\))?', req_raw, re.IGNORECASE)
-                if m:
-                    req_id = m.group(1).upper()
-                    req_title = m.group(2) or req_desc.split(".")[0]
-                else:
-                    req_id = req_raw
-                    req_title = req_desc.split(".")[0]
+            for root, dirs, files in os.walk(self.workspace):
+                dirs[:] = [d for d in dirs if d not in (
+                    "build", ".gradle", ".git", "node_modules", "__pycache__", "dist", ".venv", "venv"
+                ) and not d.startswith(".")]
+                for fname in files:
+                    if fname.lower().endswith(source_exts):
+                        return True
+        except Exception:
+            pass
+        return False
 
-                ver_str = f"v{cur_maj}.{cur_min}"
-                lines.append(f"## {ver_str} — [{req_id}] {req_title}")
-                subtasks = [s.strip() for s in re.split(r'[\.,;]\s+', req_desc) if len(s.strip()) > 3]
-                if not subtasks:
-                    subtasks = [req_desc]
-                for st in subtasks[:3]:
-                    lines.append(f"- [ ] {st}")
-                lines.append("")
-                cur_min += 1
-                if cur_min >= 3:
-                    cur_maj += 1
-                    cur_min = 0
+    def _generate_roadmap_from_codebase(self) -> Optional[str]:
+        """Synthesizes the initial roadmap ladder from the REAL codebase on disk.
 
-            lines.append(f"## v{cur_maj}.0 — 상용 배포 품질 및 회귀 무결성 검증")
-            lines.append("- [ ] 전 기능 회귀 테스트 PASS 및 7대 게이트 무결점 통과")
-            lines.append("- [ ] 릴리즈 빌드 및 무인 운영 내구성 확보")
-            lines.append("")
-            return "\n".join(lines)
-        except Exception as e:
-            logger.debug(f"Failed to generate roadmap from PRD: {e}")
+        [PRD=일기장 원칙] PRD의 REQ 목록은 사다리로 변환하지 않는다. 코드 실사만 사용한다.
+        """
+        if not self._workspace_has_source():
             return None
+        templates = self._synthesize_codebase_aware_milestones([])
+        if not templates:
+            return None
+        lines = [
+            "# 🗺️ Project Roadmap (AGY Auto-Generated from Codebase Reality)",
+            "> 이 파일은 AGY Roadmap Ladder System이 디스크 코드 실사를 기반으로 자동 생성·관리합니다.",
+            "> PRD.md는 '무엇을 했는지'를 기록하는 실행 일기이며, 우선순위 결정에는 사용되지 않습니다.",
+            "",
+        ]
+        for idx, (title, tasks) in enumerate(templates, start=0):
+            lines.append(f"## v1.{idx} — {title}")
+            for t in tasks:
+                lines.append(f"- [ ] {t}")
+            lines.append("")
+        return "\n".join(lines)
 
     def ensure_exists(self) -> bool:
-        """ROADMAP.md 없으면 PRD.md 기반(또는 기본 템플릿)으로 생성. True=새로 생성됨."""
+        """ROADMAP.md 없으면 '디스크 코드 실사' 기반(또는 기본 템플릿)으로 생성. True=새로 생성됨."""
         if os.path.isfile(self.roadmap_path):
             return False
         try:
-            initial_content = None
-            prd_path = os.path.join(self.workspace, "PRD.md")
-            if os.path.isfile(prd_path):
-                initial_content = self._generate_roadmap_from_prd(prd_path)
+            initial_content = self._generate_roadmap_from_codebase()
 
             if not initial_content:
                 initial_content = _DEFAULT_ROADMAP_TEMPLATE
 
             with open(self.roadmap_path, "w", encoding="utf-8") as f:
                 f.write(initial_content)
-            logger.info(f"ROADMAP.md 생성 완료 (PRD 기반: {bool(initial_content != _DEFAULT_ROADMAP_TEMPLATE)})")
+            logger.info(f"ROADMAP.md 생성 완료 (코드 실사 기반: {bool(initial_content != _DEFAULT_ROADMAP_TEMPLATE)})")
             self.load()
             return True
         except Exception as e:
@@ -322,7 +356,7 @@ class RoadmapManager:
 
     # ── Query ──────────────────────────────────────
 
-    def get_current_milestone(self, auto_expand: bool = True) -> Optional[RoadmapMilestone]:
+    def get_current_milestone(self, auto_expand: bool = True, active_goal: str = "") -> Optional[RoadmapMilestone]:
         """IN_PROGRESS 또는 첫 번째 PENDING 마일스톤 반환. 소진 시 자동 확장 지원."""
         if not self._loaded:
             self.load()
@@ -333,7 +367,7 @@ class RoadmapManager:
             if ms.is_pending:
                 return ms
         if auto_expand:
-            new_ms_list = self.auto_expand_roadmap()
+            new_ms_list = self.auto_expand_roadmap(active_goal=active_goal)
             if new_ms_list:
                 return new_ms_list[0]
         return None
@@ -352,12 +386,41 @@ class RoadmapManager:
         cur_str = f" → 현재: **{current.version} {current.title}**" if current else " → 🎉 전체 완료!"
         return f"📍 로드맵 진행률: `{done}/{total}` 마일스톤 완료{cur_str}"
 
+    def get_completed_milestones(self) -> List[RoadmapMilestone]:
+        """Returns all completed milestones in the roadmap."""
+        if not self._loaded:
+            self.load()
+        return [ms for ms in self._milestones if ms.is_done]
+
+    def get_next_milestone_version(self) -> str:
+        """
+        Computes the next logical semantic version (e.g. v2.1 -> v2.2 or v3.0)
+        based on the highest existing milestone version.
+        """
+        if not self._loaded:
+            self.load()
+        max_major = 1
+        max_minor = 0
+        for ms in self._milestones:
+            m = re.match(r"^v?(\d+)(?:\.(\d+))?", ms.version, re.IGNORECASE)
+            if m:
+                maj = int(m.group(1))
+                min_ = int(m.group(2)) if m.group(2) is not None else 0
+                if (maj, min_) > (max_major, max_minor):
+                    max_major, max_minor = maj, min_
+
+        if max_minor < 2:
+            return f"v{max_major}.{max_minor + 1}"
+        else:
+            return f"v{max_major + 1}.0"
+
     # ── Mutation ──────────────────────────────────────
 
-    def auto_expand_roadmap(self) -> List[RoadmapMilestone]:
+    def auto_expand_roadmap(self, active_goal: str = "") -> List[RoadmapMilestone]:
         """
         ROADMAP.md의 모든 마일스톤이 완료/스킵되어 소진되었을 때,
-        프로젝트 컨텍스트 및 상용 표준에 맞춘 차기 고도화 마일스톤 3개를 동적으로 자동 생성 및 영구 추가합니다.
+        사용자 활성 목표(active_goal), 실제 디스크 결손 신호(GapSignalScanner),
+        및 제품 완성도 심도 결손(ProductRefinementGovernor)을 기반으로 실체 마일스톤을 동적 생성합니다.
         (AutonomySafetyLayer Guard 8: 최대 5차 확장까지만 허용하여 무한 사다리 폭주 방지)
         """
         try:
@@ -392,55 +455,68 @@ class RoadmapManager:
         domain = _detect_domain(self.workspace)
         logger.info(f"[RoadmapManager] Detected domain '{domain}' for auto-expansion")
 
-        # 1. Check if PRD.md has any pending REQs not yet included in any existing milestones
-        prd_path = os.path.join(self.workspace, "PRD.md")
-        unmapped_prd_templates = []
-        if os.path.isfile(prd_path):
-            try:
-                with open(prd_path, "r", encoding="utf-8", errors="ignore") as f:
-                    prd_text = f.read()
-                req_matches = re.findall(r'[\*\-\•]?\s*\*\*([A-Z0-9\-_]+(?:\s*\([^\)]+\))?)\*\*:\s*(.+)', prd_text)
-                for item in req_matches:
-                    req_raw = item[0].strip()
-                    req_desc = item[1].strip()
-                    m = re.match(r'(REQ-\d+)\s*(?:\((.*?)\))?', req_raw, re.IGNORECASE)
-                    req_id = m.group(1).upper() if m else req_raw
-                    req_title = m.group(2) if m and m.group(2) else req_desc.split(".")[0]
-                    if not any(req_id in ms.title for ms in self._milestones):
-                        subtasks = [s.strip() for s in re.split(r'[\.,;]\s+', req_desc) if len(s.strip()) > 3]
-                        if not subtasks:
-                            subtasks = [req_desc]
-                        unmapped_prd_templates.append((f"[{req_id}] {req_title}", subtasks[:3]))
-            except Exception as e:
-                logger.debug(f"PRD unmapped check notice: {e}")
-
         existing_titles = [ms.title for ms in self._milestones]
-        def is_title_duplicate(template_title: str, existing_title: str) -> bool:
-            m_tpl = re.search(r'\[(REQ-\d+)\]', template_title)
-            if m_tpl and m_tpl.group(1).lower() in existing_title.lower():
-                return True
-            # Strip [REQ-xxx] and check semantic title similarity
-            clean_tpl = re.sub(r'\[REQ-\d+\]', '', template_title, flags=re.IGNORECASE)
-            clean_ext = re.sub(r'\[REQ-\d+\]', '', existing_title, flags=re.IGNORECASE)
-            c_tpl = re.sub(r'[\s\-_&]', '', clean_tpl.lower())
-            c_ext = re.sub(r'[\s\-_&]', '', clean_ext.lower())
-            if not c_tpl or not c_ext:
-                return False
-            prefix_len = min(6, len(c_tpl), len(c_ext))
-            return (c_tpl[:prefix_len] in c_ext) or (c_ext[:prefix_len] in c_tpl)
+        disk_candidates: List[Tuple[str, List[str]]] = []
 
-        # If there are unmapped requirements in PRD.md, prioritize them!
-        available_templates = [t for t in unmapped_prd_templates if not any(is_title_duplicate(t[0], et) for et in existing_titles)]
+        # 0. 최우선 순위: 사용자 활성 목표 / 피드백 지시문 (Goal-Aware Expansion)
+        clean_goal = (active_goal or "").strip()
+        # Internal directive prefix guard (prevent automated prompts from being treated as feedback)
+        if any(clean_goal.startswith(p) for p in ["🎯 [", "사용자 원본 목표:", "[무인 자율", "[🎯", "[📍", "[🔧", "👑 ["]):
+            clean_goal = ""
 
-        # If no unmapped PRD requirements, dynamically synthesize project-aware milestones by inspecting actual codebase files
-        if not available_templates:
+        if clean_goal:
+            try:
+                from feedback_classifier import FeedbackIntentClassifier
+                verdict = FeedbackIntentClassifier.classify(clean_goal, project_initialized=True)
+                if verdict.is_feedback_directive:
+                    from commander import Commander
+                    fb_decomp = Commander.decompose_user_feedback(clean_goal, workspace=self.workspace, domain=domain)
+                    fb_title = fb_decomp.get("title", "")
+                    fb_tasks = fb_decomp.get("tasks", [])
+                    if fb_title and fb_tasks and not any(fb_title in et for et in existing_titles):
+                        disk_candidates.append((fb_title, fb_tasks))
+                        logger.info(f"[RoadmapManager] Auto-expand prioritized active user goal feedback: {fb_title}")
+            except Exception as e:
+                logger.debug(f"[RoadmapManager] Goal decomposition notice during auto-expansion: {e}")
+
+        # 1. 디스크 실측 결손 신호 (테스트 실패, Lint, 크래시, 스텁)
+        try:
+            from gap_signal_scanner import GapSignalScanner
+            top_signal = GapSignalScanner.select_next(self.workspace, domain=domain)
+            if top_signal and top_signal.title:
+                tasks = list(top_signal.actions) if top_signal.actions else [top_signal.detail]
+                if not any(top_signal.title in et for et in existing_titles) and not any(top_signal.title == dc[0] for dc in disk_candidates):
+                    disk_candidates.append((top_signal.title, tasks))
+                    logger.info(f"[RoadmapManager] Auto-expand prioritized GapSignal: {top_signal.title}")
+        except Exception as e:
+            logger.debug(f"[RoadmapManager] GapSignalScanner scan notice: {e}")
+
+        # 2. 제품 완성도 심도 결손 (Interaction, State, A11y, Maintenance)
+        try:
+            from product_refinement_governor import ProductRefinementGovernor
+            verdict = ProductRefinementGovernor.evaluate(self.workspace, domain=domain)
+            if verdict and verdict.requires_depth and verdict.gap:
+                gap = verdict.gap
+                tasks = list(gap.actions) if gap.actions else [gap.detail]
+                if not any(gap.title in et for et in existing_titles) and not any(gap.title == dc[0] for dc in disk_candidates):
+                    disk_candidates.append((gap.title, tasks))
+                    logger.info(f"[RoadmapManager] Auto-expand prioritized RefinementGap: {gap.title}")
+        except Exception as e:
+            logger.debug(f"[RoadmapManager] ProductRefinementGovernor scan notice: {e}")
+
+        # 3. 실측 신호나 목표가 전혀 없을 때만: 단 1개의 품질 안정화 템플릿만 fallback으로 제공 (가상 기능 사다리 패딩 엄격 금지)
+        if not disk_candidates:
             available_templates = self._synthesize_codebase_aware_milestones(existing_titles)
+            for tpl in available_templates:
+                if not any(tpl[0] in et for et in existing_titles):
+                    disk_candidates.append(tpl)
+                    break
 
         new_milestones: List[RoadmapMilestone] = []
         cur_maj = max_major
         cur_min = max_minor
 
-        for title, tasks in available_templates[:3]:
+        for title, tasks in disk_candidates:
             if cur_min < 2:
                 cur_min += 1
             else:
@@ -495,73 +571,97 @@ class RoadmapManager:
         is_game = any(k in codebase_keywords for k in ("game", "player", "stage", "sprite", "physics", "enemy", "level"))
         is_media = any(k in codebase_keywords for k in ("audio", "video", "player", "synth", "music", "sound"))
 
-        # Domain-aware synthesis (Zero B2B SaaS Hallucination & Atomic Single-Capability)
+        # Domain-aware synthesis (Zero B2B SaaS Hallucination, Zero Phantom Feature Ladders, Pure Quality Hardening)
         if is_pdf_or_doc:
             return [
                 (
-                    f"인체공학적 문서 탐색 & 썸네일 목차 그리드 (Phase {exp_idx}: 탐색 코어)",
+                    "문서 뷰어 렌더링 파이프라인 최적화 & 메모리 캐싱 방어",
                     [
-                        "고해상도 페이지 썸네일 그리드 내비게이터 및 빠른 점프 슬라이더 구현",
-                        "문서 개요(Outline/TOC) 계층 트리 뷰 및 양방향 페이지 동기화",
-                        "북마크 추가/삭제/필터링 및 시각적 리본 인덱스 인터랙션 완비"
+                        "LruCache 메모리 풀 및 비트맵 재사용 최적화로 OOM 예방",
+                        "터치 제스처 반응성 튜닝 및 뷰포트 스크롤 60fps 유지",
+                        "대용량 문서 렌더링 시 백그라운드 코루틴 디스패처 안정화"
                     ]
                 ),
                 (
-                    f"실시간 본문 텍스트 검색 & 뷰포트 하이라이트 (Phase {exp_idx+1}: 검색 코어)",
+                    "문서 파일 I/O 안정화 & 대용량 스트림 비동기 처리",
                     [
-                        "실시간 본문 전문 검색 쿼리 및 매칭 단어 뷰포트 하이라이트/스크롤 연동",
-                        "이전/다음 검색 결과 순환 이동 및 일치 단어 카운터 뱃지",
-                        "대용량 문서 검색 비동기 인덱싱 및 특수문자/정규식 검색 예외 처리"
+                        "대용량 파일 스트림 읽기/쓰기 비동기 파이프라인 분리",
+                        "파일 손상 감지 시 자동 복구 및 안전 세이프가드 구축",
+                        "저장 공간 부족 시 선제적 경고 및 임시 버퍼 정리"
                     ]
                 ),
                 (
-                    f"주석 레이어 렌더링 & 무손실 내보내기 (Phase {exp_idx+2}: 주석 코어)",
+                    "화면 회전 및 구성 변경 시 뷰포트 상태 보존 및 복구",
                     [
-                        "주석(형광펜, 펜 필기, 텍스트) 레이어 분리 저장 및 캔버스 렌더링",
-                        "터치 제스처 충돌 방지(스크롤 vs 드로잉) 및 Undo/Redo 제어 무결성",
-                        "원본 문서 훼손 없는 무손실 주석 병합 및 표준 PDF 내보내기"
+                        "화면 회전 및 액티비티 재생성 시 현재 읽기 위치 100% 보존",
+                        "다크 모드 / 라이트 모드 전환 시 UI 테마 지연 없는 핫스왑",
+                        "백그라운드 복귀 시 렌더링 컨텍스트 즉시 재개"
+                    ]
+                ),
+                (
+                    "제스처 반응성 정밀 튜닝 & 터치 지연 제로화",
+                    [
+                        "핀치 투 줌 및 팬 제스처 인터랙션 60fps 스무딩",
+                        "더블 탭 확대/축소 모션 곡선 정밀 이징 적용",
+                        "터치 이벤트 디스패치 레이턴시 16ms 이내 보장"
+                    ]
+                ),
+                (
+                    "문서 처리 전역 예외 처리 & 장애 격리 안전망 구축",
+                    [
+                        "포맷 파싱 에러 발생 시 크래시 없는 에러 안내 뷰 표출",
+                        "구조화된 진단 로깅 및 비정상 종료 리포트 생성 체계 완비",
+                        "비정상 종료 없는 연속 런타임 내구성 최종 검증"
                     ]
                 )
             ]
         elif is_game:
             return [
                 (
-                    f"고급 레벨 디자인 & 다이내믹 게임플레이 튜닝 (Phase {exp_idx})",
+                    "사운드 오디오 믹싱 & 60fps 프레임 내구성 방어",
                     [
-                        "다양한 지형 기믹 및 동적 장애물 인터랙션 구현",
-                        "적 행동 패턴 다양화 및 보스 스테이지 페이즈 연출",
-                        "콤보 점수 시스템 및 시각적 축하 파티클 이펙트 완성"
-                    ]
-                ),
-                (
-                    f"사운드 오디오 믹싱 & 60fps 프레임 내구성 방어 (Phase {exp_idx+1})",
-                    [
-                        "절차적 타격 효과음 및 동적 배경음악 크로스페이드",
+                        "절차적 타격 효과음 및 오디오 믹싱 레이턴시 최적화",
                         "모바일 터치 조작감 튜닝 및 가상 패드 햅틱 반응성",
                         "장기 실행 시 메모리 누수 0건 및 60fps 유지 최적화"
                     ]
                 ),
                 (
-                    f"플레이어 성장 밸런스 & 업적 챌린지 시스템 (Phase {exp_idx+2})",
+                    "가상 패드 입력 응답성 튜닝 & 햅틱 촉각 피드백 정밀화",
                     [
-                        "다채로운 파워업 아이템 효과 및 인게임 스킬 트리 구현",
-                        "업적 챌린지 해금 모달 및 로컬 최고 기록 스코어보드 연동",
-                        "결과 화면 애니메이션 연출 및 원클릭 즉시 재시작 UX"
+                        "멀티터치 터치 감도 튜닝 및 입력 래그 제로화",
+                        "햅틱 피드백 패턴 다양화 및 진동 엔진 최적화",
+                        "터치 영역 시각 피드백 및 사용자 정의 배치 지원"
+                    ]
+                ),
+                (
+                    "스프라이트 렌더링 메모리 풀 최적화 & OOM 방어",
+                    [
+                        "텍스처 아틀라스 메모리 캐싱 및 비트맵 인스턴스 재사용",
+                        "가비지 컬렉션 스파이크 최소화 및 프레임 드롭 방어",
+                        "화면 외 객체 컬링(Culling) 및 드로우콜 감소"
+                    ]
+                ),
+                (
+                    "물리 충돌 감지 연산 최적화 & 프레임 내구성 방어",
+                    [
+                        "공간 분할(Spatial Partitioning) 기반 충돌 연산 경량화",
+                        "복합 콜라이더 교차 판정 정밀도 및 터널링 현상 방어",
+                        "장기 실행 시 물리 시뮬레이션 안정성 확보"
+                    ]
+                ),
+                (
+                    "게임 루프 전역 예외 처리 & 데이터 자동 세이브 무결성",
+                    [
+                        "비정상 종료 시 게임 진행 상태 원자적 자동 저장",
+                        "렌더링 스레드 예외 분리 및 크래시 방어",
+                        "세이브 데이터 체크섬 무결성 검증 및 롤백 체계"
                     ]
                 )
             ]
         else:
             return [
                 (
-                    f"사용자 중심 핵심 워크플로우 & 인터랙션 완성도 강화 (Phase {exp_idx})",
-                    [
-                        "주요 기능 원클릭 접근성 및 인체공학적 직관적 제어 UX 구현",
-                        "비정상 입력/네트워크 오류 시 친절한 사용자 가이드 및 자동 복원",
-                        "작업 상태 영속화 및 재실행 시 이전 세션 100% 무손실 복구"
-                    ]
-                ),
-                (
-                    f"상용 서비스 품질 검증 & 크래시 0건 내구성 안정화 (Phase {exp_idx+1})",
+                    "상용 서비스 품질 검증 & 크래시 0건 내구성 안정화",
                     [
                         "반응형 뷰포트 레이아웃 붕괴 0px 및 터치 타깃 최적화",
                         "백그라운드 메모리 누수 제로화 및 OOM 선제적 방어",
@@ -569,20 +669,101 @@ class RoadmapManager:
                     ]
                 ),
                 (
-                    f"인체공학적 개인화 설정 & 데이터 백업/복원 완성 (Phase {exp_idx+2})",
+                    "런타임 리소스 누수 방어 & 비정상 종료 예외 처리 강화",
                     [
-                        "사용자 커스텀 테마/환경설정 로컬 영속화 및 즉시 적용",
-                        "작업 데이터 원클릭 백업/복원 및 무손실 데이터 무결성 검증",
-                        "전 플랫폼 엔드투엔드(E2E) 회귀 테스트 100% 무결점 통과"
+                        "전역 예외 핸들러 및 비정상 종료 복구 파이프라인 수립",
+                        "메모리/네트워크 커넥션 누수 차단 및 가비지 수거 점검",
+                        "장시간 실행 시 성능 저하 없는 안정적 상태 유지"
+                    ]
+                ),
+                (
+                    "입출력 데이터 무결성 보증 & 트랜잭션 장애 격리",
+                    [
+                        "데이터 저장소 원자적 트랜잭션 및 롤백 안전망 구축",
+                        "불완전 I/O 쓰기 방어 및 데이터 손상 감지 검증",
+                        "스토리지 접근 예외 시 사용자 친화적 복구 UI"
+                    ]
+                ),
+                (
+                    "사용자 인터랙션 성능 튜닝 & 프레임 드롭 제로화",
+                    [
+                        "주요 화면 렌더링 60fps 고정 및 UI 점프/버벅임 제거",
+                        "비동기 태스크 디스패칭 분리로 메인 스레드 블로킹 방어",
+                        "컴포넌트 리렌더링 최소화 및 연산 캐싱"
+                    ]
+                ),
+                (
+                    "전역 시스템 보안 감사 & 배포 릴리즈 무결성 패키징",
+                    [
+                        "민감 정보 유출 방지 및 보안 취약점 점검",
+                        "릴리즈 바이너리 무결성 해시 검증 및 프로덕션 사이닝",
+                        "배포 아티팩트 규격 준수 및 운영 배포 준비 완료"
                     ]
                 )
             ]
+
+    PRD_JOURNAL_HEADER = "## 📓 Execution Journal (실행 일기 — append-only)"
+
+    def append_prd_journal_entry(
+        self,
+        version: str,
+        title: str,
+        status: str = "DONE",
+        evidence: str = "",
+        timestamp: Optional[str] = None,
+    ) -> bool:
+        """Appends one immutable entry to PRD.md's execution journal.
+
+        [PRD=일기장 원칙] PRD는 '이전에 이런 걸 했다'를 남기는 일기장이다.
+        우선순위/다음 작업 결정에는 절대 사용되지 않으며, 과거 기록을 덮어쓰지 않는다.
+        """
+        prd_path = os.path.join(self.workspace, "PRD.md")
+        try:
+            content = ""
+            if os.path.isfile(prd_path):
+                with open(prd_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+
+            marker = f"`{version}`"
+            # Idempotent: never journal the same version+title twice.
+            if marker in content and title[:20] in content:
+                return False
+
+            ts = timestamp or time.strftime("%Y-%m-%d %H:%M")
+            entry = f"- **{ts}** {marker} [{status}] — {title}"
+            if evidence:
+                entry += f"\n  ↳ 증거: {evidence[:160]}"
+
+            header = self.PRD_JOURNAL_HEADER
+            if header not in content:
+                content = (
+                    content.rstrip()
+                    + f"\n\n{header}\n"
+                    + "> PRD는 '무엇을 했는지'를 기록하는 실행 일기입니다. 다음 작업 우선순위 결정에는 사용되지 않습니다.\n\n"
+                    + entry + "\n"
+                )
+            else:
+                m = re.search(rf"{re.escape(header)}.*?(?=\n## |\Z)", content, re.DOTALL)
+                if m:
+                    block = m.group(0).rstrip()
+                    content = content[:m.start()] + block + "\n" + entry + "\n" + content[m.end():]
+                else:
+                    content = content.rstrip() + "\n" + entry + "\n"
+
+            with open(prd_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info(f"[PRD Journal] 기록: {version} — {title}")
+            return True
+        except Exception as e:
+            logger.debug(f"[PRD Journal] 기록 실패: {e}")
+            return False
 
     def sync_milestones_to_prd(self):
         """
         [PRD.md & ROADMAP.md Bidirectional Sync]
         Ensures PRD.md reflects completed and active milestones so that QA and Auditor
         never suffer from sync drift or false rejection.
+        PRD는 결과를 기록하는 일기장(append-only)이며, 우선순위 소스로 읽히지 않는다.
         """
         prd_path = os.path.join(self.workspace, "PRD.md")
         if not os.path.isfile(prd_path):
@@ -624,6 +805,10 @@ class RoadmapManager:
             with open(prd_path, "w", encoding="utf-8") as f:
                 f.write(prd_content)
             logger.info("PRD.md successfully synchronized with latest ROADMAP milestones.")
+
+            # 실행 일기(append-only): 완료된 마일스톤을 PRD에 영구 기록한다.
+            for ms in done_milestones:
+                self.append_prd_journal_entry(ms.version, ms.title, status="DONE")
         except Exception as e:
             logger.debug(f"PRD sync notice: {e}")
 
@@ -673,6 +858,69 @@ class RoadmapManager:
         self.save()
         logger.info(f"{len(new_milestones)}개 새 마일스톤 추가")
 
+    def find_equivalent_milestone(
+        self,
+        title: str,
+        tasks: Optional[List[str]] = None,
+        min_similarity: float = 0.6
+    ) -> Optional[RoadmapMilestone]:
+        """Returns an existing milestone whose capability fingerprint matches `title`.
+
+        Prevents the same capability being appended twice under a slightly different
+        version/title (e.g. v2.0 vs v2.1 of the identical '브랜드 리뉴얼 + PDF 원본 편집' scope).
+        """
+        if not self._loaded:
+            self.load()
+
+        combined = f"{title} {' '.join(tasks)}" if tasks else title
+        best_ms: Optional[RoadmapMilestone] = None
+        best_score = 0.0
+        for ms in self._milestones:
+            ms_text = f"{ms.title} {' '.join(t.text for t in ms.tasks)}"
+            score = max(
+                capability_similarity(combined, ms_text),
+                capability_similarity(title, ms.title),
+            )
+            if score >= min_similarity and score > best_score:
+                best_score, best_ms = score, ms
+        return best_ms
+
+    def is_capability_completed(self, title: str, tasks: Optional[List[str]] = None) -> bool:
+        """True when an equivalent milestone already exists AND is marked DONE."""
+        equivalent = self.find_equivalent_milestone(title, tasks)
+        return bool(equivalent and equivalent.is_done)
+
+    def reconcile_delivered_capabilities(self, is_delivered) -> List[RoadmapMilestone]:
+        """Marks any not-done milestone DONE when `is_delivered(title, tasks)` proves
+        the capability already exists on disk.
+
+        This keeps the ROADMAP ledger honest ("진행했으면 진행했다고 체크") even when a
+        previous approval round failed to tick the box, so the same work is never
+        re-planned. `is_delivered` is a predicate supplied by the caller (Commander),
+        which owns the domain-specific delivery evidence.
+        """
+        if not self._loaded:
+            self.load()
+
+        marked: List[RoadmapMilestone] = []
+        for ms in self._milestones:
+            if ms.is_done or ms.status == "SKIPPED":
+                continue
+            try:
+                if is_delivered(ms.title, [t.text for t in ms.tasks]):
+                    ms.mark_done()
+                    marked.append(ms)
+            except Exception as e:
+                logger.debug(f"[RoadmapManager] delivery predicate notice: {e}")
+
+        if marked:
+            self.save()
+            self.sync_milestones_to_prd()
+            logger.info(
+                f"[RoadmapManager] 디스크 실구현 확인 → 완료 체크: {[m.version for m in marked]}"
+            )
+        return marked
+
     def append_or_update_adaptive_milestone(
         self,
         version: str,
@@ -684,6 +932,8 @@ class RoadmapManager:
         [Adaptive Codebase Grounding Mandate]
         Appends or updates an adaptive milestone dynamically planned by Commander.
         Ensures all prior completed milestones are marked DONE.
+        Idempotent: an already-completed equivalent capability is never resurrected
+        nor duplicated as a new row (중복 기획/재작업 원천 차단).
         Persists to ROADMAP.md and syncs with PRD.md.
         """
         if not self._loaded:
@@ -695,9 +945,22 @@ class RoadmapManager:
                 target_ms = ms
                 break
 
+        # Semantic capability dedup: same capability under a different version/title.
+        if target_ms is None:
+            target_ms = self.find_equivalent_milestone(title, tasks)
+
         task_objs = [RoadmapTask(text=t, done=(status == "DONE")) for t in tasks]
 
         if target_ms:
+            # Never downgrade a completed milestone back to IN_PROGRESS.
+            if target_ms.is_done and status != "DONE":
+                logger.warning(
+                    f"[RoadmapManager] 중복 기획 차단: '{title}' 는 이미 완료된 "
+                    f"{target_ms.version} '{target_ms.title}' 과 동일 역량 → 완료 상태 유지(재작업 방지)."
+                )
+                self.save()
+                self.sync_milestones_to_prd()
+                return target_ms
             target_ms.title = title
             target_ms.tasks = task_objs
             target_ms.status = status

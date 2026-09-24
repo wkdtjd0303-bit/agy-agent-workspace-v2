@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 from config import DEFAULT_WORKSPACE, DEFAULT_CHANNEL_WORKSPACES, STATE_FILE_PATH
 
 logger = logging.getLogger(__name__)
@@ -60,39 +60,77 @@ def kill_process_tree(pid: int):
         pass
 
 
+_INTERPRETER_OR_TOOL = {
+    "bash", "sh", "dash", "zsh", "fish", "grep", "pgrep", "ps", "head", "tail",
+    "timeout", "python", "python3", "node", "npm", "npx", "opencode", "hermes",
+    "systemctl", "journalctl", "ssh", "vim", "nano", "code", "cat", "sed", "awk",
+}
+
+
+def _is_agy_language_server(pid: int) -> Tuple[bool, str]:
+    """Antigravity Language Server 프로세스 여부를 실행 파일(exe)/argv0 기반으로 판별한다.
+
+    셸/그리프/파이썬 등 도구 프로세스의 명령줄에 우연히 'language_server' 문자열이
+    포함된 경우(예: pgrep 검색 명령)를 오탐으로 죽이지 않도록,
+    실제 실행 바이너리 이름/경로에 언어서버 마커가 있어야만 True 를 반환한다.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return False, ""
+    argv = [a for a in raw.split("\x00") if a]
+    if not argv:
+        return False, ""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except Exception:
+        exe = ""
+    argv0 = argv[0]
+    for token in (exe, argv0):
+        base = os.path.basename(token or "").lower()
+        if base in _INTERPRETER_OR_TOOL:
+            return False, ""
+    blob = f"{exe} {' '.join(argv)}".lower()
+    ls_markers = ("exa.language_server", "language_server", "language-server", "jetski")
+    if any(m in blob for m in ls_markers):
+        return True, blob
+    if "cloudcode" in blob and "server" in blob:
+        return True, blob
+    if "antigravity" in blob and ("server" in blob or "lsp" in blob):
+        return True, blob
+    return False, ""
+
+
 def kill_agy_language_servers():
     """Finds and kills orphaned AGY Language Server processes that linger after
     CLI sessions end, continuously polling Google Cloud APIs (loadCodeAssist,
     fetchAvailableModels) every 6 minutes and silently consuming quota.
 
-    These servers are identified by their command line containing both
-    'antigravity' and 'server' keywords, or by the language server port pattern.
+    Active CLI sessions (--print / --dangerously-skip-permissions) are preserved.
     """
     import signal
     killed = []
     try:
-        # Find AGY-related server processes (Language Server spawned by AGY CLI)
-        result = subprocess.run(
-            ["pgrep", "-f", "antigravity.*server|cloudcode.*server"],
-            stdout=subprocess.PIPE, text=True, timeout=3.0
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            for pid_str in result.stdout.strip().split():
-                if pid_str.isdigit():
-                    pid = int(pid_str)
-                    # Verify it's actually a language server, not our main process
-                    try:
-                        cmdline_path = f"/proc/{pid}/cmdline"
-                        if os.path.exists(cmdline_path):
-                            with open(cmdline_path, 'rb') as f:
-                                cmdline = f.read().decode('utf-8', errors='replace')
-                            # Skip if it's the main agy CLI with --print (active session)
-                            if '--print' in cmdline or '--dangerously-skip-permissions' in cmdline:
-                                continue
-                        os.kill(pid, signal.SIGTERM)
-                        killed.append(pid)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
+        for pid_entry in os.listdir("/proc"):
+            if not pid_entry.isdigit():
+                continue
+            pid = int(pid_entry)
+            if pid == os.getpid():
+                continue
+            try:
+                is_ls, cmdline = _is_agy_language_server(pid)
+                if not is_ls:
+                    continue
+                if "--print" in cmdline or "--dangerously-skip-permissions" in cmdline:
+                    continue  # active CLI session
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+                logging.getLogger(__name__).info(
+                    f"[QuotaGuard] Terminated orphaned AGY Language Server pid={pid} cmd={cmdline[:120]}"
+                )
+            except (ProcessLookupError, PermissionError, OSError, ValueError):
+                continue
     except Exception:
         pass
 
@@ -181,6 +219,7 @@ class ChannelSession:
         qa2_model: Optional[str] = None,
         auditor_engine: str = "agy",
         extended_qa_conversation_ids: Optional[Dict[str, str]] = None,
+        engine_conversations: Optional[Dict[str, str]] = None,
         selected_qa_indices: Optional[List[int]] = None,
         user_directive: Optional[str] = None,
         root_user_goal: Optional[str] = None,
@@ -195,6 +234,10 @@ class ChannelSession:
         self.extended_qa_conversation_ids: Dict[str, str] = dict(extended_qa_conversation_ids) if isinstance(extended_qa_conversation_ids, dict) else {}
         self._extended_qa_conversation_ids = self.extended_qa_conversation_ids
         self.auditor_conversation_id: Optional[str] = auditor_conversation_id
+        # [🔌 엔진별 대화 저장소] 엔진(agy/opencode/hermes...)마다 독립적인 대화/세션 ID를
+        # 분리 보관하여, 라우터(엔진) 전환 시 서로의 conversation_id를 오염시키지 않습니다.
+        # key 형식: "<engine>:<conversation_id_attr>" (예: "opencode:conversation_id")
+        self.engine_conversations: Dict[str, str] = dict(engine_conversations) if isinstance(engine_conversations, dict) else {}
         init_mode = (mode or "auto").lower().strip()
         if init_mode not in ("auto", "read", "pair_quad", "single_qa2", "pair", "single_plus", "single", "mode3", "mode3_plus"):
             init_mode = "auto"
@@ -374,6 +417,8 @@ class ChannelSession:
         self.qa2_conversation_id = None
         self.extended_qa_conversation_ids = {}
         self.auditor_conversation_id = None
+        # [🔌 엔진별 대화 저장소] 엔진 전환/리셋 시 모든 엔진의 세션 ID도 함께 초기화합니다.
+        self.engine_conversations = {}
         self.clear_user_reference_images()
         if self._on_change:
             self._on_change()
@@ -657,6 +702,7 @@ class ChannelSession:
             "qa_conversation_id": self.qa_conversation_id,
             "qa2_conversation_id": getattr(self, "qa2_conversation_id", None),
             "extended_qa_conversation_ids": getattr(self, "extended_qa_conversation_ids", {}),
+            "engine_conversations": getattr(self, "engine_conversations", {}),
             "auditor_conversation_id": self.auditor_conversation_id,
             "mode": self.mode,
             "auto_enabled": self.auto_enabled,
@@ -726,6 +772,7 @@ class SessionManager:
                 qa_conv_id = data.get("qa_conversation_id")
                 qa2_conv_id = data.get("qa2_conversation_id")
                 extended_qa_conv_ids = data.get("extended_qa_conversation_ids") or {}
+                engine_conv_ids = data.get("engine_conversations") or {}
                 auditor_conv_id = data.get("auditor_conversation_id")
                 mode = data.get("mode", "auto")
                 if mode not in ("auto", "read", "pair_quad", "single_qa2", "pair", "single_plus", "single", "mode3", "mode3_plus"):
@@ -789,6 +836,7 @@ class SessionManager:
                     qa2_model=qa2_model,
                     auditor_engine=auditor_engine,
                     extended_qa_conversation_ids=extended_qa_conv_ids,
+                    engine_conversations=engine_conv_ids,
                     selected_qa_indices=selected_qa_indices,
                     user_directive=user_directive,
                     root_user_goal=root_user_goal,
@@ -858,6 +906,8 @@ class SessionManager:
                         sess.qa2_model = data.get("qa2_model", getattr(sess, "qa2_model", None))
                         if "extended_qa_conversation_ids" in data:
                             sess.extended_qa_conversation_ids = data.get("extended_qa_conversation_ids") or {}
+                        if "engine_conversations" in data:
+                            sess.engine_conversations = data.get("engine_conversations") or {}
                         if "commander_macro_history" in data:
                             sess.commander_macro_history = list(data.get("commander_macro_history") or [])
                         if not sess.is_busy:
@@ -902,6 +952,7 @@ class SessionManager:
                             qa2_engine=data.get("qa2_engine", "openrouter"),
                             qa2_model=data.get("qa2_model"),
                             extended_qa_conversation_ids=data.get("extended_qa_conversation_ids") or {},
+                            engine_conversations=data.get("engine_conversations") or {},
                             on_change=self.save_state
                         )
                 except Exception as ex:

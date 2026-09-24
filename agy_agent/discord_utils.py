@@ -190,17 +190,23 @@ def shorten_paths_for_readability(text: str, workspace: Optional[str] = None) ->
     """
     Replaces verbose absolute filesystem paths in text with compact relative paths (./...)
     to prevent context bloat and improve reading clarity for users.
+
+    [📁 CWD 정확 표시] 단, 워크스페이스 '루트' 자체는 './'로 축약하지 않고 정확한 절대경로로
+    보존합니다. (사용자가 "현재 디렉토리"를 물었을 때 올바른 경로가 그대로 보이도록 함)
     """
     if not text or not isinstance(text, str):
         return text or ""
 
-    # Workspace-specific absolute prefix replacement
-    if workspace:
-        clean_ws = workspace.rstrip("/")
-        text = text.replace(clean_ws + "/", "./")
-        text = text.replace(clean_ws, "./")
+    clean_ws = workspace.rstrip("/") if workspace else ""
 
-    # Autocoding projects absolute path pattern replacement
+    if clean_ws:
+        # [📁 CWD 정확 표시 & 프로젝트 격리]
+        # 워크스페이스 '내부' 하위 경로만 './...' 로 축약합니다.
+        # 워크스페이스 '루트' 자체와 다른 프로젝트의 절대경로는 정확히 보존하여,
+        # "현재 디렉토리" 질문에 올바른 경로가 보이고 타 프로젝트 경로가 './'로 오인되지 않게 합니다.
+        return text.replace(clean_ws + "/", "./")
+
+    # 워크스페이스를 알 수 없는 경우에만 일반 홈 경로를 축약 (폴백)
     text = re.sub(r'/home/[^/\s`\'"<>]+/Desktop/autocoding/[^/\s`\'"<>]+/', './', text)
     # Generic deep home directory paths (/home/.../Desktop/...)
     text = re.sub(r'/home/[^/\s`\'"<>]+/Desktop/[^/\s`\'"<>]+/', './', text)
@@ -252,17 +258,25 @@ def split_message(text: str, limit: int = 1900, workspace: Optional[str] = None)
     in_code_block = False
     code_block_lang = ""
 
+    # [🛡️ 핵심 버그 수정] 한 라인을 나눌 때 코드펜스 재개 헤더(```lang) + 닫는 펜스 여유분까지
+    # 반드시 확보해야 합니다. 예약 공간이 부족하면 (매우 긴 언어 태그 등) 청크가 limit 을
+    # 초과해, safe_send_discord_message 가 무한 재귀(RecursionError)에 빠집니다.
+    piece_size = max(50, limit - 50)
+
     for line in lines:
         code_fence_match = re.match(r"^```(\w*)", line)
-        
+
         # If line itself is massive, break it down
-        line_parts = [line[i:i + (limit - 50)] for i in range(0, len(line), limit - 50)] or [""]
+        line_parts = [line[i:i + piece_size] for i in range(0, len(line), piece_size)] or [""]
 
         for part in line_parts:
-            # Closing fence overhead is 4 chars ("\n```")
+            # Closing fence overhead is 4 chars ("\n```"), reopen header overhead is len(```lang)
+            reopen_overhead = (len("```") + len(code_block_lang)) if in_code_block else 0
             closing_fence_overhead = 4 if in_code_block else 0
-            
-            if current_length + len(part) + 1 + closing_fence_overhead > limit and current_chunk:
+            reserved = reopen_overhead + closing_fence_overhead
+
+            # 청크에 최소 1개 파트는 반드시 담되, 예약 공간을 초과하지 않도록 분할합니다.
+            if current_chunk and current_length + len(part) + 1 + reserved > limit:
                 if in_code_block:
                     current_chunk.append("```")
                 chunks.append("\n".join(current_chunk))
@@ -289,7 +303,18 @@ def split_message(text: str, limit: int = 1900, workspace: Optional[str] = None)
             current_chunk.append("```")
         chunks.append("\n".join(current_chunk))
 
-    return chunks
+    # [🛡️ 절대 안전 보증] 코드펜스/재개 헤더 등 예외적 조합에서도 어떤 청크도 limit 을
+    # 넘지 않도록 최종 강제 분할합니다. (초과 청크가 남으면 상위 safe_send_discord_message 의
+    # 재귀가 끝나지 않아 RecursionError 로 이어지므로 마지막 방어선을 둡니다.)
+    safe_chunks: List[str] = []
+    for ch in chunks:
+        if len(ch) <= limit:
+            safe_chunks.append(ch)
+            continue
+        for i in range(0, len(ch), limit):
+            safe_chunks.append(ch[i:i + limit])
+
+    return safe_chunks
 
 def format_tool_status(tool_name: str, tool_info: dict, workspace: Optional[str] = None) -> str:
     """
@@ -1119,7 +1144,8 @@ async def safe_send_discord_message(
     quote_reference: Optional[str] = None,
     quote_author: Optional[str] = None,
     add_toolbar: bool = False,
-    toolbar_emojis: Optional[List[str]] = None
+    toolbar_emojis: Optional[List[str]] = None,
+    _split_depth: int = 0
 ) -> Optional[discord.Message]:
     """
     Defensively sends or replies to a Discord message or embed.
@@ -1154,6 +1180,17 @@ async def safe_send_discord_message(
     # CRITICAL: If content exceeds 1900 chars (e.g. quote bar pushed it over limit or long text),
     # safely split into sequential chunks to guarantee NO 2000-char Discord 400 Bad Request
     if content and len(content) > 1900:
+        # [🛡️ 무한 재귀 방어] 정상 경로에서는 split_message 가 모든 청크를 1900자 이하로
+        # 보증하므로 재귀는 1단계로 끝납니다. 만약 어떤 이유로든 초과 청크가 반환되면
+        # 재귀를 멈추고 하드 슬라이스로 안전하게 전송하여 RecursionError 를 원천 차단합니다.
+        if _split_depth >= 3:
+            logger.error(
+                "safe_send_discord_message: split recursion depth exceeded; hard-slicing content to prevent RecursionError."
+            )
+            last_msg = None
+            for i in range(0, len(content), 1900):
+                last_msg = await _raw_dispatch_send(target, {"content": content[i:i + 1900]}, is_reply=False, reference=None)
+            return last_msg
         logger.info(f"safe_send_discord_message: Content length ({len(content)}) exceeds 1900 chars. Splitting into safe chunks.")
         chunks = split_message(content, limit=1900)
         last_sent = None
@@ -1171,7 +1208,8 @@ async def safe_send_discord_message(
                 is_reply=sub_reply,
                 reference=sub_ref,
                 add_toolbar=sub_toolbar,
-                toolbar_emojis=toolbar_emojis
+                toolbar_emojis=toolbar_emojis,
+                _split_depth=_split_depth + 1
             )
             if i < len(chunks) - 1:
                 await asyncio.sleep(0.3)

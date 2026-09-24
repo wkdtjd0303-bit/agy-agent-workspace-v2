@@ -98,6 +98,40 @@ class TestDiscordUtilsComprehensive(unittest.TestCase):
         # String non-int limit
         chunks = split_message(sample_text, limit="invalid_string")
         self.assertEqual(len(chunks), 1)
+
+    def test_split_message_never_exceeds_limit_with_code_fences(self):
+        """
+        회귀 방지: 코드펜스 + 초장문 라인 조합에서도 limit 초과 청크를 반환하면 안 됩니다.
+        (초과 청크가 반환되면 safe_send_discord_message 가 무한 재귀 -> RecursionError 발생)
+        """
+        cases = [
+            "```" + ("a" * 200) + "\n" + ("x" * 1900) + "\n```",  # 매우 긴 언어 태그
+            "```\n" + ("x" * 1901) + "\n```",                      # 펜스 내 초장문 라인
+            "```python\n" + ("y" * 5000),                          # 미닫힘 펜스 + 초장문
+        ]
+        for text in cases:
+            for limit in (100, 500, 1000, 1900):
+                for chunk in split_message(text, limit=limit):
+                    self.assertLessEqual(len(chunk), limit)
+
+    def test_safe_send_discord_message_oversized_no_recursion(self):
+        """초과 청크가 있어도 safe_send_discord_message 는 무한 재귀하지 않아야 합니다."""
+        import asyncio
+        from discord_utils import safe_send_discord_message
+
+        sent = []
+
+        class DummyTarget:
+            async def send(self, **kwargs):
+                sent.append(kwargs.get("content", ""))
+                return None
+
+        text = "```" + ("a" * 200) + "\n" + ("x" * 1900) + "\n```"
+        asyncio.run(safe_send_discord_message(DummyTarget(), text))
+        self.assertTrue(sent)
+        for c in sent:
+            self.assertLessEqual(len(c), 1900)
+
     def test_resolve_app_name(self):
         from discord_utils import resolve_app_name
         self.assertEqual(resolve_app_name("PdfFlow.apk"), "PdfFlow")

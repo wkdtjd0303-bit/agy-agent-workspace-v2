@@ -3,6 +3,25 @@
 > **원칙**: 이전 라운드에서 합의되고 적용된 개선 사항은 영구 보존하며,
 > 야간 자율 운영 시에도 합의 범위를 벗어나는 임의 롤백 및 가짜 증거 생성을 엄격히 금지합니다.
 
+
+## 📊 Quality State Store (정량적 품질 지표 및 증분 추적)
+
+> **마일스톤**: `v1.0` | **종합 기계 점수**: `100.0%` (증분: `+0.0%`) | **회귀 검증**: 🚨 회귀 감지 (Regression)
+
+| 품질 차원 (Dimension) | 통과/전체 | 측정 점수 |
+| :--- | :---: | :---: |
+| GAMEPLAY | 유지 | `0.0%` |
+| VISUAL | 유지 | `0.0%` |
+| UX | 1/1 | `100.0%` |
+| PERFORMANCE | 1/1 | `100.0%` |
+| ARCHITECTURE | 1/1 | `100.0%` |
+
+**최근 활성 Quality Contract (QC) 검증 결과**:
+- **[QC-A-01]** `✅ PASS`: 명령행 인자(Argparse/Click) 유효성 검증 및 도움말(--help) 출력 완결 *(증거: [기계적 디스크 검증] agy_quota_guardian.py 소스코드 내 'exit' 물리적 토큰 검출 완료)*
+- **[QC-U-01]** `✅ PASS`: 장시간 작업 시 실시간 진행률(Progress Bar or Spinner or Step Indicator) 피드백 *(증거: [기계적 디스크 검증] agy_quota_guardian.py 소스코드 내 'flash' 물리적 토큰 검출 완료)*
+- **[QC-P-01]** `✅ PASS`: Graceful Shutdown (SIGINT/Ctrl+C) 프로세스 및 리소스 정상 해제 *(증거: [기계적 디스크 검증] agy_quota_guardian.py 소스코드 내 'SIGINT' 물리적 토큰 검출 완료)*
+
+
 ## 📋 누적 합의 및 의사결정 이력 (Consensus History)
 
 | 라운드 | 대상 컴포넌트 | 사용자 질의 / 맥락 | 합의된 개선 사항 | 패치 범위 | 상태 |
@@ -18,9 +37,10 @@
 | R10 (12:45:00) | `Mode3_Complete_Elimination_And_Clean_Slate` | "🧹 **[!mode 3 / !mode 3+ 전면 초기화 완료]** 기존의 Mode 3 및 Mode 3+ 로직이 완전히 정리되었습니다. 새로운 기획 및 아키텍처 재구축을 위해 대기 상태입니다. (채널 모드: evolve)" 이런식으로 나오는데 이런 문구조차 안 나오도록 완벽하게 mode 3와 관련된 내용들을 agy_agent 에서 없애줘 | **[Mode 3 / Mode 3+ 전면 소거 및 완벽한 무흔적 클린 정합화 완료] 1) 원인 규명: 기존 모드 3/3+ 폐지 과정에서 특수 핸들러 및 잔여 안내 문구('더 이상 제공되지 않습니다', '전면 초기화 완료', '채널 모드: evolve')가 잔존하여 노출되던 결함 해소. 2) 완전 소거: bot.py의 !mode 명령어에서 특수 분기를 전면 제거하고 정규 화이트리스트 기반 검증으로 일원화(미지원 모드는 표준 '지원되지 않는 모드입니다'로 일괄 응답). 3) 런타임 잔재 제거: bot.py, self_healing.py, help_manager.py, session_manager.py에서 evolve/quad/3/3+ 잔존 참조 완전 숙청 및 channel_sessions.json 내 레거시 'evolve' 채널 모드를 'auto'로 전수 정상화. 4) 테스트 무결성: test_mode3_* 테스트 파일 2종 정규화 및 test_mode_command_clean_rejection.py 구축 완료 (36/36 전원 통과).** | `agy_agent/bot.py, agy_agent/self_healing.py, agy_agent/help_manager.py, agy_agent/session_manager.py, agy_agent/state/channel_sessions.json, agy_agent/tests/test_autonomous_enhancements.py, agy_agent/tests/test_autopilot_idle_e2e_dispatch.py, agy_agent/tests/test_mode_command_clean_rejection.py, docs/MULTI_AGENT_CHAIN_DIAGNOSIS.md, docs/MULTI_AGENT_CHAIN_DIAGNOSIS.html, WORKING_MEMORY.md` | ✅ APPLIED |
 | R11 (23:25:00) | `Output_Token_Diet_And_Readability_Architecture` | 우리 시스템에서 봇들이 보내는 메세지의 양을 줄이면 output 토큰을 좀 절약할 수 있을까? 지금은 1. 토큰 절약이 필요함 2. 너무 문자가 길어서 가독성도 떨어짐 문제가 있어. 이 두가지를 해결할 수 있도록 해줘. | **[출력 토큰 2중 절감 및 가독성 대개편 완비] 1) 메커니즘 분석: Output 토큰 직접 절약 + 후속 에이전트(Coder->QA->Auditor) 입력 컨텍스트(Context Cascade) 누적 방어의 2중 절감 효과 규명. 2) 프롬프트 레벨 토큰 다이어트: agent_runner.py 및 trio_agent_runner.py에 전체 소스코드 덤프 금지, 로그 복사 금지, 500~800자 이내 명사형 개조식 압축 강제. 3) 에이전트 간 컨텍스트 압축: compact_agent_context(max_chars=2500) 도입으로 8000자 무차별 주입 차단 및 코드 블록 중략. 4) 디스코드 가독성 개선: Coder 청크 > 2개 초과 시 핵심 요약 1개 + coder_details.md 첨부로 채널 도배 방어 및 Auditor 최종 보고서 3섹션 컴팩트 표준화.** | `agy_agent/agent_runner.py, agy_agent/trio_agent_runner.py, WORKING_MEMORY.md` | ✅ APPLIED |
 | R12 (07:45:00) | `System_Diagnostics_Morning_Token_Quota_Forensics` | 직접 사용하지 않았음에도 한도가 줄어들고 있어 심각한 버그 아닌가? 5시간 롤링 후 100% 회복되어야 하는데 자는 동안 슬금슬금 100->90->80 줄어드는 문제 검수 요청. | **[야간 토큰 누수 의혹 100% 해소 및 슬라이딩 윈도우 메커니즘 규명] 1) 누수 아님: 9/18 23:20 취침 직전 잔여량 약 20%에서 9/19 07:30 기준 71.34%(Gemini) / 67.14%(Claude)로 밤새 +51%p 대폭 충전(회복) 중인 상태였음(100%에서 감소한 것 아님). 2) 리셋 타이머 규명: 5시간 고정 리셋이 아닌 개별 소모 버킷 슬라이딩 윈도우 방식으로, 잔여 28%의 최종 100% 완충 시점은 09:23:22 KST로 확정됨. 3) 시스템 저널 전수 조사 결과 야간 외부 LLM 호출 0건, 서버 무결성 완벽 입증.** | `reports/token_quota_forensic_report.md, WORKING_MEMORY.md` | ✅ APPLIED |
+| R13 (라운드 2/20) | `Gate5_Runtime_Depth_CrossVerification` | 우리 시스템에서 !mode3의 commander가 기획 면에서 나를 충분히 대신할 수 있는 레벨인지, 산으로 갈 여지가 있는지, 그리고 coder->qa->auditor->commander 무인 루프가 개입 없이 잘 돌아가는지 확인하고 부족하면 100점 시스템으로 개선. (QA2 지적: 정적 토큰 존재만으로 쫀득함/접근성을 판정하면 죽은 코드/주석에 토큰만 심어 게이밍 가능 → Gate 5 실기기 프레임버퍼·비전 증거와 교차검증 필요) | **[스코프 크립 게이트의 정적-게이밍 맹점 봉쇄 및 런타임 교차검증 파이프라인 통합] 1) `ProductRefinementGovernor`에 `RuntimeEvidence` 데이터모델·`record_runtime_evidence`·`load_runtime_evidence`·`sync_from_vision_report`·`_apply_runtime_evidence` 신설. 2) 검증(verified) 차원은 정적 결손 해제, 실패(failed) 차원은 고위험 DEEPEN 강제 + `validate_plan`에서 해당 결손 미포함 계획 거부. 3) Gate 5 `AndroidVisionInspector.analyze_project_screenshots`가 실제 프레임버퍼 상태 전이·Gemini Vision 점수를 심도 게이트에 자동 기록하도록 배선. 4) `visual_qa.json`(신·구 포맷) 자동 파생으로 무인 모드에서도 런타임 보정. 5) `evidence_grade`(static_baseline/runtime_partial/runtime_proven/runtime_failed) 등급 및 CLI `--record-area/--record-status` 추가. 6) 회귀: 무관 실패 9건(샌드박스 read-only·git remote·hermes 라우팅) 제외 810 passed, 심도 거버너 단위테스트 18/18 통과.** | `agy_agent/product_refinement_governor.py, agy_agent/android_vision_inspector.py, agy_agent/commander.py, agy_agent/tests/test_depth_first_scope_governor.py, WORKING_MEMORY.md` | ✅ APPLIED |
 ## 🎯 현재 진행 중인 최우선 타격 과제 (Current Priority)
-- **최신 포커스**: `System_Diagnostics_Morning_Token_Quota_Forensics`
-- **직전 합의 요약**: [야간 토큰 누수 의혹 해소] 밤새 20%➔71% 순차 회복 중이었으며, 5시간 슬라이딩 윈도우 원리에 따라 오늘 오전 09:23:22 KST에 100% 완전 충전됨을 실시간 API 및 저널 전수 검증으로 입증.
+- **최신 포커스**: `Gate5_Runtime_Depth_CrossVerification`
+- **직전 합의 요약**: [스코프 크립 방어 강화] 정적 토큰 존재만으로 통과되던 심도 게이트를 Gate 5 실기기 프레임버퍼·상태 전이·Gemini Vision 점수와 교차검증하도록 통합. 검증된 차원은 결손 해제, 런타임 실패 차원은 확장 차단 및 심화 강제. 심도 거버너 테스트 18/18, 전체 810 passed(무관 환경실패 9건 제외).
 
 
 ---

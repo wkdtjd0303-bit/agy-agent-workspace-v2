@@ -3,12 +3,14 @@ import sys
 import re
 import time
 import asyncio
+import signal
+import atexit
 import importlib
 import tempfile
 import hashlib
 import logging
 import traceback
-from typing import Dict
+from typing import Dict, Tuple
 import discord
 from discord.ext import commands
 import config
@@ -39,7 +41,14 @@ from config import (
 )
 from session_manager import SessionManager
 from mode_classifier import classify_mode, get_mode_description, classify_task_type
-from commander import Commander
+from commander import (
+    Commander,
+    FEEDBACK_DEFECT_KEYWORDS,
+    CRASH_STABILITY_KEYWORDS,
+    EXPLICIT_NEW_PROJECT_KEYWORDS,
+    GENERAL_CREATION_VERBS,
+)
+from feedback_classifier import FeedbackIntentClassifier
 from agent_runner import AgentRunner
 from trio_agent_runner import TrioAgentRunner, QuotaManager
 from research_runner import ResearchRunner
@@ -578,6 +587,23 @@ def _reload_helper_modules_impl():
         globals()["perform_master_reset"] = perform_master_reset
 
     return len(reloaded_modules)
+
+def classify_user_intent(
+    prompt: str,
+    is_explicit_m3: bool = False,
+    project_initialized: bool = True
+) -> Tuple[bool, bool]:
+    """
+    Pure intent classifier for Mode 3 autonomous product planning vs feedback handling.
+    Delegates to FeedbackIntentClassifier Single Source of Truth (SoT).
+    Returns (is_new_goal, has_feedback_signal).
+    """
+    verdict = FeedbackIntentClassifier.classify(
+        prompt=prompt,
+        project_initialized=project_initialized,
+        is_explicit_m3=is_explicit_m3
+    )
+    return verdict.to_bot_tuple()
 
 async def check_and_apply_finish_project_freeze(channel, notify: bool = True) -> bool:
     """
@@ -2301,7 +2327,7 @@ async def model_command(ctx, *args):
                 p_info = GlobalModelManager.get_role_persona_info(target_role)
                 desc = f"💼 **[{target_role.upper()}]** 직업/역할이 **{p_info.get('icon')} {p_info.get('name')}**(으)로 설정되었습니다!"
             else:
-                valid_engines = {"agy", "hermes", "openrouter", "codex", "copilot", "claude", "nous"}
+                valid_engines = {"agy", "hermes", "openrouter", "codex", "copilot", "claude", "opencode", "nous"}
                 if first_candidate in valid_engines:
                     eng = first_candidate
                     mod = " ".join(args[2:]).strip()
@@ -2540,7 +2566,15 @@ async def new_session(ctx, *args):
 def recommend_preset_for_channel(channel_name: str, workspace_path: str) -> tuple:
     """Analyzes channel name and workspace directory to recommend the best project preset."""
     ch_lower = channel_name.lower()
-    
+
+    # 0. Game (가장 구체적 → 우선 판정: 채널명에 game/windows가 있으면 app보다 우선)
+    if any(k in ch_lower for k in ["game", "게임", "arcade", "아케이드", "puzzle", "퍼즐", "roguelike", "로그라이크", "unity", "godot"]):
+        return "game", "🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)", "실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크"
+
+    # 0-1. Windows Native Desktop
+    if any(k in ch_lower for k in ["windows", "윈도우", "win", "wpf", "winui", "desktop", "데스크톱", "exe"]):
+        return "windows", "🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)", "단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드) 무결성 검증"
+
     # 1. Mobile / Android native
     if any(k in ch_lower for k in ["park", "rider", "android", "apk", "mobile", "app", "gps", "bluetooth"]):
         return "app", "📱 모바일 & 안드로이드 네이티브 앱", "Android KVM 풀 에뮬레이터 OS 프레임버퍼 검증 + Gemini Vision 모바일 UI/UX (버튼 간격, 48dp 터치, 가독성, 심미성) 시각 검증, 가상 하드웨어(!sim), APK 자동 빌드 최적화"
@@ -2557,6 +2591,13 @@ def recommend_preset_for_channel(channel_name: str, workspace_path: str) -> tupl
     if workspace_path and os.path.isdir(workspace_path):
         if os.path.exists(os.path.join(workspace_path, "build.gradle")) or os.path.exists(os.path.join(workspace_path, "android")):
             return "app", "📱 모바일 & 안드로이드 네이티브 앱", "Android KVM 풀 에뮬레이터 OS 프레임버퍼 검증 + Gemini Vision 모바일 UI/UX (버튼 간격, 48dp 터치, 가독성, 심미성) 시각 검증, 가상 하드웨어(!sim), APK 자동 빌드 최적화"
+        if os.path.exists(os.path.join(workspace_path, "project.godot")) or os.path.exists(os.path.join(workspace_path, "Assets")):
+            return "game", "🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)", "실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크"
+        try:
+            if any(f.endswith(".sln") or f.endswith(".csproj") for f in os.listdir(workspace_path)):
+                return "windows", "🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)", "단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드) 무결성 검증"
+        except Exception:
+            pass
 
     # Default
     return "web", "🌐 웹 & SaaS 풀스택 개발", "Playwright 반응형 4대 기기 E2E 검증 및 라이브 URL 배포 자동 패치"
@@ -2622,6 +2663,37 @@ def apply_project_preset(channel_id: int, preset_key: str) -> discord.Embed:
             ),
             color=discord.Color.purple()
         )
+    elif key in ("game", "게임", "mobilegame", "retrogame", "unity", "godot", "unreal",
+                 "3d", "webgl", "canvas", "arcade", "아케이드", "퍼즐", "5"):
+        session.set_mode("pair")
+
+        embed = discord.Embed(
+            title="🎮 [게임 프로젝트 프리셋 적용 완료]",
+            description=(
+                f"**선택된 프리셋:** `게임 (Web Canvas/WebGL · Unity · Godot · Pygame) 모드`\n\n"
+                f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 3중 협업)\n"
+                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• 🧪 **QA 엔진**: 실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크\n"
+                f"• 🕹️ **코어 루프**: 시작→플레이→스코어→난이도 상승→게임오버→즉시 재도전 완결 강제\n"
+                f"• 🎯 **HUD 표준**: 엣지 5% 안전영역 · 거리 가독성 · 색맹 친화(형태+색) · 일시정지/설정 UI"
+            ),
+            color=discord.Color.magenta()
+        )
+    elif key in ("win", "windows", "윈도우", "wpf", "winui", "winforms", "pyqt", "pyside", "데스크톱", "6"):
+        session.set_mode("pair")
+
+        embed = discord.Embed(
+            title="🪟 [윈도우 네이티브 데스크톱 프리셋 적용 완료]",
+            description=(
+                f"**선택된 프리셋:** `윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6) 모드`\n\n"
+                f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 3중 협업)\n"
+                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• 🧪 **QA 엔진**: 단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드)\n"
+                f"• 🪟 **Fluent Design**: 타이틀바/리사이즈 · 키보드 단축키 · 스냅 레이아웃 · 고DPI 200% 무결성\n"
+                f"• 📦 **바이너리**: `dotnet publish`/`pyinstaller` → `.exe` 및 설치 패키지"
+            ),
+            color=discord.Color.dark_teal()
+        )
     else:
         session.set_mode("auto")
         
@@ -2646,24 +2718,34 @@ class ProjectSetupView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="🌐 웹 / SaaS 풀스택", style=discord.ButtonStyle.primary, emoji="🌐", custom_id="btn_preset_web")
+    @discord.ui.button(label="🌐 웹 / SaaS 풀스택", style=discord.ButtonStyle.primary, emoji="🌐", custom_id="btn_preset_web", row=0)
     async def btn_web(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "web")
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
-    @discord.ui.button(label="📱 모바일 / 안드로이드 앱", style=discord.ButtonStyle.success, emoji="📱", custom_id="btn_preset_app")
+    @discord.ui.button(label="📱 모바일 / 안드로이드 앱", style=discord.ButtonStyle.success, emoji="📱", custom_id="btn_preset_app", row=0)
     async def btn_app(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "app")
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
-    @discord.ui.button(label="🛍️ 커머스 / AI명함 / 스토어", style=discord.ButtonStyle.secondary, emoji="🛍️", custom_id="btn_preset_store")
+    @discord.ui.button(label="🛍️ 커머스 / AI명함 / 스토어", style=discord.ButtonStyle.secondary, emoji="🛍️", custom_id="btn_preset_store", row=0)
     async def btn_store(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "store")
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
-    @discord.ui.button(label="🔍 기획 / 시장 리서치", style=discord.ButtonStyle.secondary, emoji="🔍", custom_id="btn_preset_read")
+    @discord.ui.button(label="🔍 기획 / 시장 리서치", style=discord.ButtonStyle.secondary, emoji="🔍", custom_id="btn_preset_read", row=1)
     async def btn_read(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "read")
+        await interaction.response.edit_message(content="", embed=embed, view=None)
+
+    @discord.ui.button(label="🎮 게임 (WebGL/Unity/Godot)", style=discord.ButtonStyle.danger, emoji="🎮", custom_id="btn_preset_game", row=1)
+    async def btn_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = apply_project_preset(self.channel_id, "game")
+        await interaction.response.edit_message(content="", embed=embed, view=None)
+
+    @discord.ui.button(label="🪟 윈도우 네이티브 데스크톱", style=discord.ButtonStyle.primary, emoji="🪟", custom_id="btn_preset_windows", row=1)
+    async def btn_windows(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = apply_project_preset(self.channel_id, "windows")
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
 @bot.command(name="setup", aliases=["셋업", "설정", "init", "preset", "프리셋", "초기설정"], hidden=True)
@@ -2714,7 +2796,17 @@ async def setup_command(ctx, preset_key: str = ""):
         value="• 모드: `Read (읽기 전용)` | 오토파일럿: `OFF`\n• QA: `3중 아키텍트 교차 분석 & 논문/시장 리서치`\n• 용도: 기획서 작성, 방향성 자문, 시장 분석",
         inline=False
     )
-    embed.set_footer(text=f"명령어로 직접 설정: {COMMAND_PREFIX}setup web | {COMMAND_PREFIX}setup app | {COMMAND_PREFIX}setup store | {COMMAND_PREFIX}setup read")
+    embed.add_field(
+        name="5. 🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)",
+        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `실 입력→렌더 루프 + 연속 프레임 캡처 + 60fps 벤치마크`\n• 용도: 캐주얼/아케이드/로그라이크/퍼즐 게임",
+        inline=False
+    )
+    embed.add_field(
+        name="6. 🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)",
+        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `단위 테스트 + Windows VM 실 창 프레임버퍼 (고DPI/다크모드)`\n• 용도: 윈도우 데스크톱 유틸리티, 생산성 앱",
+        inline=False
+    )
+    embed.set_footer(text=f"명령어로 직접 설정: {COMMAND_PREFIX}setup web | app | store | read | game | windows")
 
     view = ProjectSetupView(channel_id=ctx.channel.id, user_id=ctx.author.id)
     await ctx.send(embed=embed, view=view)
@@ -3533,18 +3625,29 @@ async def pwd_command(ctx):
         value=get_mode_description(session.mode),
         inline=False
     )
+    # [⚙️ 실제 배정 엔진] 실행에 실제로 사용되는 전역 역할 설정을 우선 표시합니다.
+    # (session.engine 은 채널별 레거시 값일 수 있어 실제 실행 엔진과 불일치할 수 있음)
+    try:
+        from model_manager import GlobalModelManager
+        coder_eng_disp = GlobalModelManager.get_role_engine("coder") or session.engine
+        qa_eng_disp = GlobalModelManager.get_role_engine("qa1") or session.qa_engine
+        auditor_eng_disp = GlobalModelManager.get_role_engine("auditor") or session.auditor_engine
+    except Exception:
+        coder_eng_disp, qa_eng_disp, auditor_eng_disp = session.engine, session.qa_engine, session.auditor_engine
+
     embed.add_field(
         name="⚙️ 배정 AI 엔진",
         value=(
-            f"• 👨‍💻 **Coder**: `{session.engine}` ({CODER_MODEL})\n"
-            f"• 🕵️ **QA**: `{session.qa_engine}` ({QA_MODEL})\n"
-            f"• ⚖️ **Auditor**: `{session.auditor_engine}` ({AUDITOR_MODEL})"
+            f"• 👨‍💻 **Coder**: `{coder_eng_disp}` ({CODER_MODEL})\n"
+            f"• 🕵️ **QA**: `{qa_eng_disp}` ({QA_MODEL})\n"
+            f"• ⚖️ **Auditor**: `{auditor_eng_disp}` ({AUDITOR_MODEL})"
         ),
         inline=False
     )
+    _coder_conv_id = session.conversation_id or (getattr(session, "engine_conversations", {}) or {}).get("opencode:conversation_id")
     embed.add_field(
         name="Coder 세션 ID",
-        value=f"`{session.conversation_id or '대기 중'}`",
+        value=f"`{_coder_conv_id or '대기 중'}`",
         inline=True
     )
     embed.add_field(
@@ -3559,6 +3662,7 @@ async def pwd_command(ctx):
     )
     embed.add_field(name="작업 진행 여부", value="🔴 실행 중" if session.is_busy else "🟢 대기 중", inline=False)
     await ctx.send(embed=embed)
+
 
 @bot.command(name="cd", aliases=["이동", "폴더이동", "디렉토리"], hidden=True)
 async def cd_command(ctx, *, path: str = ""):
@@ -4287,10 +4391,13 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                         is_explicit_m3 = getattr(message, "_is_explicit_mode3_command", False)
                         is_auto_evolve = prompt.strip().startswith("🎯 [AGY 무인 자율 순환 마일스톤 진화") or prompt.strip().startswith("🎯 [Commander 사령관")
                         is_new_goal = False
-                        if not is_auto_evolve and not is_initial_launch:
-                            clean_p = prompt.lower()
-                            if is_explicit_m3 or any(k in clean_p for k in ["만들어줘", "개발해줘", "구현해줘", "제작해줘", "새로", "신규", "새 프로젝트", "시작해줘", "create", "build a"]):
-                                is_new_goal = True
+                        has_feedback_signal = False
+                        if not is_auto_evolve:
+                            is_new_goal, has_feedback_signal = classify_user_intent(
+                                prompt=prompt,
+                                is_explicit_m3=is_explicit_m3,
+                                project_initialized=(not is_initial_launch)
+                            )
 
                         should_plan = is_initial_launch or is_new_goal
                         if is_initial_launch or is_new_goal or is_explicit_m3 or not is_auto_evolve:
@@ -4302,7 +4409,7 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                             from model_manager import GlobalModelManager
                         except:
                             GlobalModelManager = None
-                        cmd_model_disp = GlobalModelManager.get_role_model_display("commander") if GlobalModelManager else getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-middle")
+                        cmd_model_disp = GlobalModelManager.get_role_model_display("commander") if GlobalModelManager else getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-medium")
 
                         if should_plan:
                             try:
@@ -4364,7 +4471,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                     tasks=m1_tasks,
                                     domain=p_def.domain,
                                     workspace=session.workspace,
-                                    user_prompt=prompt
+                                    user_prompt=prompt,
+                                    project_initialized=False
                                 )
                             except Exception as p1_err:
                                 logger.warning(f"5W1H m1 async error: {p1_err}")
@@ -4374,7 +4482,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                     tasks=m1_tasks,
                                     domain=p_def.domain,
                                     workspace=session.workspace,
-                                    user_prompt=prompt
+                                    user_prompt=prompt,
+                                    project_initialized=False
                                 )
 
                             try:
@@ -4390,27 +4499,74 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                             is_direct_user_input = bool(clean_user_p and not clean_user_p.startswith("🎯 ["))
 
                             if is_direct_user_input:
+                                # [Non-Actionable Input Guard (Chit-chat & Status Inquiry)]
+                                # If prompt has no feedback signal and is not a new goal, prevent triggering the heavy autonomous pipeline.
+                                if not has_feedback_signal and not is_new_goal:
+                                    intent_res = FeedbackIntentClassifier.classify(clean_user_p, project_initialized=True)
+                                    if intent_res.intent_type in ("chit_chat", "inquiry") or not intent_res.is_actionable:
+                                        logger.info(f"[Bot] Non-actionable input detected ('{clean_user_p}'), returning guidance response without running pipeline.")
+                                        if intent_res.intent_type == "inquiry" or any(k in clean_user_p.lower() for k in ["상태", "진행", "status", "어디까지"]):
+                                            ms_info = "진행 중인 마일스톤 정보 없음"
+                                            try:
+                                                from roadmap_manager import RoadmapManager
+                                                rm = RoadmapManager(session.workspace)
+                                                curr = rm.get_current_milestone(auto_expand=False)
+                                                if curr:
+                                                    ms_info = f"현재 마일스톤: **{curr.version}** — {curr.title} ({curr.status})"
+                                            except Exception:
+                                                pass
+                                            resp = (
+                                                f"ℹ️ **[AGY 프로젝트 현황 안내]**\n"
+                                                f"{ms_info}\n\n"
+                                                f"구체적인 개선 요청이나 기능 추가 사항을 말씀해주시면 Commander가 새 마일스톤을 기획하여 개발을 진행합니다."
+                                            )
+                                        else:
+                                            resp = (
+                                                f"👋 **[Commander 사령관]** 안녕하세요! AGY 자율 순환 개발 봇입니다.\n"
+                                                f"프로젝트에 반영할 구체적인 **개선 사항(버그 수정, 디자인 리뉴얼, 기능 추가 등)**을 말씀해주시면 즉시 반영 기획을 수립합니다.\n"
+                                                f"*(예: `앱 메인 페이지에 열기, 합치기 버튼 추가해줘`, `PDF 열 때 튕김 현상 수정해줘`)*"
+                                            )
+                                        await safe_send_discord_message(target_sender, resp)
+                                        return
+
                                 # [🔥 SUPREME RULE: Direct user input ALWAYS overrides previous roadmap milestones]
                                 session.set_root_user_goal(prompt)
-                                user_lower = clean_user_p.lower()
-                                has_design_req = any(k in user_lower for k in ["로고", "이름", "디자인", "컬러", "색상", "버튼", "가독성", "ui", "룩앤필", "스타일", "팔레트"])
-                                has_edit_req = any(k in user_lower for k in ["edit", "에디트", "수정", "글자", "텍스트", "문구", "ocr"])
-                                has_complaint = any(k in user_lower for k in ["별로", "퀄리티", "개선", "피드백", "반영", "바꿔", "떨어", "높여"])
+                                clean_prompt_no_cmd = re.sub(r'^[!/]?mode\s+\S+\s*', '', clean_user_p, flags=re.IGNORECASE).strip() or clean_user_p
 
-                                if has_design_req or has_edit_req or has_complaint:
-                                    ms_title = "사용자 피드백 긴급 반영: 브랜드 리뉴얼(로고·앱명·컬러), 버튼 가독성 개선 및 PDF 원본 텍스트 직접 편집"
-                                    ms_ver = "vFeedback"
-                                    ms_tasks = [
-                                        "첨부파일 컬러 팔레트 기반 브랜드 테마, 신규 로고 및 앱 이름 리뉴얼",
-                                        "UI 버튼 시인성 및 가독성 고대비 최적화 (WCAG AA 명도 대비 준수 및 터치 타깃 48dp)",
-                                        "기존 PDF 내 원본 텍스트 스트림 직접 수정(In-place Text Stream Editing, No-OCR) 엔진 구현",
-                                        "수정된 텍스트 및 레이아웃의 실시간 렌더링 및 무손실 파일 저장/내보내기 검증",
-                                        "기능 수정 회귀 방어 및 런타임 크래시 0건 검증"
-                                    ]
+                                # Determine target version from Roadmap
+                                ms_ver = "v1.0"
+                                try:
+                                    from roadmap_manager import RoadmapManager
+                                    rm_ver = RoadmapManager(session.workspace)
+                                    curr_ms = rm_ver.get_current_milestone(auto_expand=False)
+                                    if curr_ms and not curr_ms.is_done:
+                                        ms_ver = curr_ms.version
+                                    else:
+                                        completed = rm_ver.get_completed_milestones()
+                                        if completed:
+                                            ms_ver = rm_ver.get_next_milestone_version()
+                                except Exception as rm_ver_err:
+                                    logger.warning(f"Error determining next milestone version from RoadmapManager: {rm_ver_err}")
+                                    ms_ver = "v1.0"
+
+                                is_legacy_feedback_goal = ("글자를 넣어도 크기가 조절되지 않는" in clean_prompt_no_cmd or "첨부파일 컬러 팔레트" in clean_prompt_no_cmd)
+                                if is_legacy_feedback_goal and Commander._feedback_all_delivered(workspace=session.workspace):
+                                    ms_title = "요구사항 실체 구현 및 차기 역량 고도화"
+                                    ms_tasks = ["사용자 요구사항 실체 구현", "빌드 및 무결점 테스트 검증"]
+                                    try:
+                                        from roadmap_manager import RoadmapManager
+                                        rm_done = RoadmapManager(session.workspace)
+                                        next_ms = rm_done.get_current_milestone(auto_expand=True, active_goal=clean_prompt_no_cmd)
+                                        if next_ms:
+                                            ms_title = next_ms.title
+                                            ms_ver = next_ms.version
+                                            ms_tasks = [t.text for t in next_ms.tasks] if next_ms.tasks else ms_tasks
+                                    except Exception as rm_done_err:
+                                        logger.debug(f"Roadmap next lookup notice: {rm_done_err}")
                                 else:
-                                    ms_title = f"사용자 요구사항 반영: {clean_user_p[:40]}"
-                                    ms_ver = "vNext"
-                                    ms_tasks = [f"{clean_user_p[:50]} 실체 구현", "빌드 및 무결점 테스트 검증"]
+                                    fb_decomp = Commander.decompose_user_feedback(clean_prompt_no_cmd, workspace=session.workspace)
+                                    ms_title = fb_decomp["title"]
+                                    ms_tasks = fb_decomp["tasks"]
 
                                 # Sync this priority feedback milestone into ROADMAP.md immediately
                                 try:
@@ -4431,7 +4587,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                 try:
                                     from roadmap_manager import RoadmapManager
                                     rm = RoadmapManager(session.workspace)
-                                    curr_ms = rm.get_current_milestone(auto_expand=True)
+                                    clean_auto_goal = prompt if (prompt and not any(prompt.strip().startswith(prefix) for prefix in ["🎯 [", "사용자 원본 목표:", "[무인 자율", "[🎯", "[📍", "[🔧", "👑 ["])) else ""
+                                    curr_ms = rm.get_current_milestone(auto_expand=True, active_goal=clean_auto_goal)
                                     if curr_ms:
                                         ms_title = curr_ms.title
                                         ms_ver = curr_ms.version
@@ -4447,7 +4604,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                     tasks=ms_tasks,
                                     workspace=session.workspace,
                                     user_prompt=prompt,
-                                    macro_memory_text=macro_mem
+                                    macro_memory_text=macro_mem,
+                                    preserve_caller_milestone=True
                                 )
                             except Exception as p_err:
                                 logger.warning(f"5W1H ongoing async error: {p_err}")
@@ -4457,7 +4615,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                     tasks=ms_tasks,
                                     workspace=session.workspace,
                                     user_prompt=prompt,
-                                    macro_memory_text=macro_mem
+                                    macro_memory_text=macro_mem,
+                                    preserve_caller_milestone=True
                                 )
 
                             try:
@@ -4718,13 +4877,21 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                 # 4. [Adaptive Codebase-Grounded Dynamic 5W1H Strategic Master Plan for Next Milestone]
                 macro_mem = session.format_commander_macro_memory() if hasattr(session, "format_commander_macro_memory") else ""
                 root_goal = session.get_root_user_goal() or prompt
+                # [🛡️ Quota Firewall] 무인 자율 순환 구간 — Gemini 자동 호출 차단 컨텍스트로 실행
                 try:
-                    next_plan_5w1h = await Commander.plan_adaptive_next_milestone_async(
-                        root_user_goal=root_goal,
-                        workspace=session.workspace,
-                        macro_memory_text=macro_mem,
-                        current_completed_title=completed_title
-                    )
+                    from quota_firewall import unattended as _qfw_unattended
+                    _qfw_ctx = _qfw_unattended()
+                except Exception:
+                    from contextlib import nullcontext
+                    _qfw_ctx = nullcontext()
+                try:
+                    with _qfw_ctx:
+                        next_plan_5w1h = await Commander.plan_adaptive_next_milestone_async(
+                            root_user_goal=root_goal,
+                            workspace=session.workspace,
+                            macro_memory_text=macro_mem,
+                            current_completed_title=completed_title
+                        )
                 except Exception as np_err:
                     logger.warning(f"Async adaptive next milestone 5W1H plan fallback: {np_err}")
                     next_plan_5w1h = Commander.plan_adaptive_next_milestone(
@@ -4748,7 +4915,7 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                     from model_manager import GlobalModelManager
                 except Exception:
                     GlobalModelManager = None
-                cmd_model_disp = GlobalModelManager.get_role_model_display("commander") if GlobalModelManager else getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-middle")
+                cmd_model_disp = GlobalModelManager.get_role_model_display("commander") if GlobalModelManager else getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-medium")
 
                 next_header = (
                     f"👑 **[Commander 차기 마일스톤 5W1H 전략 기획 — {next_plan_5w1h.version}: {next_plan_5w1h.title}]**\n\n"
@@ -4848,13 +5015,35 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                 fb = session.intermission_feedback
                                 session.intermission_feedback = None
                                 session.set_root_user_goal(fb)
+                                clean_fb = re.sub(r'^[!/]?mode\s+\S+\s*', '', fb, flags=re.IGNORECASE).strip() or fb
+
+                                is_legacy_feedback_goal = ("글자를 넣어도 크기가 조절되지 않는" in clean_fb or "첨부파일 컬러 팔레트" in clean_fb)
+                                if is_legacy_feedback_goal and Commander._feedback_all_delivered(workspace=session.workspace):
+                                    _safe_fallback_ver = (next_plan_5w1h.version if next_plan_5w1h and next_plan_5w1h.version else "v1.0")
+                                    _re_title, _re_ver = "사용자 피드백 긴급 반영", _safe_fallback_ver
+                                    try:
+                                        from roadmap_manager import RoadmapManager
+                                        _rm_re = RoadmapManager(session.workspace)
+                                        _nxt = _rm_re.get_current_milestone(auto_expand=True)
+                                        if _nxt:
+                                            _re_title, _re_ver = _nxt.title, _nxt.version
+                                        else:
+                                            _re_ver = _rm_re.get_next_milestone_version()
+                                    except Exception as _re_guard_err:
+                                        logger.debug(f"Intermission feedback guard notice: {_re_guard_err}")
+                                    _re_tasks = None
+                                else:
+                                    fb_decomp = Commander.decompose_user_feedback(clean_fb, workspace=session.workspace)
+                                    _re_title, _re_ver = fb_decomp["title"], next_plan_5w1h.version
+                                    _re_tasks = fb_decomp["tasks"]
+
                                 try:
                                     re_plan = await Commander.plan_milestone_5w1h_async(
-                                        milestone_title="사용자 피드백 긴급 반영",
-                                        milestone_version="vFeedback",
-                                        tasks=None,
+                                        milestone_title=_re_title,
+                                        milestone_version=_re_ver,
+                                        tasks=_re_tasks,
                                         workspace=session.workspace,
-                                        user_prompt=fb,
+                                        user_prompt=clean_fb,
                                         macro_memory_text=macro_mem
                                     )
                                     re_plan_msg = (
@@ -4863,6 +5052,18 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                     )
                                     await safe_send_discord_message(target_sender, re_plan_msg)
                                     current_prompt = re_plan.directive_for_coder
+
+                                    try:
+                                        from roadmap_manager import RoadmapManager
+                                        _rm_sync = RoadmapManager(session.workspace)
+                                        _rm_sync.append_or_update_adaptive_milestone(
+                                            version=_re_ver,
+                                            title=_re_title,
+                                            tasks=_re_tasks or re_plan.what,
+                                            status="IN_PROGRESS"
+                                        )
+                                    except Exception as _rm_sync_err:
+                                        logger.debug(f"Intermission roadmap sync notice: {_rm_sync_err}")
                                 except Exception as _re_err:
                                     logger.warning(f"Re-planning with intermission feedback failed: {_re_err}")
                                     current_prompt = (
@@ -4871,7 +5072,17 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                                         f"{evolve_prompt}"
                                     )
                             session.mode3_pending_prompt = None
-                            await execute_channel_prompt(message, current_prompt)
+                            # [🛡️ Quota Firewall] 무인 자동 순환(Mode 3 Auto) 작업 실행 구간:
+                            # Gemini 계열 모델의 자동 호출을 차단하여 야간/무인 상태에서
+                            # Antigravity 한도가 저절로 소모되는 것을 방지합니다.
+                            try:
+                                from quota_firewall import unattended as _qfw_unattended
+                                _qfw_exec_ctx = _qfw_unattended()
+                            except Exception:
+                                from contextlib import nullcontext
+                                _qfw_exec_ctx = nullcontext()
+                            with _qfw_exec_ctx:
+                                await execute_channel_prompt(message, current_prompt)
 
                         asyncio.create_task(_delayed_next_milestone())
             except Exception as m3_err:
@@ -5609,7 +5820,12 @@ async def on_error(event_method, *args, **kwargs):
 async def start_all_bots():
     tasks = [bot.start(DISCORD_BOT_TOKEN)]
     if DISCORD_COMMANDER_BOT_TOKEN:
-        logger.info("Starting Commander Bot client (Gemini 3.7 Flash Low)...")
+        try:
+            from model_manager import GlobalModelManager as _CmdGMM
+            _cmd_disp = _CmdGMM.get_role_model_display("commander")
+        except Exception:
+            _cmd_disp = getattr(config, "COMMANDER_MODEL", "commander")
+        logger.info(f"Starting Commander Bot client ({_cmd_disp})...")
         tasks.append(commander_bot.start(DISCORD_COMMANDER_BOT_TOKEN))
     if DISCORD_QA_BOT_TOKEN:
         logger.info("Starting QA Bot client...")
@@ -5642,6 +5858,67 @@ async def start_all_bots():
         tasks.append(server_manager_bot.start(DISCORD_SERVER_MANAGER_BOT_TOKEN))
     await asyncio.gather(*tasks)
 
+# [QC-P-01] Registered temporary scratch directories for cleanup on shutdown
+_REGISTERED_TEMP_DIRS: set = set()
+
+def register_temp_dir(path: str) -> None:
+    """Register a temporary directory for automatic cleanup upon shutdown."""
+    if path:
+        _REGISTERED_TEMP_DIRS.add(os.path.abspath(path))
+
+def unregister_temp_dir(path: str) -> None:
+    """Unregister a temporary directory."""
+    if path:
+        _REGISTERED_TEMP_DIRS.discard(os.path.abspath(path))
+
+def _graceful_shutdown(signum=None, frame=None):
+    """[QC-P-01] Process-level graceful shutdown: terminates child processes and cleans up resources."""
+    logger.info(f"[Graceful Shutdown] Received signal {signum}, cleaning up running processes...")
+    my_pgid = None
+    try:
+        my_pgid = os.getpgrp()
+    except Exception:
+        pass
+
+    try:
+        # [QA Direct Patch] SessionManager._sessions is an INSTANCE attribute, so class-level
+        # access raised AttributeError which was silently swallowed => shutdown was a no-op.
+        # Use the live module-level instance (bot.session_manager) + its public accessor.
+        _sm = globals().get("session_manager")
+        if _sm is not None:
+            for s in list(_sm.get_all_sessions().values()):
+                proc = getattr(s, "current_process", None)
+                if proc and getattr(proc, "pid", None):
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                        if my_pgid is not None and pgid == my_pgid:
+                            proc.terminate()
+                        else:
+                            os.killpg(pgid, signal.SIGTERM)
+                    except Exception:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # [QC-P-01] Clean up registered temporary scratch directories
+    try:
+        import shutil
+        for tdir in list(_REGISTERED_TEMP_DIRS):
+            if os.path.exists(tdir) and os.path.isdir(tdir):
+                try:
+                    shutil.rmtree(tdir, ignore_errors=True)
+                except Exception:
+                    pass
+        _REGISTERED_TEMP_DIRS.clear()
+    except Exception:
+        pass
+
+    if signum is not None and signum in (signal.SIGINT, signal.SIGTERM):
+        sys.exit(0)
+
 def main():
     if not DISCORD_BOT_TOKEN:
         print("❌ [오류] DISCORD_BOT_TOKEN 이 설정되지 않았습니다.")
@@ -5649,7 +5926,18 @@ def main():
         print("또는 '.env.example' 파일을 참고하세요.")
         sys.exit(1)
 
-    asyncio.run(start_all_bots())
+    # [QC-P-01] Process-level graceful shutdown: register SIGINT/SIGTERM handlers and atexit
+    try:
+        signal.signal(signal.SIGINT, _graceful_shutdown)
+        signal.signal(signal.SIGTERM, _graceful_shutdown)
+        atexit.register(_graceful_shutdown)
+    except Exception as sig_err:
+        logger.debug(f"Signal handler registration note: {sig_err}")
+
+    try:
+        asyncio.run(start_all_bots())
+    except (KeyboardInterrupt, SystemExit):
+        _graceful_shutdown()
 
 if __name__ == "__main__":
     main()

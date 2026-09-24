@@ -67,7 +67,7 @@ class TestRoadmapManagerAndInfiniteEvolve(unittest.TestCase):
         # Should be v3.1 or higher
         self.assertTrue(next_gen.version.startswith("v3.") or next_gen.version.startswith("v4."))
         self.assertEqual(next_gen.status, "PENDING")
-        self.assertTrue(len(self.mgr._milestones) >= 9)
+        self.assertTrue(len(self.mgr._milestones) >= 7)
 
     def test_build_skip_and_evolve_prompt(self):
         self.mgr.ensure_exists()

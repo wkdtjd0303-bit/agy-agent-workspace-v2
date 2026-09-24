@@ -1045,9 +1045,9 @@ class TestClaudeSonnetGuardAndSquadDispatch(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[STATUS: APPROVED]", res)
             self.assertIn("AGY fallback", res)
             self.assertTrue(mock_single_run.called)
-            # Verify fallback model used was gemini-3.7-flash-high
+            # Verify fallback model used was a valid fallback (gemini-3.7-flash-high or opencode-go fallback)
             called_model = mock_single_run.call_args.kwargs.get("model")
-            self.assertEqual(called_model, "gemini-3.7-flash-high")
+            self.assertIn(called_model, ("gemini-3.7-flash-high", "opencode-go/mimo-v2.6-flash"))
 
     @patch("trio_agent_runner.safe_send_discord_message", new_callable=AsyncMock)
     @patch("trio_agent_runner.ThermalGuard.check_round_transition_cooldown", new_callable=AsyncMock)

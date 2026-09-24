@@ -124,6 +124,163 @@ class UIVisualDiffer:
             return [bbox]
         return []
 
+    @staticmethod
+    def is_blank_frame(image: "Image.Image") -> bool:
+        """True when a frame is an empty/black capture (no real UI content).
+
+        Used to reject forged or crashed captures so that a mere file name cannot
+        masquerade as a genuine runtime state.
+        """
+        try:
+            stat = ImageStat.Stat(image.convert("RGB"))
+            return all(s < 2.0 for s in stat.stddev) or sum(stat.mean) < 15.0
+        except Exception:
+            return True
+
+    @classmethod
+    def measure_pixel_diff(
+        cls,
+        before_image_path: str,
+        after_image_path: str,
+        threshold: int = 20,
+        mask_system_bars: bool = True,
+        status_bar_ratio: float = 0.05,
+        nav_bar_ratio: float = 0.05,
+    ) -> Dict[str, Any]:
+        """Genuine framebuffer pixel-diff measurement — NO file names, NO tokens.
+
+        This is the anti-gaming ground truth for state transitions: it opens both
+        captures, rejects blank/black forgeries, and measures the real changed-pixel
+        ratio (OS status/nav bars masked). A script cannot fake it by merely saving a
+        file whose name contains "interaction" or "skeleton".
+
+        Returns:
+            {
+              "has_real_diff": bool,      # a genuine pixel change was observed
+              "diff_area_ratio": float,   # changed pixels / viewport pixels (0..1)
+              "mean_delta": float,        # mean absolute luminance delta
+              "authentic": bool,          # both frames are non-blank real captures
+              "reason": str,
+            }
+        """
+        result: Dict[str, Any] = {
+            "has_real_diff": False,
+            "diff_area_ratio": 0.0,
+            "mean_delta": 0.0,
+            "authentic": False,
+            "reason": "",
+        }
+        if not (os.path.isfile(before_image_path) and os.path.isfile(after_image_path)):
+            result["reason"] = "before/after 파일 없음"
+            return result
+        try:
+            with Image.open(before_image_path) as b_raw, Image.open(after_image_path) as a_raw:
+                if cls.is_blank_frame(b_raw) or cls.is_blank_frame(a_raw):
+                    result["reason"] = "빈/검은 프레임(포지 위조 또는 크래시) — 실제 렌더링 아님"
+                    return result
+                result["authentic"] = True
+
+                b_rgb = b_raw.convert("RGB")
+                a_rgb = a_raw.convert("RGB")
+                if b_rgb.size != a_rgb.size:
+                    a_rgb = a_rgb.resize(b_rgb.size, Image.Resampling.LANCZOS)
+
+                diff = ImageChops.difference(b_rgb, a_rgb)
+                diff_gray = diff.convert("L")
+                stat = ImageStat.Stat(diff_gray)
+                result["mean_delta"] = round(float(stat.mean[0]), 3)
+
+                mask = diff_gray.point(lambda p: 255 if p > threshold else 0)
+                if mask_system_bars:
+                    mask_draw = ImageDraw.Draw(mask)
+                    w, h = mask.size
+                    top_h = int(h * status_bar_ratio)
+                    bottom_y = int(h * (1.0 - nav_bar_ratio))
+                    if top_h > 0:
+                        mask_draw.rectangle([0, 0, w, top_h], fill=0)
+                    if bottom_y < h:
+                        mask_draw.rectangle([0, bottom_y, w, h], fill=0)
+
+                changed = mask.histogram()[255]
+                total = max(1, mask.size[0] * mask.size[1])
+                result["diff_area_ratio"] = round(changed / total, 5)
+                result["has_real_diff"] = changed > 0
+                result["reason"] = (
+                    f"실 픽셀 차분 {result['diff_area_ratio'] * 100:.2f}% "
+                    f"(mean ΔL={result['mean_delta']})"
+                )
+        except Exception as e:
+            result["reason"] = f"픽셀 차분 실패: {e}"
+        return result
+
+    @classmethod
+    def count_distinct_states(
+        cls,
+        image_paths: List[str],
+        thumbnail: int = 48,
+        diff_threshold: float = 6.0,
+    ) -> Dict[str, Any]:
+        """Counts genuinely distinct UI states by REAL pixel comparison (filename-independent).
+
+        Each frame is downsampled to a small grayscale thumbnail and greedily clustered:
+        a frame joins an existing cluster when its mean absolute luminance delta to the
+        cluster centroid is below ``diff_threshold``. Blank/black forgeries are dropped.
+        A file name such as ``skeleton_loading.png`` therefore cannot inflate the count.
+
+        Returns:
+            {"state_count": int, "authentic_frames": int, "clusters": [[path, ...]], "reason": str}
+        """
+        info: Dict[str, Any] = {
+            "state_count": 0,
+            "authentic_frames": 0,
+            "clusters": [],
+            "reason": "",
+        }
+        if not image_paths:
+            info["reason"] = "이미지 없음"
+            return info
+        thumbs: List[Tuple[str, "Image.Image"]] = []
+        try:
+            for p in image_paths:
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    with Image.open(p) as img:
+                        if cls.is_blank_frame(img):
+                            continue
+                        g = img.convert("L").resize((thumbnail, thumbnail), Image.Resampling.BILINEAR)
+                        thumbs.append((p, g.copy()))
+                except Exception:
+                    continue
+            info["authentic_frames"] = len(thumbs)
+            if not thumbs:
+                info["reason"] = "실 프레임 없음(전부 빈/검은 프레임)"
+                return info
+
+            clusters: List[Dict[str, Any]] = []
+            for path, thumb in thumbs:
+                placed = False
+                for cl in clusters:
+                    centroid = cl["centroid"]
+                    delta = ImageChops.difference(thumb, centroid).convert("L")
+                    mean = ImageStat.Stat(delta).mean[0]
+                    if mean <= diff_threshold:
+                        cl["members"].append(path)
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append({"centroid": thumb, "members": [path]})
+
+            info["state_count"] = len(clusters)
+            info["clusters"] = [cl["members"] for cl in clusters]
+            info["reason"] = (
+                f"실 픽셀 클러스터링 {len(clusters)}종 상태 "
+                f"(인증 프레임 {len(thumbs)}장, 임계 ΔL≤{diff_threshold})"
+            )
+        except Exception as e:
+            info["reason"] = f"상태 클러스터링 실패: {e}"
+        return info
+
     @classmethod
     def create_smart_micro_diff_card(
         cls,

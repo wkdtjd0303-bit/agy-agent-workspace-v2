@@ -246,31 +246,11 @@ def fetch_native_antigravity_usage() -> Dict[str, Any]:
     if _native_usage_cache.get("data") and (now - _native_usage_cache.get("time", 0.0) < 3600.0):
         return _native_usage_cache["data"]
 
-    # 1. First, attempt official Antigravity CLI `/usage` command (zero LLM token consumption, 100% authoritative)
-    try:
-        res = subprocess.run(
-            ["agy", "-p", "/usage", "--output-format", "json"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=8.0
-        )
-        if res.returncode == 0 and res.stdout.strip().startswith("{"):
-            data = json.loads(res.stdout)
-            email = get_antigravity_account_email()
-            groups = data.get("command", {}).get("data", {}).get("groups") or data.get("groups")
-            if groups:
-                parsed = {
-                    "account": email,
-                    "groups": groups,
-                    "raw": data
-                }
-                _native_usage_cache = {"time": now, "data": parsed}
-                return parsed
-    except Exception as e:
-        logger.debug(f"Official agy /usage query notice: {e}")
-
-    # 2. Fallback: Safe lightweight quota check via antigravity-usage
+    # [🛡️ Quota Leak Fix — 2026-09-23] 'agy -p /usage' 호출을 완전히 제거했다.
+    # agy CLI는 실행될 때마다 Antigravity Language Server를 띄우고, 그 서버가
+    # 6분마다 loadCodeAssist/fetchAvailableModels를 폴링하며 조용히 quota를 소모한다.
+    # (session_manager.kill_agy_language_servers / agy_quota_guardian 주석 참조)
+    # 따라서 quota 조회는 토큰프리 OAuth REST 호출인 'antigravity-usage quota --json'만 사용한다.
     cmd = ["antigravity-usage", "quota", "--json"]
     try:
         res = subprocess.run(
@@ -714,6 +694,146 @@ def fetch_real_ai_quota() -> str:
     return gemini_q
 
 
+# ==============================================================================
+# ⚡ OpenCode Go 구독 사용량/한도 (5시간 · 주간 · 월간)
+#   공식 엔드포인트: GET https://opencode.ai/zen/go/v1/usage
+#   → rolling(5시간) / weekly(주간) / monthly(월간) 의 percent(사용률) + resetsAt 제공
+# ==============================================================================
+_opencode_usage_cache: Dict[str, Any] = {"time": 0.0, "data": None}
+_OPENCODE_USAGE_TTL = 300.0  # 5분 캐시
+
+
+def _get_opencode_go_api_key() -> str:
+    """OpenCode Go API 키를 조회합니다. (env/config 우선 → 로컬 opencode 인증 저장소 폴백)"""
+    try:
+        import config as _cfg
+        key = (os.getenv("OPENCODE_API_KEY") or getattr(_cfg, "OPENCODE_API_KEY", "") or "").strip()
+        if key:
+            return key
+    except Exception:
+        pass
+    # 로컬 opencode credential DB (~/.local/share/opencode/opencode.db)
+    try:
+        import sqlite3
+        db_path = os.path.expanduser("~/.local/share/opencode/opencode.db")
+        if os.path.exists(db_path):
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3.0)
+            try:
+                row = con.execute(
+                    "SELECT value FROM credential WHERE integration_id='opencode-go' "
+                    "AND active=1 ORDER BY time_updated DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                val = json.loads(row[0])
+                if isinstance(val, dict):
+                    return str(val.get("key") or val.get("apiKey") or "").strip()
+    except Exception as e:
+        logger.debug(f"OpenCode credential read note: {e}")
+    return ""
+
+
+def fetch_opencode_go_usage() -> Optional[Dict[str, Any]]:
+    """
+    OpenCode Go 플랜의 실시간 사용량(rolling 5h / weekly / monthly)을 공식 엔드포인트에서 조회합니다.
+    실패 시 마지막 캐시를 반환하고, 캐시도 없으면 None 을 반환합니다.
+    """
+    global _opencode_usage_cache
+    now = time.time()
+    if _opencode_usage_cache.get("data") and (now - _opencode_usage_cache.get("time", 0.0) < _OPENCODE_USAGE_TTL):
+        return _opencode_usage_cache["data"]
+
+    key = _get_opencode_go_api_key()
+    if not key:
+        logger.debug("OpenCode Go usage: API 키를 찾을 수 없습니다.")
+        return _opencode_usage_cache.get("data")
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://opencode.ai/zen/go/v1/usage",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json",
+                "User-Agent": "opencode/2.0.12",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if isinstance(usage, dict) and usage:
+            _opencode_usage_cache = {"time": now, "data": usage}
+            return usage
+    except Exception as e:
+        logger.debug(f"OpenCode Go usage fetch note: {e}")
+
+    return _opencode_usage_cache.get("data")
+
+
+def format_opencode_go_quota_section() -> Optional[str]:
+    """OpenCode Go 사용량을 Antigravity 섹션과 동일한 스타일의 텍스트 블록으로 포맷합니다."""
+    usage = fetch_opencode_go_usage()
+    if not usage:
+        return None
+
+    lines = [
+        "```text",
+        "⚡ OPENCODE GO (5시간 · 주간 · 월간 한도)",
+        "─────────────────────────────────────────────",
+    ]
+    rows = [
+        ("rolling", "[5시간 한도] Rolling 5-Hour Limit"),
+        ("weekly", "[주간 한도] Weekly Limit"),
+        ("monthly", "[월간 한도] Monthly Limit"),
+    ]
+    rendered = 0
+    for key, label in rows:
+        info = usage.get(key) or {}
+        if not isinstance(info, dict):
+            continue
+        used = info.get("percent")
+        if used is None:
+            continue
+        try:
+            used_f = float(used)
+        except Exception:
+            used_f = 0.0
+        remaining = max(0.0, min(1.0, 1.0 - (used_f / 100.0)))
+        rem_pct = remaining * 100.0
+        gauge = make_antigravity_gauge(remaining, 20)
+        reset_str = info.get("resetsAt") or ""
+        duration_str = format_iso_duration(reset_str)
+        status = str(info.get("status") or "ok").lower()
+
+        if status != "ok" or rem_pct <= 0.0:
+            desc = "🔴 한도 소진 (Limit reached)"
+            if duration_str and duration_str != "N/A":
+                desc += f" · Refreshes in {duration_str}"
+        elif rem_pct >= 99.5:
+            desc = "100% remaining • Quota fully available (여유)"
+        elif duration_str and duration_str != "N/A":
+            desc = f"{round(rem_pct)}% remaining • Refreshes in {duration_str}"
+        else:
+            desc = f"{round(rem_pct)}% remaining • 정상 가용"
+
+        lines.append(label)
+        lines.append(f"{gauge} {rem_pct:.1f}%")
+        lines.append(f"{desc}\n")
+        rendered += 1
+
+    if rendered == 0:
+        return None
+
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    if lines:
+        lines[-1] = lines[-1].rstrip()
+    lines.append("```")
+    lines.append("⚡ **OpenCode Go**: $12/5시간 · $30/주간 · $60/월 (금액 기준 한도)")
+    return "\n".join(lines)
+
+
 CHANNEL_NICKNAMES: Dict[int, str] = {
     1539483630089273435: "!5_agy_agent",
     1539993680788586496: "qa-tester",
@@ -849,6 +969,13 @@ def build_telemetry_embed(session_manager: SessionManager) -> discord.Embed:
     except Exception as e:
         logger.debug(f"Error fetching OpenRouter telemetry section: {e}")
 
+    # ⚡ OpenCode Go Real-time Usage & Limits (5시간 · 주간 · 월간)
+    opencode_quota: Optional[str] = None
+    try:
+        opencode_quota = format_opencode_go_quota_section()
+    except Exception as e:
+        logger.debug(f"Error fetching OpenCode Go telemetry section: {e}")
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     embed = discord.Embed(
@@ -860,6 +987,8 @@ def build_telemetry_embed(session_manager: SessionManager) -> discord.Embed:
     add_safe_field(embed, "📊 시스템 리소스 (10분 갱신)", sys_val, inline=False)
     add_safe_field(embed, "💾 저장공간", disk_val, inline=False)
     add_safe_field(embed, "🤖 Antigravity AI Engine Status (실시간 연동)", gemini_quota, inline=False)
+    if opencode_quota:
+        add_safe_field(embed, "⚡ OpenCode Go AI Status (5시간·주간·월간 한도)", opencode_quota, inline=False)
     if openrouter_quota:
         add_safe_field(embed, "🌐 OpenRouter AI Status (qa2·크레딧 관제)", openrouter_quota, inline=False)
     if external_quota:

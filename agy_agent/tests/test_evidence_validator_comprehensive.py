@@ -224,7 +224,22 @@ class TestEvidenceValidatorComprehensive(unittest.TestCase):
         parsed = EvidenceValidator.parse_structured_qa_report(solar_report_text)
         self.assertEqual(parsed["status"], "APPROVED")
 
+    def test_git_diff_summary_excludes_pyc_and_prioritizes_core_files(self):
+        """Validates that get_git_diff_summary filters out *.pyc files and prioritizes core agent files."""
+        summary = EvidenceValidator.get_git_diff_summary(WORKSPACE_ROOT)
+        self.assertTrue(summary.get("has_git", False))
+        
+        # Verify no .pyc in changed_files
+        changed = summary.get("changed_files", [])
+        self.assertFalse(any(f.endswith(".pyc") or "__pycache__" in f for f in changed), "changed_files must not contain .pyc or __pycache__")
+
+        # Verify key core files appear in raw_diff when modified in repository
+        raw_diff = summary.get("raw_diff", "")
+        self.assertIn("commander.py", raw_diff)
+        self.assertIn("bot.py", raw_diff)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

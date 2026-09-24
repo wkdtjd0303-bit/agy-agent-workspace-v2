@@ -55,8 +55,8 @@ _FALLBACK_OFFICIAL_CATALOG = [
         "isExhausted": False,
     },
     {
-        "label": "Gemini 3.7 Flash Middle",
-        "modelId": "gemini-3.7-flash-middle",
+        "label": "Gemini 3.7 Flash (Medium)",
+        "modelId": "gemini-3.7-flash-medium",
         "category": "gemini",
         "recommended_roles": ["commander", "orchestrator"],
         "isAutocompleteOnly": False,
@@ -276,16 +276,29 @@ class AntigravityModelRegistry:
         cli_models = []
         quota_models = []
         try:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                f_cli = executor.submit(cls.fetch_agy_cli_models)
-                f_quota = executor.submit(cls.fetch_quota_models)
-                cli_models = f_cli.result()
-                quota_models = f_quota.result()
+            # [🛡️ Quota Leak Fix — 2026-09-23] 'agy models' CLI 실행을 자동 경로에서 제거한다.
+            # agy CLI 는 실행될 때마다 Language Server 를 스폰하고, 그 서버가
+            # daily-cloudcode-pa.googleapis.com 을 주기 폴링하며 Gemini 한도를 조용히 소모한다.
+            # 카탈로그는 토큰프리 OAuth 조회(antigravity-usage) + 정적 폴백만으로 구성하고,
+            # `agy models` 는 사용자가 AGY_ALLOW_CLI_CATALOG=1 로 명시 허용한 경우에만 실행한다.
+            allow_cli_catalog = (
+                force_refresh
+                and (os.getenv("AGY_ALLOW_CLI_CATALOG", "0") or "0").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
+            if allow_cli_catalog:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    f_cli = executor.submit(cls.fetch_agy_cli_models)
+                    f_quota = executor.submit(cls.fetch_quota_models)
+                    cli_models = f_cli.result()
+                    quota_models = f_quota.result()
+            else:
+                quota_models = cls.fetch_quota_models()
         except Exception as e:
             logger.warning(f"Parallel fetch error in ModelRegistry: {e}")
-            cli_models = cls.fetch_agy_cli_models()
-            quota_models = cls.fetch_quota_models()
+            if not quota_models:
+                quota_models = cls.fetch_quota_models()
         finally:
             cls._is_fetching = False
 
@@ -297,10 +310,15 @@ class AntigravityModelRegistry:
 
         merged: Dict[str, Dict[str, Any]] = {}
 
-        # 1. Authoritative /model CLI catalog takes precedence
-        for m in cli_models:
-            mid = m["modelId"]
-            merged[mid] = dict(m)
+        # 1. Authoritative catalog: `agy models` CLI 결과 > 정적 폴백 카탈로그
+        if cli_models:
+            for m in cli_models:
+                mid = m["modelId"]
+                merged[mid] = dict(m)
+        else:
+            # CLI 를 띄우지 않았으므로 정적 폴백 카탈로그를 기본 골격으로 사용한다.
+            for m in _FALLBACK_OFFICIAL_CATALOG:
+                merged[m["modelId"]] = dict(m)
 
         # 2. Enrich with quota data & incorporate tiered non-autocomplete models
         for qm in quota_models:
@@ -487,10 +505,10 @@ class AntigravityModelRegistry:
             return "gemini-3.8-flash-high"
 
         if role_lower in ("commander", "manager"):
-            for candidate in ("gemini-3.7-flash-middle", "gemini-3.7-flash-high", "gemini-3.8-flash-high"):
+            for candidate in ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.8-flash-high"):
                 if candidate in selectable_ids:
                     return candidate
-            return "gemini-3.7-flash-middle"
+            return "gemini-3.7-flash-high"
 
         # Default safe model
         return "gemini-3.8-flash-high"

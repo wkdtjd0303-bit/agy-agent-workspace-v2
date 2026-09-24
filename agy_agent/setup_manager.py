@@ -6,6 +6,14 @@ def recommend_preset_for_channel(channel_name: str, workspace_path: str) -> Tupl
     """Analyzes channel name and workspace directory to recommend the best project preset."""
     ch_lower = channel_name.lower()
     
+    # 0. Game (가장 구체적 → 우선 판정)
+    if any(k in ch_lower for k in ["game", "게임", "arcade", "아케이드", "puzzle", "퍼즐", "roguelike", "로그라이크", "unity", "godot"]):
+        return "game", "🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)", "실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크"
+
+    # 0-1. Windows Native Desktop
+    if any(k in ch_lower for k in ["windows", "윈도우", "win", "wpf", "winui", "desktop", "데스크톱", "exe"]):
+        return "windows", "🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)", "단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드) 무결성 검증"
+
     # 1. Mobile / Android native
     if any(k in ch_lower for k in ["park", "rider", "android", "apk", "mobile", "app", "gps", "bluetooth"]):
         return "app", "📱 모바일 & 안드로이드 네이티브 앱", "Robolectric JVM OS 검증 + Gemini Vision 모바일 UI/UX (버튼 간격, 48dp 터치, 가독성, 심미성) 시각 검증, 가상 하드웨어(!sim), APK 자동 빌드 최적화"
@@ -24,6 +32,13 @@ def recommend_preset_for_channel(channel_name: str, workspace_path: str) -> Tupl
             return "app", "📱 모바일 & 안드로이드 네이티브 앱", "Robolectric JVM OS 검증 + Gemini Vision 모바일 UI/UX (버튼 간격, 48dp 터치, 가독성, 심미성) 시각 검증, 가상 하드웨어(!sim), APK 자동 빌드 최적화"
         if os.path.exists(os.path.join(workspace_path, "bot.py")) or os.path.exists(os.path.join(workspace_path, "agy_agent", "bot.py")):
             return "bot", "🤖 백그라운드 자동화 / 봇 / 크롤러", "비동기 데몬 헬스체크, 웹훅/알림 송수신 무결성 & 단위 테스트, 무중단 데몬 구동"
+        if os.path.exists(os.path.join(workspace_path, "project.godot")) or os.path.exists(os.path.join(workspace_path, "Assets")):
+            return "game", "🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)", "실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크"
+        try:
+            if any(f.endswith(".sln") or f.endswith(".csproj") for f in os.listdir(workspace_path)):
+                return "windows", "🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)", "단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드) 무결성 검증"
+        except Exception:
+            pass
 
     # Default
     return "web", "🌐 웹 & SaaS 풀스택 개발", "Playwright 반응형 4대 기기 E2E 검증 및 라이브 URL 배포 자동 패치"
@@ -125,6 +140,58 @@ PROFILE_BACKEND_API = """# 🚀 Profile: Backend API & Microservices (backend_ap
 * **최종 산출물**: 실행 가능한 서버 스크립트, DB 마이그레이션 파일, Dockerfile, API 테스트 전수 통과 리포트
 """
 
+PROFILE_WINDOWS = """# 🪟 Profile: Windows Native Desktop Application (windows_rules)
+
+> **적용 분야**: 100% Windows Native Desktop (C# WPF / WinUI 3 / .NET, Python PyQt6 데스크톱 유틸리티)
+
+## 1. 플랫폼 및 아키텍처 가드레일 (Platform Guardrails)
+* **공식 플랫폼 규격**: Windows Native Desktop App (WPF/WinUI 3 + .NET, 또는 PyQt6/PySide6)
+* **🚫 엄격 금지 (Physical Block)**:
+  - 웹 브라우저 래핑(WebView2 기반 껍데기), Electron 껍데기로 네이티브 위장 금지
+  - 가짜 UI 드로잉(Mocking): PIL/GDI+ 캔버스로 가짜 창 스크린샷 합성 시 즉시 반려
+  - 콘솔 창(`Console`)만 띄우고 GUI 미구현 상태를 네이티브 앱으로 보고하는 행위 금지
+* **UI/UX 네이티브 표준 (Fluent Design)**:
+  - **타이틀바 & 리사이즈**: 표준 캡션 버튼(최소화/최대화/닫기) 및 자유 리사이즈 정상 동작, DWM Mica/Acrylic 배경 적용
+  - **고DPI 대응**: 100~200% 배율에서 레이아웃 깨짐 0px (per-monitor DPI awareness v2)
+  - **키보드 중심 UX**: 주요 액션 단축키(`Ctrl+N/S/Z` 등) 및 Tab 포커스 순환, `AccessKey` 제공
+  - **스냅 레이아웃/멀티윈도우**: 최소 창 크기 보장 및 스냅 시 컨텐츠 오버플로 0px
+  - **테마**: 라이트/다크 모드 대응 (WCAG 2.1 AA 명도 대비 4.5:1)
+
+## 2. 품질 검증 및 증적 (Verification Engine)
+* **테스트 프레임워크**: `xUnit`/`NUnit`(.NET) 또는 `pytest-qt`(PyQt6) 단위 테스트 + Windows VM 실 프레임버퍼 캡처
+* **검증 대상**:
+  - 핵심 로직 단위 테스트 및 뷰모델 상태 전이 무결성
+  - 실제 창 렌더링 프레임버퍼 캡처 (고DPI/리사이즈/다크모드 다중 상태)
+  - 프로세스 재시작 후 설정/상태 영속화 무결성
+* **최종 산출물**: `dotnet publish`/`pyinstaller` -> 실행 가능한 `.exe` 및 설치 패키지(MSIX/Inno Setup), E2E 검증 리포트
+"""
+
+PROFILE_GAME = """# 🎮 Profile: Game Application (game_rules)
+
+> **적용 분야**: 100% 게임 (Web Canvas/WebGL/Three.js, Unity, Godot, Pygame — 캐주얼/아케이드/로그라이크/퍼즐)
+
+## 1. 플랫폼 및 아키텍처 가드레일 (Platform Guardrails)
+* **공식 플랫폼 규격**: 실제 플레이 가능한 게임 런타임 (Web: Canvas/WebGL/Three.js, Native: Unity/Godot/Pygame)
+* **🚫 엄격 금지 (Physical Block)**:
+  - 정적 이미지/목업을 게임 화면으로 위장하는 행위 금지 (실제 입력→렌더 루프 필수)
+  - 클릭조차 동작하지 않는 껍데기 스크린(Stub) 금지
+  - 가짜 FPS/스코어 리포트 작성 금지 (실 프레임 타이밍 계측만 인정)
+* **게임 UX/렌더링 표준**:
+  - **코어 루프**: 시작 → 플레이 → 스코어/아이템 → 난이도 상승 → 게임오버 → 즉시 재도전 1사이클 완결
+  - **60fps 프레임 예산**: 입력 지연(latency) 최소화, 프레임 드랍 구간 0건 (16.6ms 예산)
+  - **HUD 안전영역**: 화면 엣지 5% 이내 핵심 HUD 배치, 거리 가독성(큰 폰트/고대비) 확보
+  - **색맹 친화**: 색상 단독 의존 금지 (형태/아이콘 병행), 일시정지/설정 UI 완비
+  - **입력 프롬프트**: 키보드(WASD/화살표)/터치(가상 조이스틱)/마우스 입력 안내 표시
+
+## 2. 품질 검증 및 증적 (Verification Engine)
+* **테스트 프레임워크**: Playwright(Web 게임) 또는 엔진별 자동화 + 실 프레임버퍼 캡처 + FPS 벤치마크
+* **검증 대상**:
+  - 실제 입력 시퀀스 → 상태 변화(스코어/체력/레벨) 물리적 검증
+  - 연속 프레임 캡처로 애니메이션/파티클 실제 렌더링 무결성 증명
+  - 평균/최소 FPS 및 프레임 타임 분포 리포트
+* **최종 산출물**: 실행 가능한 게임 빌드(웹 번들 또는 네이티브 바이너리), FPS 벤치마크 리포트
+"""
+
 CORE_CONSTITUTION_CONTENT = """# 🏛️ PROJECT CONSTITUTION (프로젝트 개발 헌법)
 
 > 본 프로젝트는 **AGY 자율 제품 생산 공장 체계**를 따르며, 모든 에이전트(Coder, QA Reviewer, Auditor)는 아래 5대 시스템 불변원칙을 강제 준수합니다.
@@ -181,6 +248,8 @@ def create_project_constitution(workspace_path: str, preset_key: str = "web") ->
             "android_rules.md": PROFILE_ANDROID,
             "web_rules.md": PROFILE_WEB,
             "backend_api_rules.md": PROFILE_BACKEND_API,
+            "windows_rules.md": PROFILE_WINDOWS,
+            "game_rules.md": PROFILE_GAME,
         }
         for fname, content in profile_files.items():
             fpath = os.path.join(profiles_dir, fname)
@@ -192,7 +261,14 @@ def create_project_constitution(workspace_path: str, preset_key: str = "web") ->
         key = preset_key.lower().strip()
         if key in ("app", "앱", "mobile", "android", "모바일", "안드로이드", "2"):
             active_content = PROFILE_ANDROID
-        elif key in ("web", "웹", "saas", "frontend", "풀스택", "1", "store", "스토어", "biz", "commerce", "커머스", "landing", "랜딩", "3", "game", "3d", "webgl"):
+        elif key in ("game", "게임", "mobilegame", "retrogame", "unity", "godot", "unreal",
+                     "3d", "webgl", "canvas", "arcade", "아케이드", "퍼즐"):
+            active_content = PROFILE_GAME
+        elif key in ("win", "windows", "윈도우", "wpf", "winui", "winforms", "pyqt", "pyside",
+                     "데스크톱", "desktop app"):
+            active_content = PROFILE_WINDOWS
+        elif key in ("web", "웹", "saas", "frontend", "풀스택", "1", "store", "스토어", "biz",
+                     "commerce", "커머스", "landing", "랜딩", "3", "extension", "electron", "tauri", "desktop"):
             active_content = PROFILE_WEB
         elif key in ("api", "server", "backend", "백엔드", "서버", "msa", "fastapi", "nest"):
             active_content = PROFILE_BACKEND_API
@@ -279,6 +355,37 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
             ),
             color=discord.Color.purple()
         )
+    elif key in ("game", "게임", "mobilegame", "retrogame", "unity", "godot", "unreal",
+                 "3d", "webgl", "canvas", "arcade", "아케이드", "퍼즐", "5"):
+        session.set_mode("pair")
+
+        embed = discord.Embed(
+            title="🎮 [게임 프로젝트 프리셋 적용 완료]",
+            description=(
+                f"**선택된 프리셋:** `게임 (Web Canvas/WebGL · Unity · Godot · Pygame) 모드`\n\n"
+                f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 3중 협업)\n"
+                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• 🧪 **QA 엔진**: 실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크\n"
+                f"• 🕹️ **코어 루프**: 시작→플레이→스코어→난이도 상승→게임오버→즉시 재도전 완결 강제\n"
+                f"• 🎯 **HUD 표준**: 엣지 5% 안전영역 · 거리 가독성 · 색맹 친화(형태+색) · 일시정지/설정 UI"
+            ),
+            color=discord.Color.magenta()
+        )
+    elif key in ("win", "windows", "윈도우", "wpf", "winui", "winforms", "pyqt", "pyside", "데스크톱", "6"):
+        session.set_mode("pair")
+
+        embed = discord.Embed(
+            title="🪟 [윈도우 네이티브 데스크톱 프리셋 적용 완료]",
+            description=(
+                f"**선택된 프리셋:** `윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6) 모드`\n\n"
+                f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 3중 협업)\n"
+                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• 🧪 **QA 엔진**: 단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드)\n"
+                f"• 🪟 **Fluent Design**: 타이틀바/리사이즈 · 키보드 단축키 · 스냅 레이아웃 · 고DPI 200% 무결성\n"
+                f"• 📦 **바이너리**: `dotnet publish`/`pyinstaller` → `.exe` 및 설치 패키지"
+            ),
+            color=discord.Color.dark_teal()
+        )
     else:
         session.set_mode("auto")
         
@@ -305,24 +412,34 @@ class ProjectSetupView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="🌐 웹 / SaaS 풀스택", style=discord.ButtonStyle.primary, emoji="🌐", custom_id="btn_preset_web")
+    @discord.ui.button(label="🌐 웹 / SaaS 풀스택", style=discord.ButtonStyle.primary, emoji="🌐", custom_id="btn_preset_web", row=0)
     async def btn_web(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "web", self.session_manager, self.command_prefix)
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
-    @discord.ui.button(label="📱 모바일 / 안드로이드 앱", style=discord.ButtonStyle.success, emoji="📱", custom_id="btn_preset_app")
+    @discord.ui.button(label="📱 모바일 / 안드로이드 앱", style=discord.ButtonStyle.success, emoji="📱", custom_id="btn_preset_app", row=0)
     async def btn_app(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "app", self.session_manager, self.command_prefix)
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
-    @discord.ui.button(label="🛍️ 커머스 / AI명함 / 스토어", style=discord.ButtonStyle.secondary, emoji="🛍️", custom_id="btn_preset_store")
+    @discord.ui.button(label="🛍️ 커머스 / AI명함 / 스토어", style=discord.ButtonStyle.secondary, emoji="🛍️", custom_id="btn_preset_store", row=0)
     async def btn_store(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "store", self.session_manager, self.command_prefix)
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
-    @discord.ui.button(label="🔍 기획 / 시장 리서치", style=discord.ButtonStyle.secondary, emoji="🔍", custom_id="btn_preset_read")
+    @discord.ui.button(label="🔍 기획 / 시장 리서치", style=discord.ButtonStyle.secondary, emoji="🔍", custom_id="btn_preset_read", row=1)
     async def btn_read(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = apply_project_preset(self.channel_id, "read", self.session_manager, self.command_prefix)
+        await interaction.response.edit_message(content="", embed=embed, view=None)
+
+    @discord.ui.button(label="🎮 게임 (WebGL/Unity/Godot)", style=discord.ButtonStyle.danger, emoji="🎮", custom_id="btn_preset_game", row=1)
+    async def btn_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = apply_project_preset(self.channel_id, "game", self.session_manager, self.command_prefix)
+        await interaction.response.edit_message(content="", embed=embed, view=None)
+
+    @discord.ui.button(label="🪟 윈도우 네이티브 데스크톱", style=discord.ButtonStyle.primary, emoji="🪟", custom_id="btn_preset_windows", row=1)
+    async def btn_windows(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = apply_project_preset(self.channel_id, "windows", self.session_manager, self.command_prefix)
         await interaction.response.edit_message(content="", embed=embed, view=None)
 
 async def handle_setup_command(message: discord.Message, preset_key: str, session_manager, command_prefix: str = "!"):
@@ -367,7 +484,17 @@ async def handle_setup_command(message: discord.Message, preset_key: str, sessio
         value="• 모드: `Read (읽기 전용)` | 오토파일럿: `OFF`\n• QA: `3중 아키텍트 교차 분석 & 논문/시장 리서치`\n• 용도: 기획서 작성, 방향성 자문, 시장 분석",
         inline=False
     )
-    embed.set_footer(text=f"명령어로 직접 설정: {command_prefix}setup web | {command_prefix}setup app | {command_prefix}setup store | {command_prefix}setup read")
+    embed.add_field(
+        name="5. 🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)",
+        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `실 입력→렌더 루프 + 연속 프레임 캡처 + 60fps 벤치마크`\n• 용도: 캐주얼/아케이드/로그라이크/퍼즐 게임",
+        inline=False
+    )
+    embed.add_field(
+        name="6. 🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)",
+        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `단위 테스트 + Windows VM 실 창 프레임버퍼 (고DPI/다크모드)`\n• 용도: 윈도우 데스크톱 유틸리티, 생산성 앱",
+        inline=False
+    )
+    embed.set_footer(text=f"명령어로 직접 설정: {command_prefix}setup web | app | store | read | game | windows")
 
     view = ProjectSetupView(channel_id=message.channel.id, user_id=message.author.id, session_manager=session_manager, command_prefix=command_prefix)
     await message.channel.send(embed=embed, view=view)
