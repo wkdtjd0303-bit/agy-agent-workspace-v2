@@ -480,6 +480,18 @@ class EvidenceValidator:
                             )
                             if sub_diff_un.returncode == 0 and sub_diff_un.stdout.strip():
                                 sub_repo_diff_text += "\n" + sub_diff_un.stdout
+                            else:
+                                sub_diff_head = subprocess.run(
+                                    ["git", "diff", "HEAD~1", "HEAD", "--", "."] + binary_excludes,
+                                    cwd=candidate_dir,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    errors="replace",
+                                    timeout=5.0
+                                )
+                                if sub_diff_head.returncode == 0 and sub_diff_head.stdout.strip():
+                                    sub_repo_diff_text += "\n" + sub_diff_head.stdout
 
                         # Check untracked core Python files in sub-repo
                         try:

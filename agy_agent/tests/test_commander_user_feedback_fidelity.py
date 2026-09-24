@@ -1128,6 +1128,132 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_high_severity_test_failure_signal_does_not_override_user_feedback(self):
+        """QA1 Rejection Defect 2: High-severity test failure signal (failures=1 in test-results)
+        must NEVER hijack or overwrite explicit user feedback. If related to crash/stability,
+        it should be merged into what as [신호 기반 병합], and plan.source must stay 'feedback'.
+        """
+        import asyncio
+        from gap_signal_scanner import GapSignalScanner
+
+        # 1. Create a failing JUnit XML report in build/test-results/
+        test_results_dir = os.path.join(self.tmp, "build", "test-results", "test")
+        os.makedirs(test_results_dir, exist_ok=True)
+        junit_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<testsuite name="com.example.PdfRenderTest" tests="5" failures="1" errors="0">\n'
+            '    <testcase name="testPdfOpenStability" classname="com.example.PdfRenderTest">\n'
+            '        <failure message="NullPointerException during PDF open" type="java.lang.NullPointerException">\n'
+            '            Crash log stacktrace\n'
+            '        </failure>\n'
+            '    </testcase>\n'
+            '</testsuite>\n'
+        )
+        with open(os.path.join(test_results_dir, "TEST-PdfRenderTest.xml"), "w", encoding="utf-8") as f:
+            f.write(junit_xml)
+
+        # Verify GapSignalScanner detects this high-severity test failure
+        signal = GapSignalScanner.select_next(self.tmp, "mobile_app")
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.severity, "high")
+        self.assertEqual(signal.area, "test")
+
+        async def _run():
+            plan = await Commander.plan_adaptive_next_milestone_async(
+                root_user_goal=USER_COMPLAINT_PROMPT,
+                workspace=self.tmp,
+                domain="mobile_app"
+            )
+            # Plan must be feedback, NOT signal
+            self.assertEqual(plan.source, "feedback", f"Plan source was hijacked by signal! Got: {plan.source}")
+            self.assertIn("사용자 피드백", plan.title, f"Plan title hijacked by signal! Got: {plan.title}")
+            self.assertNotIn("테스트 실패/에러 0건 복구", plan.title)
+
+            # All 5 user feedback points must remain preserved in what
+            tasks_str = " ".join(plan.what)
+            self.assertTrue(any(k in tasks_str for k in ["디자인 통일성", "연결성"]))
+            self.assertTrue(any(k in tasks_str for k in ["도큐크래프트", "명칭", "리브랜딩"]))
+            self.assertTrue(any(k in tasks_str for k in ["그레이톤", "아이콘"]))
+            self.assertTrue("메인" in tasks_str and any(b in tasks_str for b in ["열기", "빈페이지", "합치기", "변환하기"]))
+            self.assertTrue(any(k in tasks_str for k in ["PDF", "크래시", "안정성", "최적화"]))
+
+            # Related crash/test signal is merged cleanly with [신호 기반 병합]
+            self.assertTrue(
+                any("[신호 기반 병합]" in t for t in plan.what),
+                f"Expected [신호 기반 병합] in tasks, got: {plan.what}"
+            )
+
+        asyncio.run(_run())
+
+    def test_high_severity_unrelated_lint_signal_is_recorded_in_thinking_without_overriding_feedback(self):
+        """QA1 Rejection Defect 2: High-severity unrelated signal (e.g. Lint error) must NOT override
+        user feedback, and should be recorded in thinking_process without polluting what tasks.
+        """
+        import asyncio
+        from gap_signal_scanner import GapSignalScanner
+
+        # 1. Create a Lint XML report with an Error
+        lint_dir = os.path.join(self.tmp, "build", "reports")
+        os.makedirs(lint_dir, exist_ok=True)
+        lint_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<issues format="6" by="lint 8.0.0">\n'
+            '    <issue id="HardcodedText" severity="Error" message="Hardcoded string in layout" />\n'
+            '</issues>\n'
+        )
+        with open(os.path.join(lint_dir, "lint-results.xml"), "w", encoding="utf-8") as f:
+            f.write(lint_xml)
+
+        signal = GapSignalScanner.select_next(self.tmp, "mobile_app")
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.severity, "high")
+        self.assertEqual(signal.area, "lint")
+
+        async def _run():
+            plan = await Commander.plan_adaptive_next_milestone_async(
+                root_user_goal=USER_COMPLAINT_PROMPT,
+                workspace=self.tmp,
+                domain="mobile_app"
+            )
+            # Must remain feedback plan
+            self.assertEqual(plan.source, "feedback")
+            self.assertIn("사용자 피드백", plan.title)
+            self.assertNotIn("Lint Error", plan.title)
+
+            # Unrelated lint should NOT be merged into what
+            self.assertFalse(any("Lint" in t for t in plan.what))
+
+            # But must be recorded in thinking_process for transparency
+            self.assertIn("[신호 결손 감지 알림]", plan.thinking_process)
+            self.assertIn("lint", plan.thinking_process)
+
+        asyncio.run(_run())
+
+    def test_sync_plan_adaptive_next_milestone_preserves_feedback_precedence_over_signal_gap(self):
+        """Validates that synchronous plan_adaptive_next_milestone also honors feedback precedence over signal gaps."""
+        test_results_dir = os.path.join(self.tmp, "build", "test-results", "test")
+        os.makedirs(test_results_dir, exist_ok=True)
+        junit_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<testsuite name="com.example.Test" tests="1" failures="1" errors="0">\n'
+            '    <testcase name="testFail"><failure message="error"/></testcase>\n'
+            '</testsuite>\n'
+        )
+        with open(os.path.join(test_results_dir, "TEST-Results.xml"), "w", encoding="utf-8") as f:
+            f.write(junit_xml)
+
+        plan = Commander.plan_adaptive_next_milestone(
+            root_user_goal=USER_COMPLAINT_PROMPT,
+            workspace=self.tmp,
+            domain="mobile_app"
+        )
+        self.assertEqual(plan.source, "feedback")
+        self.assertIn("사용자 피드백", plan.title)
+        self.assertNotIn("테스트 실패/에러 0건 복구", plan.title)
+        tasks_str = " ".join(plan.what)
+        self.assertTrue(any(k in tasks_str for k in ["디자인 통일성", "연결성"]))
+        self.assertTrue(any(k in tasks_str for k in ["PDF", "크래시", "안정성", "최적화"]))
+
 
 if __name__ == "__main__":
     unittest.main()
