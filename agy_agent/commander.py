@@ -1975,7 +1975,8 @@ class Commander:
         cls,
         user_prompt: str,
         workspace: Optional[str] = None,
-        domain: Optional[str] = None
+        domain: Optional[str] = None,
+        reality: Optional[CodebaseReality] = None
     ) -> Dict[str, Any]:
         """
         Deconstructs raw user feedback into structured, targeted 5W1H elements.
@@ -2138,10 +2139,12 @@ class Commander:
                 handled = True
 
             # (6) Main Dashboard & Action Buttons & AI Image removal
-            if any(k in it_low for k in [
-                "메인", "대시보드", "ai 이미지", "열기", "빈페이지", "합치기", "변환하기", "버튼 옵션", "꺼내다",
-                "홈 화면", "홈화면", "메인 화면", "메인화면", "메인 페이지", "허전", "채워"
-            ]):
+            has_dash_explicit = any(k in it_low for k in [
+                "대시보드", "ai 이미지", "열기", "빈페이지", "합치기", "변환하기", "버튼 옵션", "꺼내다",
+                "홈 화면", "홈화면", "메인 화면", "메인화면", "메인 페이지"
+            ])
+            has_main_context = any(k in it_low for k in ["메인", "홈"]) and any(k in it_low for k in ["화면", "페이지", "뷰", "약해", "허전", "채워", "버튼"])
+            if has_dash_explicit or has_main_context:
                 has_main_dash_req = True
                 targeted_keywords.append("메인 대시보드 개편")
                 if "ai 이미지" in it_low or ("이미지" in it_low and any(w in it_low for w in ["별로", "제거", "빼", "들어가"])):
@@ -2183,10 +2186,11 @@ class Commander:
                 handled = True
 
             # (11) Design Cohesion & Visual Refresh
+            has_bare_ui = bool(re.search(r'(?<![a-z0-9])ui(?![a-z0-9])', it_low))
             if any(k in it_low for k in [
                 "통일성", "연결성", "매칭", "디자인", "깔끔", "룩앤필", "스타일", "예쁘게", "정돈",
-                "세련", "다듬", "조잡", "촌스럽", "답답", "시원", "ui", "레이아웃"
-            ]):
+                "세련", "다듬", "조잡", "촌스럽", "답답", "시원", "레이아웃"
+            ]) or (has_bare_ui and any(k in it_low for k in ["통일", "연결", "매칭", "개선", "리뉴얼", "고도화", "정돈", "스타일", "룩앤필", "디자인"])):
                 has_design_req = True
                 targeted_keywords.append("디자인 통일성 개편")
                 detected_tasks.append("[디자인 통일성] 전체 화면 및 컴포넌트 간 시각 요소 매칭 및 디자인 통일성·연결성 고도화")
@@ -2232,11 +2236,13 @@ class Commander:
             for act in ["열기", "빈페이지 만들기", "합치기", "변환하기"]:
                 if act in dash_actions:
                     actions.append(act)
-            if not actions:
-                actions = ["열기", "빈페이지 만들기", "합치기", "변환하기"]
-            action_desc = "·".join(actions)
-            ai_removal_desc = " (AI 생성 이미지 배제 및 " if has_ai_image_removal else " ("
-            detected_tasks.append(f"[메인 대시보드 개편] 메인 화면 UI 리뉴얼{ai_removal_desc}{action_desc} 4대 핵심 기능 버튼 전면 배치)")
+            if actions:
+                action_desc = "·".join(actions)
+                ai_removal_desc = " (AI 생성 이미지 배제 및 " if has_ai_image_removal else " ("
+                detected_tasks.append(f"[메인 대시보드 개편] 메인 화면 UI 리뉴얼{ai_removal_desc}{action_desc} 4대 핵심 기능 버튼 전면 배치)")
+            else:
+                ai_removal_desc = " (AI 생성 이미지 배제 및 시각 레이아웃 정돈)" if has_ai_image_removal else " (시각 계층 구조 및 레이아웃 정돈)"
+                detected_tasks.append(f"[메인 대시보드 개편] 메인 화면 UI 및 컴포넌트 구성 개선{ai_removal_desc}")
 
         # Fallback if no specific categories triggered
         if not detected_tasks:
@@ -2337,27 +2343,33 @@ class Commander:
 
         # Determine authentic physical path from reality, key_directories, entrypoints, or domain
         src_path = ""
-        if workspace and os.path.isdir(workspace):
+        current_reality = reality
+        if current_reality is None and workspace and os.path.isdir(workspace):
             try:
-                reality = cls.inspect_codebase_reality(workspace)
+                current_reality = cls.inspect_codebase_reality(workspace)
+            except Exception:
+                current_reality = None
+
+        if current_reality is not None:
+            try:
                 # 1. Entrypoints directory
-                if reality.entrypoints:
-                    primary_entry = reality.entrypoints[0]
+                if current_reality.entrypoints:
+                    primary_entry = current_reality.entrypoints[0]
                     src_dir = os.path.dirname(primary_entry).replace("\\", "/")
                     if src_dir and src_dir != ".":
                         src_path = f"{src_dir}/"
                 # 2. Key source directories
-                if not src_path and reality.key_directories:
+                if not src_path and current_reality.key_directories:
                     src_dirs = [
-                        d for d in reality.key_directories
+                        d for d in current_reality.key_directories
                         if any(k in d.lower() for k in ["src/main", "src", "app/src", "lib", "core", "ui"])
                     ]
                     if src_dirs:
                         src_dirs.sort(key=lambda d: len(d), reverse=True)
                         src_path = src_dirs[0].rstrip("/") + "/"
                 # 3. Source files directory
-                if not src_path and reality.source_files:
-                    primary_src = reality.source_files[0]
+                if not src_path and current_reality.source_files:
+                    primary_src = current_reality.source_files[0]
                     src_dir = os.path.dirname(primary_src).replace("\\", "/")
                     if src_dir and src_dir != ".":
                         src_path = f"{src_dir}/"
@@ -2794,7 +2806,41 @@ class Commander:
             intent_verdict.is_feedback_directive
             and not (is_legacy_feedback_goal and cls._feedback_all_delivered(workspace=workspace))
         )
+
         if is_feedback_directive:
+            # When direct user feedback directive is present:
+            # A static milestone from ROADMAP.md (e.g. seeded v11 Phase 3 annotation core)
+            # must NOT lock title and tasks even if preserve_caller_milestone=True, UNLESS
+            # it is already a feedback milestone or has semantic overlap (overlap >= 0.35).
+            # However, explicit caller-orchestrated directives not found in ROADMAP.md are preserved.
+            is_from_roadmap = False
+            if workspace and milestone_title:
+                roadmap_path = os.path.join(workspace, "ROADMAP.md")
+                if os.path.isfile(roadmap_path):
+                    try:
+                        with open(roadmap_path, "r", encoding="utf-8") as f:
+                            rm_content = f.read()
+                        clean_m_title = re.sub(r'^[vV]\d+(\.\d+)*\s*[:—\-]\s*', '', milestone_title).strip()
+                        if clean_m_title and (clean_m_title in rm_content or milestone_title in rm_content):
+                            is_from_roadmap = True
+                    except Exception:
+                        pass
+            if not is_from_roadmap and milestone_title:
+                if re.search(r'\(Phase\s*\d+', milestone_title, re.IGNORECASE):
+                    is_from_roadmap = True
+
+            if is_from_roadmap:
+                is_authoritative = (
+                    is_already_feedback_milestone
+                    or (caller_has_title_and_tasks and prompt_overlap >= 0.35)
+                )
+            else:
+                is_authoritative = (
+                    preserve_caller_milestone
+                    or is_already_feedback_milestone
+                    or (caller_has_title_and_tasks and prompt_overlap >= 0.35)
+                )
+
             fb_decomp = cls.decompose_user_feedback(clean_user_p, workspace=workspace, domain=domain)
             if not is_authoritative:
                 tasks = fb_decomp["tasks"]
@@ -3319,7 +3365,7 @@ class Commander:
         "북마크", "인쇄", "내보내기", "그레이톤", "리브랜딩", "도큐크래프트", "디자인 통일성",
         "4대", "다크모드", "야간", "패스워드", "보안", "서명", "필터", "회전", "썸네일",
         "글자", "에디터", "폰트", "크기", "pdf", "버그", "에러", "오류", "누수", "결함",
-        "오작동", "성능", "속도", "지연", "프리징", "글씨", "ui", "레이아웃",
+        "오작동", "성능", "속도", "지연", "프리징", "글씨", "레이아웃",
         "장바구니", "결제", "체크아웃", "주문", "카트"
     )
     _deferred_signal_rounds: Dict[str, int] = {}
@@ -3337,17 +3383,19 @@ class Commander:
                     cls._deferred_signal_rounds.pop(k, None)
 
     @classmethod
-    def _is_vague_complaint(cls, prompt: str, workspace: Optional[str] = None) -> bool:
+    def _is_vague_complaint(
+        cls,
+        prompt: str,
+        workspace: Optional[str] = None,
+        reality: Optional[CodebaseReality] = None
+    ) -> bool:
         """Determines whether a user prompt represents a vague complaint without concrete domain targets.
         Single Source of Truth (SSOT):
-        1. Fast check against specific domain keywords.
-        2. SSOT check via decompose_user_feedback: if tasks contain any concrete domain tag
-           (e.g., [PDF 텍스트 편집], [버튼 가독성], [폰트 가독성], [브랜드 리뉴얼], [명칭 리브랜딩],
-           [아이콘 리뉴얼], [메인 대시보드 개편], [결제 안정화], [장바구니 인터랙션],
-           [성능 최적화], [안정성 및 크래시 방어], [디자인 통일성], [UI 인터랙션 복구]),
-           it has a concrete engineering target -> is_vague = False.
-        3. Only if no concrete target/tag/domain keyword is found AND prompt contains vague
-           complaint words (_VAGUE_COMPLAINT_KEYWORDS) -> is_vague = True.
+        1. Fast check against specific domain keywords (excluding bare short tokens like 'ui').
+        2. Word-boundary check for standalone 'ui' if accompanied by design/action context.
+        3. SSOT check via decompose_user_feedback: if tasks contain concrete domain tags,
+           validate that the tag is anchored to explicit prompt keywords.
+        4. Only if no concrete target is found AND prompt contains vague words -> is_vague = True.
         """
         if not prompt:
             return False
@@ -3355,20 +3403,31 @@ class Commander:
         if any(k in p_lower for k in cls._SPECIFIC_DOMAIN_KEYWORDS):
             return False
 
+        has_bare_ui = bool(re.search(r'(?<![a-z0-9])ui(?![a-z0-9])', p_lower))
+        if has_bare_ui and any(k in p_lower for k in ["통일", "연결", "매칭", "개선", "리뉴얼", "고도화", "정돈", "스타일", "룩앤필", "디자인"]):
+            return False
+
         try:
-            fb = cls.decompose_user_feedback(prompt, workspace=workspace)
+            fb = cls.decompose_user_feedback(prompt, workspace=workspace, reality=reality)
             concrete_tags = (
                 "[pdf 텍스트 편집]", "[인플레이스 텍스트 편집]",
                 "[버튼 가독성]", "[폰트 가독성]",
                 "[브랜드 리뉴얼]", "[명칭 리브랜딩]",
-                "[아이콘 리뉴얼]", "[메인 대시보드 개편]",
+                "[아이콘 리뉴얼]",
                 "[결제 안정화]", "[장바구니 인터랙션]",
                 "[성능 최적화]", "[안정성 및 크래시 방어]",
                 "[디자인 통일성]", "[ui 인터랙션 복구]",
             )
             for task in fb.get("tasks", []):
                 task_low = task.lower()
-                if any(tag in task_low for tag in concrete_tags):
+                if "[메인 대시보드 개편]" in task_low:
+                    # Require at least one explicit action or dashboard keyword in prompt
+                    has_concrete_dash = any(k in p_lower for k in [
+                        "열기", "빈페이지", "합치기", "변환", "대시보드", "메인 화면", "메인화면", "메인 페이지", "홈 화면", "홈화면", "버튼"
+                    ])
+                    if has_concrete_dash:
+                        return False
+                elif any(tag in task_low for tag in concrete_tags):
                     return False
         except Exception:
             pass
@@ -3924,7 +3983,7 @@ class Commander:
                     "• Type B: 높은 가독성과 시인성을 갖춘 직관적인 고대비 버튼 및 도구 아이콘 에셋 배치"
                 )
                 visual_approved = True
-            elif cls._is_vague_complaint(root_user_goal, workspace=workspace):
+            elif cls._is_vague_complaint(root_user_goal, workspace=workspace, reality=reality):
                 title = "사용자 피드백 구체화 및 개선 포인트 식별"
                 what = [
                     "불편 사항 및 개선 희망 기능 구체적 요구사항 파악 (화면/동작/에러 식별)",
@@ -3936,7 +3995,7 @@ class Commander:
                 visual_asset_spec = "불필요 (피드백 구체화 및 분석 단계)"
                 visual_approved = False
             else:
-                fb_decomp = cls.decompose_user_feedback(root_user_goal, workspace=workspace, domain=domain)
+                fb_decomp = cls.decompose_user_feedback(root_user_goal, workspace=workspace, domain=domain, reality=reality)
                 title = fb_decomp["title"]
                 what = fb_decomp["tasks"]
                 how = fb_decomp["how"]
@@ -4295,7 +4354,7 @@ class Commander:
         cls._reset_deferred_signal_rounds_for_workspace(workspace, active_area=active_area)
 
         # 고위험(high) 신호 결손 처리: 사용자 피드백이 활성인 경우 피드백 계획을 폐기하지 않고 병합
-        is_vague = cls._is_vague_complaint(root_user_goal, workspace=workspace)
+        is_vague = cls._is_vague_complaint(root_user_goal, workspace=workspace, reality=reality)
         is_fb_active = feedback_locked and cls._is_feedback_plan(heuristic_plan) and not is_vague
         if signal_gap is not None and signal_gap.severity == "high":
             if is_fb_active:
@@ -4558,7 +4617,7 @@ class Commander:
         active_area = getattr(signal_gap, "area", None) if signal_gap else None
         cls._reset_deferred_signal_rounds_for_workspace(workspace, active_area=active_area)
 
-        is_vague = cls._is_vague_complaint(root_user_goal, workspace=workspace)
+        is_vague = cls._is_vague_complaint(root_user_goal, workspace=workspace, reality=reality)
         is_fb_locked = feedback_locked and cls._is_feedback_plan(plan) and not is_vague
         if signal_gap is not None and signal_gap.severity == "high":
             if not is_fb_locked:

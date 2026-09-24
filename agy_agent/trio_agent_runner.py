@@ -970,7 +970,7 @@ class TrioAgentRunner:
 
         try:
             import sys, importlib
-            if "autonomy_guard" in sys.modules and not os.environ.get("UNITTEST_RUNNING"):
+            if "autonomy_guard" in sys.modules and os.environ.get("UNITTEST_RUNNING") != "1":
                 importlib.reload(sys.modules["autonomy_guard"])
             from autonomy_guard import AutonomySafetyLayer
             if channel_id:
@@ -1477,7 +1477,7 @@ class TrioAgentRunner:
                 # Early squad dispatch calculation to ensure exact, synchronized step denominators from Step 1
                 if active_extended_qas:
                     if squad_plan is None:
-                        if "commander" in sys.modules and not os.environ.get("UNITTEST_RUNNING"):
+                        if "commander" in sys.modules and os.environ.get("UNITTEST_RUNNING") != "1":
                             try:
                                 importlib.reload(sys.modules["commander"])
                             except Exception:
@@ -2377,7 +2377,7 @@ class TrioAgentRunner:
 
                 # 🛡️ Collaboration Intelligence Check: Auditor Value Alignment (A5 / C3)
                 import importlib, sys
-                if "autonomy_guard" in sys.modules and not os.environ.get("UNITTEST_RUNNING"):
+                if "autonomy_guard" in sys.modules and os.environ.get("UNITTEST_RUNNING") != "1":
                     importlib.reload(sys.modules["autonomy_guard"])
                 from autonomy_guard import CollaborationIntelligence
                 val_action, val_reason = CollaborationIntelligence.evaluate_auditor_value_alignment(

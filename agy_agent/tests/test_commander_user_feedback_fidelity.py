@@ -1690,6 +1690,81 @@ class TestCommanderUserFeedbackFidelity(unittest.TestCase):
         Commander._prune_deferred_signal_rounds(max_size=50)
         self.assertLessEqual(len(Commander._deferred_signal_rounds), 50)
 
+    def test_ui_substring_false_positive_and_vague_prompts(self):
+        """💥 Critical-1 & Major-2:
+        English words containing 'ui' (guide, quick, requirement, build) must NOT trigger
+        false-positive domain keyword matches in _is_vague_complaint.
+        Vague complaint '앱이 좀 허전하고 별로예요' must be classified as vague (True),
+        and decompose_user_feedback must NOT fabricate 4 action buttons ('열기', '빈페이지', '합치기', '변환하기').
+        """
+        vague_cases = [
+            "guide 별로예요",
+            "quick fix 별로예요",
+            "requirement가 별로예요",
+            "앱이 좀 허전하고 별로예요"
+        ]
+        for p in vague_cases:
+            self.assertTrue(
+                Commander._is_vague_complaint(p, workspace=self.tmp),
+                f"Expected '{p}' to be classified as vague complaint (True), got False"
+            )
+
+        decomp = Commander.decompose_user_feedback("앱이 좀 허전하고 별로예요", workspace=self.tmp)
+        decomp_str = " ".join(decomp.get("tasks", []))
+        for button in ["열기", "빈페이지", "합치기", "변환하기"]:
+            self.assertNotIn(
+                button,
+                decomp_str,
+                f"Fabricated button '{button}' found in decomposed tasks for vague prompt: {decomp_str}"
+            )
+
+    def test_e2e_seeded_v11_roadmap_milestone_overridden_by_user_feedback(self):
+        """⚠️ Diagnosis-3:
+        When ROADMAP.md has an existing unrelated milestone (v11.0: 주석 레이어 렌더링 & 무손실 내보내기 (Phase 3: 주석 코어)),
+        plan_milestone_5w1h with explicit user feedback must NOT lock to that static milestone even if
+        preserve_caller_milestone=True is passed by the caller.
+        """
+        from roadmap_manager import RoadmapManager
+        rm = RoadmapManager(self.tmp)
+        seeded_title = "v11.0: 주석 레이어 렌더링 & 무손실 내보내기 (Phase 3: 주석 코어)"
+        seeded_tasks = [
+            "주석 레이어 분리 저장 및 캔버스 렌더링",
+            "터치 제스처 충돌 방지 및 Undo/Redo 제어 무결성",
+            "무손실 주석 병합 및 표준 PDF 내보내기"
+        ]
+        rm.append_or_update_adaptive_milestone(
+            version="v11.0",
+            title=seeded_title,
+            tasks=seeded_tasks,
+            status="IN_PROGRESS"
+        )
+
+        plan = Commander.plan_milestone_5w1h(
+            milestone_title=seeded_title,
+            milestone_version="v11.0",
+            tasks=seeded_tasks,
+            domain="mobile_app",
+            workspace=self.tmp,
+            user_prompt=USER_COMPLAINT_PROMPT,
+            preserve_caller_milestone=True
+        )
+
+        # 1. Title must prioritize user feedback and reject Phase 3 annotation core
+        self.assertTrue(
+            plan.title.startswith("사용자 피드백"),
+            f"Expected plan.title to start with '사용자 피드백', got: {plan.title}"
+        )
+        self.assertNotIn("주석 레이어", plan.title)
+        self.assertNotIn("Phase 3", plan.title)
+
+        # 2. Tasks (what) must reflect the 5 user points
+        tasks_str = " ".join(plan.what)
+        self.assertTrue(any(k in tasks_str for k in ["디자인 통일성", "연결성"]), f"Point 1 missing: {tasks_str}")
+        self.assertTrue(any(k in tasks_str for k in ["도큐크래프트", "명칭", "리브랜딩"]), f"Point 2 missing: {tasks_str}")
+        self.assertTrue(any(k in tasks_str for k in ["아이콘", "그레이톤"]), f"Point 3 missing: {tasks_str}")
+        self.assertTrue("메인" in tasks_str, f"Point 4 missing: {tasks_str}")
+        self.assertTrue(any(k in tasks_str for k in ["PDF", "크래시", "최적화", "안정성"]), f"Point 5 missing: {tasks_str}")
+
 
 if __name__ == "__main__":
     unittest.main()
