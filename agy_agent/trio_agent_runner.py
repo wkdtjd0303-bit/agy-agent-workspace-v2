@@ -29,6 +29,11 @@ from discord_utils import (
 from commander import Commander
 from model_manager import GlobalModelManager, QA_PERSONAS
 from quality_state_manager import QualityStateManager
+from convergence_policy import (
+    ConvergenceTracker,
+    build_blocking_contract_instruction,
+    parse_blocking_defect_count,
+)
 
 logger = logging.getLogger("TrioAgentRunner")
 
@@ -858,6 +863,13 @@ class TrioAgentRunner:
         latest_auditor_output = ""
         extended_qa_outputs: Dict[str, str] = {}
         channel_id = getattr(main_channel, "id", None)
+
+        # 🎯 수렴 계약: 새 미션은 차단 결함 추이 기록을 초기화하고 시작한다.
+        try:
+            if channel_id:
+                ConvergenceTracker.reset(channel_id)
+        except Exception as _conv_reset_err:
+            logger.debug(f"Convergence tracker reset skipped: {_conv_reset_err}")
 
         # Multi-QA pipeline activation is strictly constrained to !mode 2+ (pair_quad).
         # Standard !mode 1, !mode 2 remain pure Coder-QA1-Auditor 3-role pipelines.
@@ -1779,11 +1791,11 @@ class TrioAgentRunner:
                         f"Coder의 결함과 버그를 꼼꼼히 점검하되, **실제 사용자가 체감하는 앱 품질**에 집중하십시오.\n\n"
                         f"**[💼 전문 역할(전공) 집중 검증 영역]**:\n"
                         f"{qa1_persona_focus}\n\n"
-                        f"**[🎯 검증 원칙 — 현실적이고 균형 잡힌 품질 판정]**:\n"
-                        f"1. **사용자가 체감하는 실제 문제에 집중**: 빌드 성공 여부, 핵심 기능 동작, 명백한 UI 결함(클릭 안 되는 버튼, 화면 잘림, 앱 크래시)을 최우선 검증하십시오.\n"
-                        f"2. **합리적 판정 기준**: 완벽주의적 검증보다 '사용자가 실제로 불편을 느끼는가?'를 기준으로 PASS/FAIL을 판단하십시오. 경미한 코드 스타일, 리팩토링 권장 사항, 문서/증거 파일 포맷은 차기 라운드 권고로 처리하고 REJECTED 사유로 삼지 마십시오.\n"
-                        f"3. **수렴 지향 (Convergence-Oriented)**: 라운드가 반복될수록 잔여 결함이 감소해야 합니다. 이전 라운드에서 이미 APPROVED된 항목을 재반려하거나, 새로운 완벽주의적 기준을 추가하지 마십시오.\n"
-                        f"4. **직접 패치 우선**: 1~5줄 이내 단순 버그(오타, 누락된 return, 소규모 로직 오류)는 직접 수정한 후 APPROVED로 종결하십시오.\n\n"
+                        f"{build_blocking_contract_instruction()}\n\n"
+                        f"**[🎯 현실적 판정 원칙]**:\n"
+                        f"1. **사용자 체감 우선**: 빌드 성공 여부, 핵심 기능 동작, 명백한 UI 결함(클릭 안 되는 버튼, 화면 잘림, 앱 크래시)을 최우선 검증하십시오.\n"
+                        f"2. **정직성 우선**: 계측/테스트를 실행할 수 없으면 `BLOCKED`로 정직하게 기록하십시오. 확인하지 않은 것을 통과로 쓰지 마십시오.\n"
+                        f"3. **직접 패치 우선**: 1~5줄 이내 단순 버그(오타, 누락된 return, 소규모 로직 오류)는 직접 수정한 후 APPROVED로 종결하십시오.\n\n"
                         f"사용자가 다음과 같은 작업을 요청했고, Coder({coder_display}) 에이전트가 개발/보강 및 빌드를 완료했습니다.\n\n"
                         f"**[🚨 최우선 검증 대상 - 사용자 원본 요청 및 첨부 문서]:**\n"
                         f"────────────────────────────────────────\n"
@@ -1808,12 +1820,10 @@ class TrioAgentRunner:
                         f"4. **Mock/Stub 차단**: 가짜 데이터·더미 핸들러·빈 TODO를 확인하십시오.\n"
                         f"5. **레퍼런스 이미지 표절 색출**: 사용자 참고 이미지 복사 여부를 확인하십시오.\n\n"
                         f"**[판정 규칙]**:\n"
-                        f"1. **REJECTED 선언 기준 (실제로 사용자가 체감하는 문제)**: 빌드 실패, 앱 크래시, 핵심 기능 미동작, 클릭 안 되는 버튼, 사용자 요청 미반영, Mock/Stub/표절 적발.\n"
-                        f"   - ⚠️ 리팩토링 권장 사항, 문서 포맷 불일치, 증거 파일 부재, 코드 스타일 차이는 REJECTED 사유가 아닙니다.\n"
-                        f"2. **QA Direct Patch**: 직접 수정했다면 첫 줄에 `[STATUS: APPROVED (QA Direct Patch)]`를 표기하십시오.\n"
-                        f"3. **APPROVED 선언 기준**: 사용자 요청이 실체 구현되고, 빌드 성공, 핵심 기능이 동작하는 경우.\n"
-                        f"   - 반드시 첫 줄에 `[STATUS: APPROVED]`를 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 간결히 작성하십시오.\n"
-                        f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]`를 표기하십시오."
+                        f"1. **REJECTED**: 위 차단 결함이 1개 이상일 때만 선언하십시오. 첫 줄 `[STATUS: REJECTED]`, 둘째 줄 `[BLOCKING_DEFECTS: N]`(사용자 체감 차단 결함 개수), 이어서 파일/라인 근거와 즉시 구현 가능한 수정 스펙을 작성하십시오.\n"
+                        f"2. **QA Direct Patch**: 직접 수정했다면 첫 줄 `[STATUS: APPROVED (QA Direct Patch)]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하십시오.\n"
+                        f"3. **APPROVED**: 차단 결함이 0건이면 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 간결히 작성하십시오. 비차단 항목은 [차기 백로그]로만 기록하십시오.\n"
+                        f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`을 표기하십시오."
                     )
 
                     try:
@@ -2056,6 +2066,48 @@ class TrioAgentRunner:
                         + latest_qa_output
                     )
 
+                # 🎯 수렴 계약 (Convergence & Honesty Contract)
+                #   QA 반려가 "비차단 항목만 잔존"인지 "차단 결함 정체"인지 기계 판정한다.
+                #   마커([BLOCKING_DEFECTS: N])가 없으면 기존 동작을 그대로 보존한다.
+                if not qa_approved:
+                    try:
+                        _blk_count = parse_blocking_defect_count(latest_qa_output)
+                        if _blk_count is not None:
+                            ConvergenceTracker.record(channel_id or 0, _blk_count)
+                        if ConvergenceTracker.should_force_accept(channel_id or 0):
+                            logger.info(
+                                "TrioAgentRunner: Convergence Contract — QA rejected but "
+                                "[BLOCKING_DEFECTS: 0]; accepting with non-blocking backlog."
+                            )
+                            session.set_status("busy", "📉 비차단 항목만 잔존 → 수렴 승인 처리")
+                            qa_approved = True
+                            guardian_overridden = True
+                            latest_qa_output = (
+                                f"[STATUS: APPROVED]\n"
+                                f"✅ **[수렴 계약 — 비차단 항목만 잔존]**\n"
+                                f"QA가 반려를 선언했으나 `[BLOCKING_DEFECTS: 0]` — 남은 항목은 사용자 체감을 막지 않는 "
+                                f"비차단(스타일/문서/리팩토링) 항목뿐입니다. 수렴 계약에 따라 승인 처리하고 "
+                                f"잔여 항목은 [차기 백로그]로 이관합니다.\n\n"
+                                f"--- QA 원본 응답 ---\n{latest_qa_output}"
+                            )
+                            await safe_send_discord_message(main_channel, latest_qa_output)
+                        elif ConvergenceTracker.should_escalate(channel_id or 0):
+                            _trend = ConvergenceTracker.describe(channel_id or 0)
+                            logger.warning(
+                                f"TrioAgentRunner: Convergence Contract — blocking defects not decreasing. {_trend}"
+                            )
+                            session.set_status("warning", "🛑 차단 결함 수렴 실패 (No-Progress)")
+                            _conv_notice = (
+                                f"🚨 **[수렴 실패 차단 — 차단 결함 감소 정지]**\n"
+                                f"{_trend}\n"
+                                f"차단 결함이 2회 연속 줄지 않아 상한까지 라운드를 소진하기 전에 중단합니다. "
+                                f"사용자 개입 또는 범위 축소가 필요합니다."
+                            )
+                            await send_transit_notice(_conv_notice)
+                            return _conv_notice
+                    except Exception as _conv_err:
+                        logger.debug(f"Convergence contract evaluation skipped: {_conv_err}")
+
                 if not qa_approved:
                     feedback_for_coder = f"[qa1 반려 사유]\n{latest_qa_output}"
                     session.set_status("busy", f"⚠️ qa1 반려 ➔ Coder 보강 중 ({round_num}R)")
@@ -2219,13 +2271,11 @@ class TrioAgentRunner:
                                 f"3. **가시적 실체 구현 & 안티 트레이싱 (Anti-Mocking, Anti-Tracing & Provenance)**: 단순 주석, 껍데기 함수, 가짜 모킹이 아닌 실체 코드가 구현되었는가? 사용자가 제공한 참고용 레퍼런스 이미지 표절, 소스코드 내 스크립트 트레이싱(Image.open/cv2.imread/findContours/Base64 임베딩), 또는 이전 라운드 산출물 재탕이 없는가? 순수 절차적(Procedural) 생성 여부 및 외부 텍스처 미사용이 입증되었는가?\n"
                                 f"4. **런타임 결함 및 예외 방어**: 크래시, 무한 루프, null 오류 위험이 없는가?\n"
                                 f"5. **선행 검증 맹점 보완**: 이전 QA들이 간과했을 수 있는 엣지 케이스나 플랫폼 규격 위반 사항이 없는가?\n\n"
-                                f"**[검증 및 판정 규칙]:**\n"
-                                f"1. 결함이나 미비점, 또는 **직업(Persona) 관점에서 설계적/시각적/구조적 보강이 필요한 경우**:\n"
-                                f"   - 반드시 첫 줄에 `[STATUS: REJECTED]`를 표기하고, Coder가 미처 생각하지 못한 설계 대안 및 구체적 개선 지침(폰트/스타일, 나노바나나 에셋, 아키텍처 대안)을 작성하십시오.\n"
-                                f"2. 모든 요구사항이 온전히 구현되었고 결함이 없으며 최선의 설계가 입증된 경우:\n"
-                                f"   - 반드시 첫 줄에 `[STATUS: APPROVED]`를 표기하고 독립 검증 통과 내역 및 **[전문가 관점 심층 평가 & 차기 고도화 권고]**를 작성하십시오.\n"
-                                f"3. 사용자 요청이 정보 확인, 기획 자문, 시스템 상태 조회, 인사/테스트 답변인 경우:\n"
-                                f"   - Coder의 답변이 사용자 질문에 온전히 부합하고 결함이 없다면, 소스코드 변경(Diff)이 없더라도 반드시 첫 줄에 `[STATUS: APPROVED]`를 표기하십시오."
+                                f"**[검증 및 판정 규칙 (수렴 & 정직성 계약 준수)]:**\n"
+                                f"0. **차단 결함만 REJECTED 사유**: 빌드/크래시/사용자 요청 미구현/핵심 기능 미동작/Mock·표절/**거짓 증거**. 스타일·문서 포맷·리팩토링 권장·이론적 엣지 케이스는 [차기 백로그]로만 기록하고 REJECTED 사유로 삼지 마십시오.\n"
+                                f"1. 차단 결함이 있으면: 첫 줄 `[STATUS: REJECTED]`, 둘째 줄 `[BLOCKING_DEFECTS: N]` + Coder가 즉시 구현할 구체적 개선 지침(설계 대안/폰트·스타일/아키텍처).\n"
+                                f"2. 차단 결함이 0건이면: 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]` + 독립 검증 통과 내역 및 **[전문가 관점 심층 평가 & 차기 고도화 권고]**.\n"
+                                f"3. 사용자 요청이 정보 확인, 기획 자문, 시스템 상태 조회, 인사/테스트 답변인 경우: 답변이 부합하면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`."
                             )
 
                             try:
@@ -2717,7 +2767,16 @@ class TrioAgentRunner:
             session.set_status("warning", f"⚠️ 최대 라운드({max_rounds}회) 도달")
             _sqs = locals().get("squad_total_steps", 3)
             pipe_label = f"{_sqs}중" if active_extended_qas else ("4중 쿼드" if is_quad_pipeline else "3중")
-            return f"⚠️ **[{pipe_label} 에이전트 협업 완료 - 최대 라운드({max_rounds}회) 도달]**"
+            _final_trend = ""
+            try:
+                if ConvergenceTracker.history(channel_id or 0):
+                    _final_trend = (
+                        f"\n{ConvergenceTracker.describe(channel_id or 0)}\n"
+                        f"잔존 차단 결함이 해소되지 않았습니다. 사용자 개입 또는 범위 축소가 필요합니다."
+                    )
+            except Exception:
+                _final_trend = ""
+            return f"⚠️ **[{pipe_label} 에이전트 협업 완료 - 최대 라운드({max_rounds}회) 도달]**{_final_trend}"
 
         except asyncio.CancelledError:
             if session.current_process:

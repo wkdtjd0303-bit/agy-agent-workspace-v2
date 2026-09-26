@@ -49,11 +49,12 @@
 * **자동 검증 (무인 자율 `!mode 3/3+`)**: `reports/gate2/design_contract.json` + `reports/gate5/visual_craft_review.json`(verdict=PASS)이 Gate 5 통과 조건이며, MAJOR 결함 잔존 시 Coder 구조 재작업을 강제합니다.
 
 
-## 9. 🎯 QC 수렴 원칙 (QC Convergence Contract · !mode 3 필수 적용)
+## 9. 🎯 QC 수렴 & 정직성 계약 (Convergence & Honesty Contract · !mode 3 필수 적용)
 * **수렴 지향 검증**: QA는 라운드가 반복될수록 잔여 결함이 감소하도록 판정한다. 이전 라운드에서 이미 APPROVED된 항목을 재반려하거나, 골대를 이동하는 행위(Goalposts Moving)는 금지된다.
-* **합리적 판정 기준 (Proportionality Rule)**: REJECTED 사유는 사용자가 실제로 체감하는 결함에 국한된다. 구체적으로 다음은 REJECTED 사유가 될 수 없다:
-  - 증거 문서 포맷 불일치, 게이트 JSON 파일 내용 불일치, APK 해시 재현성, 캡처 타임스탬프 신선도 등 **메타 증거 인프라** 관련 항목
-  - 리팩토링 권장 사항, 코드 스타일 차이, 미사용 토큰 존재
-  - 이론적으로 가능하지만 현재 구현에서 도달 불가능한 코드 경로
-* **증거 범위 제한 (Evidence Scope Limit)**: Gate 5(시각/상태 검증)는 실제 앱 화면과 핵심 상태 전이에 한정된다. 에뮬레이터/기기 환경 불안정으로 인한 계측 실패는 BLOCKED로 정직하게 기록하며, PASS 위장을 금지한다.
+* **차단/비차단 분리 (Proportionality Rule)**: REJECTED 사유는 사용자가 실제로 체감하는 차단 결함에만 국한된다:
+  - **차단(REJECTED 가능)**: 빌드/컴파일 실패, 앱/런타임 크래시, 핵심 기능 미동작·클릭 불가·화면 잘림, 사용자 요청 미구현, Mock/Stub/TODO 껍데기·표절, 사용자 체감에 직결되는 도달 불가/오작동 경로
+  - **비차단([차기 백로그]로만 기록, REJECTED 불가)**: 증거 문서 포맷 불일치, 게이트 JSON 내용 불일치, APK 해시 재현성, 캡처 타임스탬프 신선도 등 **메타 증거 인프라**, 리팩토링 권장, 코드 스타일, 미사용 토큰
+* **정직성 게이트 (Honesty Gate · 상시 엄격)**: 위 비차단 면제는 **거짓 주장**에는 적용되지 않는다. 실행하지 않은 테스트의 통과 기재, 상태를 표현하지 않는 캡처의 근거 제출, 재현 불가 수치의 재현 주장 등은 즉시 REJECTED 대상이다. 계측이 불가하면 `BLOCKED`로 정직하게 기록하고 `PASS` 위장을 금지한다.
+* **증거 범위 제한 (Evidence Scope Limit)**: Gate 5(시각/상태 검증)는 실제 앱 화면과 핵심 상태 전이에 한정된다.
+* **진척 기반 수렴 (Progress-based Convergence)**: QA는 반려 시 `[BLOCKING_DEFECTS: N]`(사용자 체감 차단 결함 수) 마커를 표기한다. 시스템은 차단 결함 수가 2회 연속 감소하지 않으면 라운드 상한 전에 조기 에스컬레이션하고, 잔존 항목이 비차단뿐이면(`[BLOCKING_DEFECTS: 0]`) 백로그로 이관하고 승인으로 수렴한다.
 * **라운드 상한 (Round Cap)**: 기본 `PAIR_MAX_ROUNDS=7`, `QA_MAX_ROUNDS=7`. 7라운드 내 수렴하지 못하면 Commander가 사용자에게 현황 보고 후 범위를 축소하거나 사용자 개입을 요청한다.

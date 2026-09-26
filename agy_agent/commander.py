@@ -2048,12 +2048,14 @@ class Commander:
                 "when_acceptance": [
                     "컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
                     "사용자 피드백 지시사항 디스크 소스코드 상에 실체 구현 완료 (스텁/가짜 목업 엄격 배제)",
-                    "⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
+                    "⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득",
+                    "비차단 항목(코드 스타일·문서/증거 포맷·해시/타임스탬프 신선도)은 반려 사유가 아니며 차기 백로그로 이관"
                 ],
                 "acceptance_criteria": [
                     "컴파일/빌드 성공 및 정적 분석(Lint/Type) 에러 0건",
                     "사용자 피드백 지시사항 디스크 소스코드 상에 실체 구현 완료 (스텁/가짜 목업 엄격 배제)",
-                    "⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
+                    "⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득",
+                    "비차단 항목(코드 스타일·문서/증거 포맷·해시/타임스탬프 신선도)은 반려 사유가 아니며 차기 백로그로 이관"
                 ],
                 "quality_contracts": [
                     {
@@ -2483,6 +2485,7 @@ class Commander:
             acceptance_criteria.append("장바구니 담기 및 상태 업데이트 인터랙션 정상 작동")
 
         acceptance_criteria.append("⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득")
+        acceptance_criteria.append("비차단 항목(코드 스타일·문서/증거 포맷·해시/타임스탬프 신선도)은 반려 사유가 아니며 차기 백로그로 이관")
 
         quality_contracts: List[Dict[str, Any]] = []
         if has_main_dash_req or any(k in p_lower for k in ["버튼", "터치"]):
@@ -3164,7 +3167,8 @@ class Commander:
                 f"2. {milestone_title} 명시된 기능 스펙 디스크 소스코드 상에 실체 구현 완료 (스텁/TODO/가짜 목업 엄격 배제)",
                 "3. 엣지 케이스 및 예외 처리 방어 (비정상 입력/대용량 데이터/I/O 실패 복원력)",
                 "4. 콘솔 오류 및 런타임 크래시 0건 (실사용 반응성 및 60fps 무결점 작동)",
-                "5. ⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득"
+                "5. ⚖️ Auditor(감사관) 최종 전수 검증 통과 (PASS) 획득",
+                "6. 비차단 항목(코드 스타일·문서/증거 포맷·해시/타임스탬프 신선도)은 반려 사유가 아니며 차기 백로그로 이관"
             ]
 
         if not plan_qcs:
