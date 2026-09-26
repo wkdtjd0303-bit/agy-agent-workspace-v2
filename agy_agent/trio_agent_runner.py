@@ -34,6 +34,10 @@ from convergence_policy import (
     build_blocking_contract_instruction,
     parse_blocking_defect_count,
 )
+from discord_screenshot_gallery import (
+    collect_candidate_screenshots,
+    send_screenshot_gallery,
+)
 
 logger = logging.getLogger("TrioAgentRunner")
 
@@ -1634,6 +1638,9 @@ class TrioAgentRunner:
 
                     clean_task_desc = prompt
 
+                    # 🖼️ 시각 증거 갤러리 후보 (이번 라운드에 디스코드로 공유할 실제 화면 스크린샷)
+                    _gallery_candidates: List[str] = []
+
                     # ---------------------------------------------------------
                     # 🎨 Visual Craft Loop (!mode 3/3+ 무인 자율 전용 시각 완성도 폐루프)
                     # 코드 작성 → 프레임버퍼/계층 실측 → 디자인 계약 위반 적발 → QA/Coder 환류
@@ -1663,6 +1670,12 @@ class TrioAgentRunner:
                                         timeout=_vcl_timeout() + 30.0,
                                     )
                                     visual_craft_block = _VCL.format_prompt_block(visual_craft_report)
+                                    try:
+                                        _gallery_candidates.extend(
+                                            getattr(visual_craft_report, "screenshots", []) or []
+                                        )
+                                    except Exception:
+                                        pass
                                     if visual_craft_report.verdict == "FAIL":
                                         logger.warning(
                                             f"TrioAgentRunner: Visual Craft Loop FAIL (round {round_num}, "
@@ -1685,6 +1698,8 @@ class TrioAgentRunner:
                         qa_vis_res = await VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa(effective_ws)
                         if qa_vis_res and qa_vis_res.get("success"):
                             shot_path = str(qa_vis_res.get('screenshot_path', ''))
+                            if shot_path and os.path.isfile(shot_path):
+                                _gallery_candidates.append(shot_path)
                             if effective_ws and shot_path.startswith(effective_ws):
                                 shot_disp = f"./{os.path.relpath(shot_path, effective_ws)}"
                             else:
@@ -1734,6 +1749,37 @@ class TrioAgentRunner:
                                 )
                     except Exception as _vag_err:
                         logger.debug(f"Visual Asset Gate check notice: {_vag_err}")
+
+                    # ---------------------------------------------------------
+                    # 🖼️ 시각 증거 스크린샷 디스코드 공유 (!mode 3/3+ 전용)
+                    # VCL/비전 검사가 사용한 실제 렌더링 화면을 사용자도 직접 볼 수 있게 이미지로 전송한다.
+                    # (무결성 검증 통과분만, 사용자 레퍼런스 이미지 제외, 라운드 간 중복 전송 방지)
+                    # ---------------------------------------------------------
+                    if getattr(session, "mode", "") in ("mode3", "mode3_plus") and not is_non_coding:
+                        try:
+                            _sent_hashes = getattr(session, "_vcl_gallery_sent_hashes", None)
+                            if _sent_hashes is None:
+                                _sent_hashes = set()
+                                session._vcl_gallery_sent_hashes = _sent_hashes
+                            _gallery_cands = collect_candidate_screenshots(
+                                effective_ws, extra=_gallery_candidates
+                            )
+                            _sent_n = await send_screenshot_gallery(
+                                main_channel,
+                                _gallery_cands,
+                                excluded_hashes=getattr(session, "user_reference_hashes_set", set()),
+                                excluded_dhashes=getattr(session, "user_reference_dhashes_set", set()),
+                                already_sent=_sent_hashes,
+                                max_files=4,
+                                title=f"🎨 [라운드 {round_num}] 시각 증거 스크린샷",
+                            )
+                            if _sent_n:
+                                logger.info(
+                                    f"TrioAgentRunner: shared {_sent_n} screenshot(s) to Discord "
+                                    f"(round {round_num})"
+                                )
+                        except Exception as _gallery_err:
+                            logger.debug(f"Screenshot gallery skipped: {_gallery_err}")
 
                     arb_qa1_guidance = ""
                     if last_arbitration_directive:
