@@ -36,6 +36,7 @@ from convergence_policy import (
 )
 from discord_screenshot_gallery import (
     collect_candidate_screenshots,
+    count_stale_screenshots,
     send_screenshot_gallery,
 )
 
@@ -1043,6 +1044,9 @@ class TrioAgentRunner:
                 visual_craft_report = None
                 visual_craft_block = ""
                 visual_craft_domain = ""
+                # 🕒 라운드 경계 시각: REJECTED 후 재작업 라운드에서 "이전 라운드 스크린샷 재사용"을
+                #    막기 위해, 이 시각 이후에 생성된 캡처만 이번 라운드 시각 증거로 인정한다.
+                _round_start_ts = time.time()
                 # Immediate cancellation check
                 if getattr(session, "is_stopped", False) or not getattr(session, "is_busy", True):
                     logger.info(f"🛑 [TrioAgentRunner] Pipeline stopped by user before starting Round {round_num}.")
@@ -1666,6 +1670,7 @@ class TrioAgentRunner:
                                             domain=visual_craft_domain,
                                             round_index=round_num,
                                             app_name=_vapp_name,
+                                            session_start_time=_round_start_ts,
                                         ),
                                         timeout=_vcl_timeout() + 30.0,
                                     )
@@ -1695,7 +1700,9 @@ class TrioAgentRunner:
                     qa_vision_block = ""
                     try:
                         from vision_attachment_analyzer import VisionAttachmentAnalyzer
-                        qa_vis_res = await VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa(effective_ws)
+                        qa_vis_res = await VisionAttachmentAnalyzer.inspect_workspace_screenshots_for_qa(
+                            effective_ws, min_mtime=_round_start_ts
+                        )
                         if qa_vis_res and qa_vis_res.get("success"):
                             shot_path = str(qa_vis_res.get('screenshot_path', ''))
                             if shot_path and os.path.isfile(shot_path):
@@ -1762,7 +1769,7 @@ class TrioAgentRunner:
                                 _sent_hashes = set()
                                 session._vcl_gallery_sent_hashes = _sent_hashes
                             _gallery_cands = collect_candidate_screenshots(
-                                effective_ws, extra=_gallery_candidates
+                                effective_ws, extra=_gallery_candidates, min_mtime=_round_start_ts
                             )
                             _sent_n = await send_screenshot_gallery(
                                 main_channel,
@@ -1772,12 +1779,23 @@ class TrioAgentRunner:
                                 already_sent=_sent_hashes,
                                 max_files=4,
                                 title=f"🎨 [라운드 {round_num}] 시각 증거 스크린샷",
+                                min_mtime=_round_start_ts,
                             )
                             if _sent_n:
                                 logger.info(
                                     f"TrioAgentRunner: shared {_sent_n} screenshot(s) to Discord "
                                     f"(round {round_num})"
                                 )
+                            else:
+                                # 이번 라운드 신규 캡처가 없는데 과거 스크린샷이 남아 있는 경우:
+                                # 이전 화면을 현재 증거로 재사용하지 않도록 경고만 남긴다(전송 생략).
+                                _stale_n = count_stale_screenshots(effective_ws, _round_start_ts)
+                                if _stale_n:
+                                    await send_transit_notice(
+                                        f"⚠️ **[시각 증거 신선도 경고]** 라운드 {round_num}: "
+                                        f"이번 라운드 신규 캡처 0장, 이전 스크린샷 {_stale_n}장 감지 — "
+                                        f"이전 화면을 현재 증거로 재사용하지 않도록 공유를 생략했습니다."
+                                    )
                         except Exception as _gallery_err:
                             logger.debug(f"Screenshot gallery skipped: {_gallery_err}")
 

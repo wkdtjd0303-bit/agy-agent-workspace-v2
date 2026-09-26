@@ -60,16 +60,29 @@ def collect_candidate_screenshots(
     workspace: str,
     extra: Optional[Iterable[str]] = None,
     max_scan: int = 32,
+    min_mtime: Optional[float] = None,
 ) -> List[str]:
     """워크스페이스의 대표 스크린샷 디렉터리 + 명시적 후보(extra)를 최신순으로 모은다.
 
+    ``min_mtime`` 이 주어지면 **그 시각 이후에 생성된 스크린샷만** 모은다. 이는 REJECTED 후
+    재작업 라운드에서 "이전 라운드 스크린샷을 이번 라운드 것처럼 재사용"하는 문제를 원천 차단한다.
+
     무결성/중복 판정은 ``select_gallery_screenshots`` 가 담당하고, 여기서는 경로만 모은다.
     """
+
+    def _fresh(path: str) -> bool:
+        if min_mtime is None:
+            return True
+        try:
+            return os.path.getmtime(path) >= (min_mtime - 1.0)
+        except Exception:
+            return False
+
     candidates: List[str] = []
 
     for p in (extra or []):
         try:
-            if p and os.path.isfile(p):
+            if p and os.path.isfile(p) and _fresh(p):
                 candidates.append(os.path.abspath(p))
         except Exception:
             continue
@@ -89,6 +102,8 @@ def collect_candidate_screenshots(
                     fpath = os.path.abspath(os.path.join(cdir, fname))
                     segs = set(os.path.normpath(fpath).split(os.sep))
                     if segs.intersection(_EXCLUDED_DIR_SEGMENTS):
+                        continue
+                    if not _fresh(fpath):
                         continue
                     candidates.append(fpath)
             except Exception:
@@ -122,10 +137,12 @@ def select_gallery_screenshots(
     min_bytes: int = 500,
     max_bytes: int = DEFAULT_MAX_BYTES,
     validate_image: bool = True,
+    min_mtime: Optional[float] = None,
 ) -> List[str]:
     """디스코드로 전송해도 안전한 스크린샷만 골라 최신순으로 반환한다.
 
-    제외 기준: 미존재 / 너무 작음 / 8MB 초과 / 이미 전송됨 / 사용자 레퍼런스 이미지 /
+    제외 기준: 미존재 / ``min_mtime`` 이전 생성(이전 라운드 재사용) / 너무 작음 /
+    8MB 초과 / 이미 전송됨 / 사용자 레퍼런스 이미지 /
     (validate_image=True 시) 빈·검은 화면·저해상도.
     """
     excluded_hash_set = {h for h in (excluded_hashes or set()) if h}
@@ -148,6 +165,9 @@ def select_gallery_screenshots(
             break
         try:
             if not path or not os.path.isfile(path):
+                continue
+            if min_mtime is not None and os.path.getmtime(path) < (min_mtime - 1.0):
+                # 이전 라운드에서 생성된 스크린샷 → 이번 라운드 증거로 재사용 금지
                 continue
             size = os.path.getsize(path)
             if size < min_bytes or size > max_bytes:
@@ -182,6 +202,22 @@ def select_gallery_screenshots(
     return selected
 
 
+def count_stale_screenshots(workspace: str, min_mtime: float, max_scan: int = 64) -> int:
+    """워크스페이스에 ``min_mtime`` 이전에 생성된(즉 이번 라운드 것이 아닌) 스크린샷 수를 센다.
+
+    "이번 라운드 신규 캡처 0장 + 이전 스크린샷 N장" 상황을 감지하여, 증거 재사용 경고를
+    띄우기 위한 신선도 진단에 사용한다.
+    """
+    stale = 0
+    for p in collect_candidate_screenshots(workspace, max_scan=max_scan):
+        try:
+            if os.path.getmtime(p) < (min_mtime - 1.0):
+                stale += 1
+        except Exception:
+            continue
+    return stale
+
+
 def _friendly_filename(path: str) -> str:
     return os.path.basename(path) or "screenshot.png"
 
@@ -196,10 +232,12 @@ async def send_screenshot_gallery(
     max_files: int = 4,
     title: str = "🎨 시각 증거 스크린샷",
     min_bytes: int = 500,
+    min_mtime: Optional[float] = None,
 ) -> int:
     """검증을 통과한 스크린샷을 디스코드 채널에 이미지로 전송하고 전송 개수를 반환한다.
 
     ``already_sent`` 를 넘기면 전송한 파일의 해시로 갱신하여 라운드 간 재전송을 막는다.
+    ``min_mtime``(라운드 시작 시각)을 넘기면 이전 라운드 스크린샷은 재사용/전송하지 않는다.
     """
     paths = select_gallery_screenshots(
         candidates,
@@ -208,6 +246,7 @@ async def send_screenshot_gallery(
         already_sent=already_sent,
         max_files=max_files,
         min_bytes=min_bytes,
+        min_mtime=min_mtime,
     )
     if not paths:
         return 0
