@@ -64,6 +64,16 @@ class Milestone5W1HPlan:
     quality_contracts: List[Dict[str, Any]] = field(default_factory=list) # 기계적 검증용 원자적 QC 계약 목록
     delta_analysis: str = ""      # [Closed-loop Delta] 직전 턴 대비 상태 격차 및 병목 분석
     thinking_process: str = ""    # [4-Stage Structured Thinking] 폐루프 제어 4단계 추론 과정
+    coverage_matrix: List[Dict[str, Any]] = field(default_factory=list)  # 사용자 요청 → 태스크 1:1 반영 매트릭스
+    intent_coverage: str = ""     # "5/5" 형태의 요구사항 커버리지 요약
+
+    def coverage_summary(self) -> str:
+        """Human-readable 'covered/total' summary of the intent coverage contract."""
+        if not self.coverage_matrix:
+            return ""
+        total = len(self.coverage_matrix)
+        covered = sum(1 for m in self.coverage_matrix if m.get("covered"))
+        return f"{covered}/{total}"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -152,6 +162,20 @@ class Milestone5W1HPlan:
             when_text
         ]
 
+        if self.coverage_matrix:
+            cov_total = len(self.coverage_matrix)
+            cov_covered = sum(1 for m in self.coverage_matrix if m.get("covered"))
+            cov_lines = []
+            for m in self.coverage_matrix[:6]:
+                mark = "✅" if m.get("covered") else "⚠️"
+                label = str(m.get("request", ""))[:42]
+                cov_lines.append(f"{mark} {label}")
+            parts.extend([
+                "",
+                f"🎯 **사용자 요청 반영 매트릭스** ({cov_covered}/{cov_total} 반영)",
+                "\n".join(cov_lines),
+            ])
+
         if self.thinking_process:
             parts.extend([
                 "",
@@ -206,6 +230,21 @@ class Milestone5W1HPlan:
                 + "\n".join(qc_lines) + "\n"
             )
 
+        coverage_section = ""
+        if self.coverage_matrix:
+            cov_total = len(self.coverage_matrix)
+            cov_covered = sum(1 for m in self.coverage_matrix if m.get("covered"))
+            cov_lines = [
+                f"  - {'[반영]' if m.get('covered') else '[미반영-필수]'} {m.get('request', '')}"
+                for m in self.coverage_matrix[:8]
+            ]
+            coverage_section = (
+                f"\n**[🎯 사용자 요청 커버리지 계약 ({cov_covered}/{cov_total} 반영)]**:\n"
+                f"사용자가 직접 제기한 요청을 아래 태스크에 1:1로 대응시켜 구현하십시오. "
+                f"'[미반영-필수]' 항목은 반드시 이번 마일스톤에 포함되어야 합니다.\n"
+                + "\n".join(cov_lines) + "\n"
+            )
+
         directive = (
             f"🎯 [Commander 사령관 5W1H 개발 지침 — 마일스톤 {self.version}: {self.title}]\n\n"
             f"**[1. 왜 (Why - 구현 목적 & 전략 가치)]**:\n"
@@ -219,6 +258,7 @@ class Milestone5W1HPlan:
             f"**[5. 완료기준 (When & Acceptance - 기계적 인수 기준)]**:\n"
             f"{when_str}\n"
             f"{qc_section}"
+            f"{coverage_section}"
             f"{memory_section}\n"
             f"**[사령관 3대 핵심 훈령 (Commander Directives)]:**\n"
             f"1. **컨텍스트 청정화 및 명령 순응**: 이전 회차의 기억과 잡음을 완전히 비운 청정 상태에서, 이번 5W1H 마일스톤 목표에만 100% 집중하여 구현하십시오.\n"
@@ -260,6 +300,13 @@ class Milestone5W1HPlan:
                 "2. 여백 & 반응형: 8px 그리드(8/16/24/32px) 규칙, 적절한 여백(Whitespace), 카드형 컴포넌트와 부드러운 그림자(box-shadow)를 적용하십시오.\n"
                 "3. 타이포그래피 계층: 큰 제목(bold), 중간 소제목(semi-bold), 본문(regular), 캡션의 크기와 굵기를 뚜렷이 구분하십시오.\n"
                 "4. 인터랙션 디테일: 버튼 호버/클릭 효과, 부드러운 전환(transition), 로딩 스피너, 에러/성공 토스트, 데이터가 없을 때의 빈 화면(Empty State)을 구현하십시오."
+                "\n\n🎨 **[시각 완성도 계약 (Visual Craft Contract — GUI 필수)]**:\n"
+                f"• 수치 토큰 계약: `{os.path.join('reports', 'gate2', 'design_contract.json')}` (여백 4/8pt 그리드 · 타이포 3단계 · Primary 1종 + Neutral 계조 · 최소 터치 타깃)\n"
+                "• **작업 도구 우선**: 앱/웹의 첫 화면은 마케팅 랜딩페이지가 아니라 작업 공간입니다. 상단 히어로/홍보 배너 금지, 1차 콘텐츠(목록/작업 영역)를 첫 뷰포트 상단에 배치하십시오.\n"
+                "• **액션 단일화**: 동일 목적 버튼(열기/시작/추가)을 서로 다른 위계로 중복 배치하지 말고, FAB 또는 상단바 1개 액션으로 통일하십시오.\n"
+                "• **카드 중첩 금지**: 큰 카드 안에 카드 타일을 3중 이상 중첩하지 말고, 플랫 배경 + 타이포 위계 + 구분선 + 여백으로 구획하십시오.\n"
+                "• **엄지 인체공학**: 주요 액션은 화면 하단 1/3(Thumb Zone)/하단바/FAB에 두고, 터치 타깃을 최소 규격 이상 확보하십시오.\n"
+                "• 무인 자율 모드(!mode 3/3+)에서는 `reports/gate5/visual_craft_review.json`(verdict=PASS)이 Gate 5 통과 조건입니다."
             )
 
         if user_prompt and not user_prompt.strip().startswith("[📍 Roadmap Ladder") and not user_prompt.strip().startswith("[Zero-Production-Diff]"):
@@ -2012,16 +2059,23 @@ class Commander:
                     {
                         "id": "QC-U-01",
                         "category": "ux",
-                        "description": "사용자 피드백 인터랙션 정상화",
+                        "description": "사용자 피드백 인터랙션 정상화 — 사용자가 지적한 UI 요소가 정상 동작",
                         "level": 1,
-                        "verification_rule": "사용자가 요구한 컴포넌트의 클릭 및 반응 인터랙션 무결점 동작"
+                        "verification_rule": (
+                            "사용자가 요구한 컴포넌트의 클릭 및 반응 인터랙션 무결점 동작. "
+                            "단, 증거 문서 포맷·타임스탬프·파일 해시 등 메타 인프라 항목은 검증 대상 제외"
+                        )
                     },
                     {
                         "id": "QC-A-01",
                         "category": "architecture",
                         "description": "피드백 수정 코드 아키텍처 정합성 및 빌드 무결점",
                         "level": 1,
-                        "verification_rule": "빌드/컴파일 에러 0건 및 기존 기능 회귀 없는 아키텍처 상태 분리 준수"
+                        "verification_rule": (
+                            "빌드/컴파일 에러 0건 및 기존 기능 회귀 없는 아키텍처 상태 분리 준수. "
+                            "QA는 빌드 성공 여부와 핵심 기능 동작만 확인하고, "
+                            "증거 시스템·게이트 문서·APK 해시 일관성 등은 차기 라운드 권고로 처리한다"
+                        )
                     }
                 ],
                 "visual_asset_spec": "시각 에셋 불필요 (기존 디자인 토큰 및 코드 기반 UI 컴포넌트 정밀 수정)",
@@ -2709,6 +2763,160 @@ class Commander:
         )
         return plan
 
+    # ──────────────────────────────────────────────
+    # 🎯 Intent Coverage Contract (요구사항 커버리지 계약)
+    #   Commander가 사용자의 개별 요청 원장(Requirement Ledger)을 만들고,
+    #   산출된 마일스톤이 각 요청을 1:1로 반영했는지 기계적으로 감사한다.
+    #   반영률이 기준 미만이면 off-target(허공 치기)으로 판정하여 충실한
+    #   피드백 분해 계획으로 강제 교체한다.
+    # ──────────────────────────────────────────────
+    _COVERAGE_MIN_RATIO = 0.6  # 이 비율 미만이면 off-target으로 간주
+
+    @classmethod
+    def build_requirement_ledger(cls, user_prompt: str) -> List[str]:
+        """Returns the user's distinct, actionable request units (요구사항 원장)."""
+        try:
+            return FeedbackIntentClassifier.extract_requirement_units(user_prompt)
+        except Exception as e:
+            logger.debug(f"[Commander] requirement ledger extraction note: {e}")
+            return []
+
+    @classmethod
+    def audit_intent_coverage(
+        cls,
+        user_prompt: str,
+        plan_title: str,
+        plan_tasks: List[str],
+    ) -> tuple:
+        """Audits how faithfully a milestone covers the user's request ledger.
+
+        Returns (matrix, uncovered_units) where matrix is a list of
+        {"request": str, "covered": bool} entries. Coverage uses substring-aware
+        token matching so Korean agglutination does not create false negatives.
+        """
+        units = cls.build_requirement_ledger(user_prompt)
+        if not units:
+            return [], []
+        plan_text = f"{plan_title or ''} {' '.join(plan_tasks or [])}"
+        matrix: List[Dict[str, Any]] = []
+        uncovered: List[str] = []
+        for unit in units:
+            covered = FeedbackIntentClassifier.is_unit_covered(unit, plan_text)
+            label = unit if len(unit) <= 40 else unit[:38].rstrip() + "…"
+            matrix.append({"request": label, "covered": bool(covered)})
+            if not covered:
+                uncovered.append(unit)
+        return matrix, uncovered
+
+    @classmethod
+    def apply_intent_coverage(
+        cls,
+        plan: "Milestone5W1HPlan",
+        user_prompt: str,
+        workspace: Optional[str] = None,
+        reality: Optional[CodebaseReality] = None,
+        macro_memory_text: str = "",
+        allow_override: bool = False,
+        project_initialized: Optional[bool] = None,
+    ) -> "Milestone5W1HPlan":
+        """Attaches the coverage contract to a plan and, when necessary, repairs it.
+
+        Behavior:
+        1. Only audits actionable user feedback on an initialized project.
+        2. If the plan does NOT cover the user's requests (coverage < 60%) and
+           `allow_override` is set, the off-target plan is replaced with the
+           faithful feedback decomposition (허공 치기 원천 차단).
+        3. Otherwise, missing request units are force-merged into `what` so no
+           explicit user request is silently dropped.
+        4. Records the coverage matrix + summary on the plan for Discord/directive.
+        """
+        if plan is None or not user_prompt:
+            return plan
+
+        # 신규 프로젝트 최초 발주(project_initialized=False)는 요구사항 피드백이 아니므로 감사 제외.
+        if project_initialized is False:
+            return plan
+
+        clean = FeedbackIntentClassifier.clean_prompt(user_prompt)
+        if not clean:
+            return plan
+
+        try:
+            verdict = FeedbackIntentClassifier.classify(clean, project_initialized=True)
+        except Exception:
+            return plan
+        if not verdict.is_feedback_directive or verdict.is_new_goal:
+            return plan
+
+        # Already-delivered feedback must not be re-issued (infinite loop 방어).
+        try:
+            if cls._is_user_feedback_delivered(
+                clean, reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
+            ):
+                return plan
+        except Exception:
+            pass
+
+        matrix, uncovered = cls.audit_intent_coverage(clean, plan.title, plan.what)
+        if not matrix:
+            return plan
+
+        total = len(matrix)
+        covered = total - len(uncovered)
+        coverage_ratio = covered / total if total else 1.0
+        is_fb_plan = cls._is_feedback_plan(plan)
+
+        # [Authority Gate 불변 보존] 명시적으로 보존된 caller 마일스톤(비-피드백 플랜)은
+        # 요청 병합조차 하지 않고 그대로 둔다. (사령관/오케스트레이터의 권위 우선)
+        if not is_fb_plan and not allow_override:
+            return plan
+
+        if uncovered and not is_fb_plan and allow_override and coverage_ratio < cls._COVERAGE_MIN_RATIO:
+            # Off-target plan (e.g. an unrelated ROADMAP Phase milestone) → replace.
+            decomp = cls.decompose_user_feedback(clean, workspace=workspace)
+            logger.warning(
+                f"[Commander] 🎯 커버리지 계약 위반: '{plan.title}'가 사용자 요청 반영률 "
+                f"{covered}/{total}({coverage_ratio*100:.0f}%)로 off-target 판정 → 피드백 계획으로 강제 교체."
+            )
+            plan.title = decomp["title"]
+            plan.what = list(decomp["tasks"])
+            plan.why = decomp["why"]
+            plan.how = decomp["how"]
+            plan.who_where = decomp["who_where"]
+            if decomp.get("when_acceptance"):
+                plan.when_acceptance = list(decomp["when_acceptance"])
+            plan.visual_asset_spec = decomp["visual_asset_spec"]
+            plan.visual_approved = decomp["visual_approved"]
+            if decomp.get("quality_contracts"):
+                plan.quality_contracts = list(decomp["quality_contracts"])
+            plan.source = "feedback"
+            matrix, uncovered = cls.audit_intent_coverage(clean, plan.title, plan.what)
+            total = len(matrix)
+            covered = total - len(uncovered)
+        elif uncovered:
+            # Plan is on-target but partial → force-merge the missing requests.
+            for req in uncovered:
+                merge_line = f"[사용자 요청 필수 반영] {req[:80]}"
+                if merge_line not in plan.what:
+                    plan.what.append(merge_line)
+            matrix, uncovered = cls.audit_intent_coverage(clean, plan.title, plan.what)
+            total = len(matrix)
+            covered = total - len(uncovered)
+
+        plan.coverage_matrix = matrix
+        plan.intent_coverage = f"{covered}/{total}"
+
+        coverage_ratio = covered / total if total else 1.0
+        note = (
+            f"[🎯 요구사항 커버리지 계약] 사용자 요청 {total}건 중 {covered}건을 이번 마일스톤에 1:1 반영 "
+            f"({coverage_ratio * 100:.0f}%)."
+        )
+        if uncovered:
+            note += f" 미반영 {len(uncovered)}건을 필수 태스크로 병합했습니다."
+        if "[🎯 요구사항 커버리지 계약]" not in (plan.thinking_process or ""):
+            plan.thinking_process = (plan.thinking_process + "\n" + note).strip()
+        return plan
+
     @classmethod
     def _build_heuristic_5w1h_plan(
         cls,
@@ -2983,6 +3191,16 @@ class Commander:
             delta_analysis=delta_analysis,
             thinking_process=thinking_process
         )
+        # 🎯 요구사항 커버리지 계약: 피드백 플랜이 사용자 요청 원장을 모두 담았는지 감사/보강.
+        #    (authority gate가 명시적으로 보존한 caller 마일스톤은 allow_override=False로 불변 유지)
+        plan = cls.apply_intent_coverage(
+            plan,
+            user_prompt=clean_user_p or user_prompt,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+            allow_override=False,
+            project_initialized=project_initialized,
+        )
         plan.directive_for_coder = plan.build_directive_for_coder(
             macro_memory_text=macro_memory_text,
             user_prompt=user_prompt
@@ -3137,6 +3355,15 @@ class Commander:
                             source="ai",
                             quality_contracts=parsed_qcs
                         )
+                        # 🎯 커버리지 계약: AI가 생성한 플랜도 사용자 요청을 1:1로 담았는지 감사.
+                        ai_plan = cls.apply_intent_coverage(
+                            ai_plan,
+                            user_prompt=user_prompt,
+                            workspace=workspace,
+                            macro_memory_text=macro_memory_text,
+                            allow_override=False,
+                            project_initialized=project_initialized,
+                        )
                         ai_plan.directive_for_coder = ai_plan.build_directive_for_coder(
                             macro_memory_text=macro_memory_text,
                             user_prompt=user_prompt
@@ -3145,6 +3372,18 @@ class Commander:
         except Exception as e:
             logger.debug(f"Commander 5W1H AI planning note (fallback to heuristic): {e}")
 
+        heuristic_plan = cls.apply_intent_coverage(
+            heuristic_plan,
+            user_prompt=user_prompt,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+            allow_override=False,
+            project_initialized=project_initialized,
+        )
+        heuristic_plan.directive_for_coder = heuristic_plan.build_directive_for_coder(
+            macro_memory_text=macro_memory_text,
+            user_prompt=user_prompt
+        )
         return heuristic_plan
 
     @classmethod
@@ -4287,6 +4526,12 @@ class Commander:
         )
         if has_root_feedback and not feedback_delivered:
             plan.source = "feedback"
+            # [명확성 보존] 도메인 도달 템플릿의 일반적인 why/how가 사용자 피드백의
+            # 구체적 개선 의도를 덮어쓰지 않도록, 충실한 피드백 서술로 재고정한다.
+            plan.why = why
+            plan.how = how
+            plan.visual_asset_spec = visual_asset_spec
+            plan.visual_approved = visual_approved
         return plan
 
     @classmethod
@@ -4569,6 +4814,17 @@ class Commander:
         except Exception as e:
             logger.info(f"Adaptive LLM planning notice (using domain heuristic): {e}")
 
+        # 🎯 요구사항 커버리지 계약: 차기 마일스톤이 사용자 요청 원장을 벗어나지 않도록
+        #    최종 감사하고, off-target(허공 치기)이면 충실한 피드백 계획으로 강제 교체한다.
+        plan = cls.apply_intent_coverage(
+            plan,
+            user_prompt=root_user_goal,
+            workspace=workspace,
+            reality=reality,
+            macro_memory_text=macro_memory_text,
+            allow_override=feedback_locked,
+        )
+
         # Sync to ROADMAP.md (PRD는 실행 일기로만 기록되며 우선순위 소스가 아니다)
         cls._persist_adaptive_plan(workspace, plan)
         return plan
@@ -4639,6 +4895,16 @@ class Commander:
         depth_verdict = cls._evaluate_depth_governor(reality, dom, workspace)
         plan = cls._apply_depth_gate(
             plan, depth_verdict, reality, dom, target_version, workspace, macro_memory_text
+        )
+
+        # 🎯 요구사항 커버리지 계약 (동기 경로): off-target 차기 기획 차단 및 요청 1:1 반영 감사.
+        plan = cls.apply_intent_coverage(
+            plan,
+            user_prompt=root_user_goal,
+            workspace=workspace,
+            reality=reality,
+            macro_memory_text=macro_memory_text,
+            allow_override=feedback_locked,
         )
 
         cls._persist_adaptive_plan(workspace, plan)

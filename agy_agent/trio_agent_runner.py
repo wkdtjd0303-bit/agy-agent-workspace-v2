@@ -968,6 +968,23 @@ class TrioAgentRunner:
         feedback_for_coder = ""
         clean_task_desc = prompt
 
+        # 🎨 Visual Craft Loop 핸들 (!mode 3/3+ 무인 자율 전용 · 실패 시 파이프라인은 기존과 동일하게 동작)
+        try:
+            from visual_craft_loop import (
+                VisualCraftLoop as _VCL,
+                craft_vision_timeout as _vcl_timeout,
+                craft_max_rounds as _vcl_max_rounds,
+            )
+        except Exception as _vcl_import_err:
+            logger.debug(f"Visual Craft Loop unavailable: {_vcl_import_err}")
+            _VCL = None
+
+            def _vcl_timeout() -> float:
+                return 150.0
+
+            def _vcl_max_rounds() -> int:
+                return 2
+
         try:
             import sys, importlib
             if "autonomy_guard" in sys.modules and os.environ.get("UNITTEST_RUNNING") != "1":
@@ -1000,9 +1017,16 @@ class TrioAgentRunner:
             last_arbitration_directive = ""
             squad_plan = None
             squad_qas = []
+            # 🎨 Visual Craft Loop (!mode 3/3+ 무인 자율 전용 시각 완성도 폐루프) 상태
+            visual_craft_block_count = 0
+            visual_craft_escalated = False
+            visual_craft_audit_count = 0
             for round_num in range(1, max_rounds + 1):
                 extended_qa_outputs.clear()
                 qa_vision_block = ""
+                visual_craft_report = None
+                visual_craft_block = ""
+                visual_craft_domain = ""
                 # Immediate cancellation check
                 if getattr(session, "is_stopped", False) or not getattr(session, "is_busy", True):
                     logger.info(f"🛑 [TrioAgentRunner] Pipeline stopped by user before starting Round {round_num}.")
@@ -1064,6 +1088,23 @@ class TrioAgentRunner:
                             )
                     else:
                         codebase_anchor_block = detect_codebase_anchor(session.workspace)
+                        # [🎨 예방 단계] !mode 3/3+ 무인 자율 개발에 한해 디자인 토큰 계약을 사전 주입한다.
+                        # (mode 1/2는 사용자가 직접 디자인을 디렉팅하므로 개입하지 않는다.)
+                        # (Commander 5W1H 지침에 이미 계약이 포함된 경우 중복 주입을 생략한다.)
+                        visual_craft_contract_block = ""
+                        if (
+                            _VCL is not None
+                            and getattr(session, "mode", "") in ("mode3", "mode3_plus")
+                            and "시각 완성도 계약" not in (prompt or "")
+                        ):
+                            try:
+                                _vc_plan = getattr(session, "_current_5w1h_plan", None)
+                                _vc_hint = getattr(_vc_plan, "domain", "") if _vc_plan else ""
+                                visual_craft_contract_block = _VCL.get_contract_prompt_block(
+                                    session.workspace or "", domain=_vc_hint
+                                )
+                            except Exception as _vcc_err:
+                                logger.debug(f"Visual craft contract injection skipped: {_vcc_err}")
                         coder_prompt = (
                             f"[역할: 초고속 자율 엔지니어 (Coder / {coder_display})]\n\n"
                             f"사용자가 다음과 같은 작업을 요청했습니다:\n"
@@ -1071,6 +1112,7 @@ class TrioAgentRunner:
                             f"{prompt}\n"
                             f"────────────────────────────────────────\n\n"
                             f"{codebase_anchor_block}"
+                            f"{visual_craft_contract_block}"
                             f"**[핵심 개발 지침]:**\n"
                             f"1. **🎯 사용자 질문 직접 답변 최우선**: 질문(점수/원인/의견 등)이 포함된 경우, 코드 작성 전에 명쾌한 분석과 답변을 본문 최상단에 먼저 제공하십시오.\n"
                             f"2. **가시적 실체 구현 & 꼼수 금지**: 주석/변수명/테스트 파일만 추가하는 눈속임 금지. 사용자가 앱을 켰을 때 즉시 체감하는 UI·로직을 실제 소스코드에 구현하십시오. 서브에이전트(`invoke_subagent`)를 호출하는 경우 서브에이전트가 코드를 파일에 완전히 반영할 때까지 반드시 대기하고 검증한 후 턴을 종료하십시오. 서브에이전트를 백그라운드에 방치한 채 조기 완료하는 행위는 엄격히 금지됩니다. Canvas/PIL 가짜 스크린샷, 레퍼런스 이미지 표절/외곽선 추출(Tracing)도 금지됩니다.\n"
@@ -1308,13 +1350,19 @@ class TrioAgentRunner:
                 round_deliverable_image_hashes = getattr(session, "round_deliverable_image_hashes", {})
                 prev_round_hashes = round_deliverable_image_hashes.get(round_num - 1) if round_num > 1 else None
 
-                diff_info = EvidenceValidator.get_git_diff_summary(effective_ws)
-                gates_info = EvidenceValidator.validate_all_gates(
+                # [🛡️ 이벤트 루프 차단 방지] validate_all_gates / verify_anti_mocking 내부에서
+                # PIL 이미지 해싱을 수행하므로 ThreadPool으로 오프로드합니다.
+                diff_info = await asyncio.to_thread(
+                    EvidenceValidator.get_git_diff_summary, effective_ws
+                )
+                gates_info = await asyncio.to_thread(
+                    EvidenceValidator.validate_all_gates,
                     effective_ws,
                     user_reference_images=user_ref_images,
                     previous_round_image_hashes=prev_round_hashes
                 )
-                is_anti_mock_clean, anti_mock_violations, _ = EvidenceValidator.verify_anti_mocking_and_authenticity(
+                is_anti_mock_clean, anti_mock_violations, _ = await asyncio.to_thread(
+                    EvidenceValidator.verify_anti_mocking_and_authenticity,
                     effective_ws,
                     prompt,
                     user_reference_images=user_ref_images,
@@ -1322,8 +1370,11 @@ class TrioAgentRunner:
                 )
                 gates_passed_str = "전체 통과 (PASS)" if (gates_info.get("all_passed") and is_anti_mock_clean) else "일부 게이트 점검 필요"
 
-                # Record current round deliverable image hashes for subsequent round comparisons
-                curr_round_hashes = EvidenceValidator.collect_workspace_image_hashes(effective_ws)
+                # [🛡️ 이벤트 루프 차단 방지] 이미지 해싱은 PIL 리사이즈/dhash 계산으로 CPU-intensive하므로
+                # ThreadPool 으로 오프로드하여 Discord 게이트웨이 하트비트 차단(>10초)을 방지합니다.
+                curr_round_hashes = await asyncio.to_thread(
+                    EvidenceValidator.collect_workspace_image_hashes, effective_ws
+                )
                 round_deliverable_image_hashes[round_num] = curr_round_hashes
                 session.round_deliverable_image_hashes = round_deliverable_image_hashes
 
@@ -1572,6 +1623,48 @@ class TrioAgentRunner:
                     clean_task_desc = prompt
 
                     # ---------------------------------------------------------
+                    # 🎨 Visual Craft Loop (!mode 3/3+ 무인 자율 전용 시각 완성도 폐루프)
+                    # 코드 작성 → 프레임버퍼/계층 실측 → 디자인 계약 위반 적발 → QA/Coder 환류
+                    # ---------------------------------------------------------
+                    if (
+                        _VCL is not None
+                        and getattr(session, "mode", "") in ("mode3", "mode3_plus")
+                        and not is_non_coding
+                        and visual_craft_audit_count < (_vcl_max_rounds() + 3)  # Vision 쿼터 보호 상한
+                    ):
+                        try:
+                            if _VCL.enabled():
+                                _vplan = getattr(session, "_current_5w1h_plan", None)
+                                _vapp_name = getattr(_vplan, "title", "") if _vplan else ""
+                                visual_craft_domain = _VCL.detect_domain(
+                                    effective_ws, hint=(getattr(_vplan, "domain", "") if _vplan else "")
+                                )
+                                if _VCL.is_visual_domain(visual_craft_domain):
+                                    visual_craft_audit_count += 1
+                                    visual_craft_report = await asyncio.wait_for(
+                                        _VCL.run_round(
+                                            workspace=effective_ws,
+                                            domain=visual_craft_domain,
+                                            round_index=round_num,
+                                            app_name=_vapp_name,
+                                        ),
+                                        timeout=_vcl_timeout() + 30.0,
+                                    )
+                                    visual_craft_block = _VCL.format_prompt_block(visual_craft_report)
+                                    if visual_craft_report.verdict == "FAIL":
+                                        logger.warning(
+                                            f"TrioAgentRunner: Visual Craft Loop FAIL (round {round_num}, "
+                                            f"blocking={len(visual_craft_report.blocking_findings)}, "
+                                            f"rules={visual_craft_report.failing_rule_ids})"
+                                        )
+                                        await send_transit_notice(
+                                            f"🎨 **[Visual Craft Loop]** 시각 완성도 감사 `FAIL` — "
+                                            f"치명 결함 {len(visual_craft_report.blocking_findings)}건 적발 (QA/Coder 환류)"
+                                        )
+                        except Exception as _vc_err:
+                            logger.debug(f"Visual craft audit skipped: {_vc_err}")
+
+                    # ---------------------------------------------------------
                     # Automated Visual QA & Screenshot Evidence Inspection
                     # ---------------------------------------------------------
                     qa_vision_block = ""
@@ -1683,20 +1776,14 @@ class TrioAgentRunner:
                     qa_prompt = (
                         f"[역할: {qa1_persona_badge} & 코드 리뷰어 + 소규모 직접 패치 권한 ({qa_display_name})]\n\n"
                         f"당신은 {qa1_persona_name} 전문 리뷰어입니다.\n"
-                        f"Coder의 사소한 실수나 잠재적 결함, 엣지 케이스도 절대 용납하지 않고 꼼꼼히 점검해야 합니다.\n\n"
+                        f"Coder의 결함과 버그를 꼼꼼히 점검하되, **실제 사용자가 체감하는 앱 품질**에 집중하십시오.\n\n"
                         f"**[💼 전문 역할(전공) 집중 검증 영역]**:\n"
                         f"{qa1_persona_focus}\n\n"
-                        f"**[🎯 수동적 승인봇(Rubber-Stamping) 전면 금지 및 주도적 설계 비평 헌법]**:\n"
-                        f"1. **'이것이 최선인가? 더 좋은 선택(Better Alternative)은 없는가?' 주도적 비평**:\n"
-                        f"   - Coder가 코드를 작성했다고 해서 단순히 '어 만들어 놨네. 잘했어 통과' 식으로 기계적 승인을 내리는 관성적 행위는 엄격히 금지됩니다.\n"
-                        f"   - QA는 단순 결함 검사관을 넘어, **자신의 직업(Persona: {qa1_persona_name}) 관점을 뚜렷이 드러내어 Coder가 미처 생각하지 못한 부분까지 설계할 수 있도록 리드하는 시니어 파트너**입니다.\n"
-                        f"2. **직업(Persona)별 맞춤형 심층 설계 견인 (모든 역할 공통 의무)**:\n"
-                        f"   - 🕵️ **기본값 (종합 품질 검증관 / General)**: '기본값'이라고 해서 결코 관대하게 넘어가지 마십시오. '이것이 최선의 선택인가?'를 엄격히 자문하고, 사용자 관점의 에러 메시지 명확성, 로딩/진행 피드백, 조작 동선(UX), Coder가 간과한 예외 처리 및 파라미터 유효성 맹점을 파고들어 프로덕션 완성도 대안을 제시하십시오.\n"
-                        f"   - 🎨 **디자이너 봇 (UI/UX Designer)**: 이목이 집중될 디자인인가? 폰트가 밋밋하거나 글자가 너무 작거나 크지는 않은가? (폰트 계층/자간/행간 심의) 단순 텍스트/여백으로 때우지 않고 **나노바나나(#nano-banana-image / NanoBanana Hub)** 이미지 에셋(아이콘, 배너, 일러스트, 버튼)을 생성하여 적용하면 훨씬 시각적 완성도가 높아지지 않는가? 미흡하다면 과감히 반려([STATUS: REJECTED])하고 구체적 비주얼/에셋 설계 스펙을 지시하십시오.\n"
-                        f"   - 🛡️ **보안 전문가 (Security & AppSec)**: '가장 안전한 최선의 방어 구조인가?' 공격자의 시각(Attacker Mindset)에서 비인가 접근, 권한 상승, 공격 표면을 심의하십시오. 쉘 명령어 인젝션, 경로 탈출(`../`), 토큰/민감정보 유출 취약점을 색출하고 안전한 토큰/샌드박싱 설계 대안을 제시하십시오.\n"
-                        f"   - 💥 **카오스 테스터 (Chaos & Resilience)**: '극한의 상황에서도 우아하게 복구(Graceful Degradation)되는 최선의 구조인가?' 비동기 경합(Race Condition), 타임아웃/지연, Empty/Null/음수/초대용량 기형 페이로드 등 Coder가 '설마' 하고 방치한 엣지 케이스를 격파하고 자가 치유/서킷 브레이커 설계를 강제하십시오.\n"
-                        f"   - ⚡ **성능 & SRE 엔지니어 (Performance & SRE)**: '2~3일간 대량 트래픽에도 리소스 고갈 없는 최선의 성능인가?' O(N^2) 루프, 블로킹 I/O를 배치/캐싱 구조로 최적화하고, 파일/소켓/메모리 누수를 색출하여 대규모 무인 가동 내구성을 확보하는 대안을 제시하십시오.\n"
-                        f"   - 🏛️ **수석 아키텍트 (Architect & PO Requirements)**: '1년 뒤에도 유연하게 확장 가능한 최선의 아키텍처인가?' 단일 책임(SRP), 모듈 간 결합도 완화, 클린 인터페이스 패턴을 제시하여 Coder의 스파게티/하드코딩 땜질을 원천 차단하고 구조적 품격을 견인하십시오.\n\n"
+                        f"**[🎯 검증 원칙 — 현실적이고 균형 잡힌 품질 판정]**:\n"
+                        f"1. **사용자가 체감하는 실제 문제에 집중**: 빌드 성공 여부, 핵심 기능 동작, 명백한 UI 결함(클릭 안 되는 버튼, 화면 잘림, 앱 크래시)을 최우선 검증하십시오.\n"
+                        f"2. **합리적 판정 기준**: 완벽주의적 검증보다 '사용자가 실제로 불편을 느끼는가?'를 기준으로 PASS/FAIL을 판단하십시오. 경미한 코드 스타일, 리팩토링 권장 사항, 문서/증거 파일 포맷은 차기 라운드 권고로 처리하고 REJECTED 사유로 삼지 마십시오.\n"
+                        f"3. **수렴 지향 (Convergence-Oriented)**: 라운드가 반복될수록 잔여 결함이 감소해야 합니다. 이전 라운드에서 이미 APPROVED된 항목을 재반려하거나, 새로운 완벽주의적 기준을 추가하지 마십시오.\n"
+                        f"4. **직접 패치 우선**: 1~5줄 이내 단순 버그(오타, 누락된 return, 소규모 로직 오류)는 직접 수정한 후 APPROVED로 종결하십시오.\n\n"
                         f"사용자가 다음과 같은 작업을 요청했고, Coder({coder_display}) 에이전트가 개발/보강 및 빌드를 완료했습니다.\n\n"
                         f"**[🚨 최우선 검증 대상 - 사용자 원본 요청 및 첨부 문서]:**\n"
                         f"────────────────────────────────────────\n"
@@ -1706,42 +1793,27 @@ class TrioAgentRunner:
                         + arb_qa1_guidance
                         + qc_prompt_block
                         + qa_vision_block
+                        + visual_craft_block
                         + visual_asset_gate_block
                         + f"{diff_summary_text}\n"
                         f"**[🚨 QA 도구 사용 및 검증 지침]**:\n"
-                        f"0. 🔒 **[지정 워크스페이스 엄격 격리 원칙]**: 반드시 현재 프로젝트 워크스페이스(`./{os.path.basename(session.workspace or 'project')}`) 내부의 파일만 검증하고 수정하십시오. 인접 프로젝트 폴더나 상위 디렉토리로 넘어가는 행위는 엄격히 금지됩니다.\n"
-                        f"1. **철저하고 객관적인 심층 전수 검증**: 변경된 모든 핵심 파일을 `view_file`, `grep_search` 도구로 충분히 정독하고, 누락된 엣지 케이스, 버그, 가짜 모킹(Mock/Stub), 표절 여부를 타협 없이 전수 검증하십시오.\n"
-                        f"2. **🆕 [소규모 직접 패치 권한 및 물리 검증 의무]**: 검증 중 명백한 단순 버그(오타, 누락된 return, 1~5줄 이내의 로직 오류)를 발견한 경우, `replace_file_content` 도구로 **직접 수정**할 수 있습니다.\n"
-                        f"   - ⚠️ **주의 (Write = Build & Test 강제)**: 만약 코드를 1줄이라도 직접 수정했다면, 눈으로만 승인하지 말고 반드시 `./gradlew assembleDebug` 또는 `npm run build` 등의 빌드 명령어를 `run_command`로 실행하여 **물리적으로 컴파일이 되는지 확인한 후** `[STATUS: APPROVED (QA Direct Patch)]`를 선언하십시오.\n"
-                        f"   - 단, 10줄 초과 구조 변경이나 새 기능 추가는 여전히 직접 패치 금지이며 Coder에게 REJECTED로 위임하십시오.\n"
-                        f"   - 빌드 설정(Gradle, CMake, package.json) 변경\n\n"
-                        f"**[검증 관점 & 심층 분석 강제]:**\n"
-                        f"0. **심층 물리 검증 강제 (Deep Physical Verification Mandate)**: 눈으로 대충 훑어보고 섣불리 승인(Rubber-stamping)하지 마십시오. `view_file`이나 `grep_search`로 Coder가 수정한 실제 파일들의 소스코드와 로직을 면밀히 직접 열람하고, 극단적 엣지 케이스, 레이아웃 붕괴, 메모리 누수 위험을 철저히 분석하십시오. 실제 빌드/테스트를 직접 실행하여 물리적 결과를 확인한 후 정밀한 검증 증거와 함께 판정하십시오.\n"
-                        f"1. **사용자 직접 의뢰 및 질문 충족성 (User Request & Questions Priority)**: 사용자가 지시한 내용 및 질문(점수 평가, 감점 요인 분석, 해결책 질문, 의견 등)에 대해 Coder가 충실하고 구체적으로 답변했는지 대조하십시오. 질문을 무시하고 내부 코드/파일만 나열한 경우 단호하게 `[STATUS: REJECTED]`를 선언하십시오.\n"
-                        f"2. **가시적 가치 & 실질 변경 감사 (Anti-Invisible-Fix)**: 프로덕션 화면/동작 소스코드에 실질적 변화가 있는지 확인하십시오.\n"
-                        f"3. 기능적 결함, 버그, 문법 에러, 런타임 크래시 위험\n"
-                        f"4. 2~3일 장기 실행 시 메모리 누수, 무한 루프, 처리되지 않은 예외(Unhandled Exceptions)\n"
-                        f"5. Mock/Stub/하드코딩 및 Canvas/PIL 가짜 이미지 모킹 여부\n"
-                        f"6. 다중 인터랙션 상태 무결성\n"
-                        f"7. 폰트 및 좌표 스케일링 공식의 수학적 정규화\n"
-                        f"8. 안드로이드/모바일 E2E 표준 및 7대 Quality Gate 전수 통과 여부\n"
-                        f"9. **[🚨 레퍼런스 이미지 표절 및 스크립트 트레이싱(Tracing) 색출]**: 사용자가 제공한 참고용 레퍼런스 이미지를 그대로 복사해 제출하거나, Coder의 스크립트가 Image.open, cv2.imread 등으로 열어 외곽선(findContours)이나 픽셀을 추출·합성한 속임수가 없는지 철저히 점검하십시오. 발견 시 즉시 `[STATUS: REJECTED]`를 선언하십시오.\n"
-                        f"10. **[🚨 Anti-AI-Slop & 상용 크래프트맨십 심사]**: (1) 내부 개발 수치(`50px+`, `70px+`, `16ms`)나 백엔드 인프라 용어(`3-Way 병합`, `단절 테스트`, `온디바이스 평탄화` 등)가 UI 버튼/타이틀로 노출되었는지, (2) 단어가 좁은 너비로 인해 `단절 / 테스 / 트`처럼 세로로 쪼개지거나 메뉴가 360dp 뷰포트 밖으로 삐져나가는지, (3) 24~48dp 버튼/탭에 AI 비트맵 이미지를 뭉개서 축소 삽입했거나 '김민수 수석연구원' 등 진부한 AI 더미 데이터를 사용했는지 전수 검사하십시오. 위반 시 즉시 `[STATUS: REJECTED]`를 선언하십시오.\n\n"
-                        f"**[검증 및 판정 규칙 - 인간형 경량 대화 피드백 (Visual Tiki-Taka & Token Diet)]**:\n"
-                        f"1. 구조적 버그, 레이아웃/스타일 문제, 동작 오류, 또는 **직업(Persona) 관점에서 설계적/시각적/구조적 보강이 필수적인 경우**:\n"
-                        f"   - 반드시 첫 줄에 `[STATUS: REJECTED]`를 정확한 형식으로 표기하십시오.\n"
-                        f"   - **Coder가 미처 생각지 못한 설계 맹점 및 구체적 대안 스펙 제시**: '이것이 최선인가?'에 대한 직업적 진단과 함께, Coder가 즉시 구현할 수 있는 폰트/스타일, 나노바나나 에셋 적용 위치, 안전한 아키텍처 대안을 명시하십시오.\n"
-                        f"   - **구체적이고 실질적인 결함 리포트**: 무의미한 형식적 체크리스트 나열을 지양하고, 구체적인 결함 부위(파일명, 라인 번호, 캡처/크롭 증거)와 함께 Coder가 즉시 수정할 수 있는 명쾌하고 실질적인 피드백을 제시하십시오.\n"
-                        f"   - **📉 [출력 형식 및 가독성 준수]**: 불필요한 미사여구 배제, 내부 절대경로 노출 금지(상대경로 `./...` 또는 파일명만 사용). 핵심 결함 또는 승인 근거를 명확하고 구체적인 증거와 함께 체계적인 개조식으로 작성하여 가독성을 확보하십시오.\n"
-                        f"   - 상세 텔레메트리는 `reports/` 하위 JSON으로 자동 보존되므로 대화창 맥락을 불필요하게 늘이지 마십시오.\n"
-                        f"2. 단순 1~5줄 버그를 직접 패치했다면:\n"
-                        f"   - 반드시 첫 줄에 `[STATUS: APPROVED (QA Direct Patch)]`를 정확한 형식으로 표기하고,\n"
-                        f"   - 직접 수정한 대상 파일과 변경 내용을 명확히 명시하십시오.\n"
-                        f"3. 모든 기술적/설계적 요구사항이 충족되었고 오류가 없으며 최선의 설계와 실질적 변경이 확인된 경우 (물리적 Diff가 존재하고 테스트가 통과된 경우):\n"
-                        f"   - 반드시 첫 줄에 `[STATUS: APPROVED]`를 정확한 형식으로 표기하고,\n"
-                        f"   - 기술 검증 통과 내역과 핵심 개선 확인 리포트 및 **[전문가 관점 심층 평가 & 차기 고도화 권고]**를 체계적으로 작성하십시오.\n"
-                        f"4. 사용자 요청이 정보 확인, 기획 자문, 시스템 상태 조회인 경우:\n"
-                        f"   - Coder의 답변이 현재 시스템 상태 및 코드와 일치하는지 확인하고, 결함이 없다면 반드시 첫 줄에 `[STATUS: APPROVED]`를 표기하십시오."
+                        f"0. 🔒 **[지정 워크스페이스 엄격 격리 원칙]**: 반드시 현재 프로젝트 워크스페이스(`./{os.path.basename(session.workspace or 'project')}`) 내부의 파일만 검증하고 수정하십시오.\n"
+                        f"1. **핵심 파일 직접 열람**: 변경된 핵심 파일을 `view_file`, `grep_search` 도구로 확인하고, 명백한 버그·가짜 모킹·표절 여부를 검증하십시오.\n"
+                        f"2. **🆕 [소규모 직접 패치 권한]**: 1~5줄 이내 단순 버그는 `replace_file_content`로 직접 수정 후 `[STATUS: APPROVED (QA Direct Patch)]`를 선언하십시오.\n"
+                        f"   - 단, 10줄 초과 구조 변경이나 새 기능 추가는 Coder에게 REJECTED로 위임하십시오.\n\n"
+                        f"**[핵심 검증 항목]**:\n"
+                        f"1. **사용자 요청 충족성**: 사용자가 요청한 내용이 실체 구현되었는지 확인하십시오.\n"
+                        f"2. **빌드/컴파일 성공**: 실제 빌드 명령으로 확인하십시오.\n"
+                        f"3. **핵심 기능 동작**: 런타임 크래시, 클릭 불가 버튼, 화면 잘림 등 사용자 체감 결함을 우선 검증하십시오.\n"
+                        f"4. **Mock/Stub 차단**: 가짜 데이터·더미 핸들러·빈 TODO를 확인하십시오.\n"
+                        f"5. **레퍼런스 이미지 표절 색출**: 사용자 참고 이미지 복사 여부를 확인하십시오.\n\n"
+                        f"**[판정 규칙]**:\n"
+                        f"1. **REJECTED 선언 기준 (실제로 사용자가 체감하는 문제)**: 빌드 실패, 앱 크래시, 핵심 기능 미동작, 클릭 안 되는 버튼, 사용자 요청 미반영, Mock/Stub/표절 적발.\n"
+                        f"   - ⚠️ 리팩토링 권장 사항, 문서 포맷 불일치, 증거 파일 부재, 코드 스타일 차이는 REJECTED 사유가 아닙니다.\n"
+                        f"2. **QA Direct Patch**: 직접 수정했다면 첫 줄에 `[STATUS: APPROVED (QA Direct Patch)]`를 표기하십시오.\n"
+                        f"3. **APPROVED 선언 기준**: 사용자 요청이 실체 구현되고, 빌드 성공, 핵심 기능이 동작하는 경우.\n"
+                        f"   - 반드시 첫 줄에 `[STATUS: APPROVED]`를 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 간결히 작성하십시오.\n"
+                        f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]`를 표기하십시오."
                     )
 
                     try:
@@ -1825,6 +1897,51 @@ class TrioAgentRunner:
                                 f"--- QA 원본 응답 ---\n"
                                 f"{latest_qa_output}"
                             )
+
+                # 🎨 Visual Craft Loop Enforcement Gate (!mode 3/3+ 무인 자율 시각 완성도 강제)
+                # QA가 기능만 보고 승인하더라도, 실측 기반 시각 계약 위반(MAJOR+)이 남아 있으면
+                # 기계적으로 반려하여 Coder의 구조 재작업을 강제한다. (상한 도달/stalled 시 에스컬레이션)
+                if qa_approved and visual_craft_report is not None and _VCL is not None:
+                    try:
+                        if _VCL.should_block_approval(visual_craft_report):
+                            if visual_craft_block_count < _vcl_max_rounds():
+                                visual_craft_block_count += 1
+                                logger.warning(
+                                    f"TrioAgentRunner: QA approved but Visual Craft Loop FAIL "
+                                    f"({visual_craft_report.failing_rule_ids}). Overriding to REJECTED "
+                                    f"[{visual_craft_block_count}/{_vcl_max_rounds()}]."
+                                )
+                                qa_approved = False
+                                guardian_overridden = True
+                                latest_qa_output = (
+                                    f"[STATUS: REJECTED]\n"
+                                    f"🎨 **[품질 게이트 강제 반려 — 시각 완성도 계약(Visual Craft) 위반]**\n"
+                                    f"기능 검증은 통과했으나, 실기기/스크린샷 실측 기반 시각 감사에서 "
+                                    f"MAJOR 이상 결함이 적발되었습니다. 마케팅 문구 추가가 아니라 구조를 수정하십시오.\n\n"
+                                    f"{_VCL.build_fix_directive(visual_craft_report)}\n\n"
+                                    f"--- QA 원본 응답 ---\n{latest_qa_output}"
+                                )
+                                await safe_send_discord_message(main_channel, latest_qa_output)
+                            elif not visual_craft_escalated:
+                                visual_craft_escalated = True
+                                logger.warning(
+                                    f"TrioAgentRunner: Visual Craft Loop max rounds reached "
+                                    f"({_vcl_max_rounds()}). Escalating to Auditor without further auto-fix."
+                                )
+                                await send_transit_notice(
+                                    f"⚠️ **[Visual Craft Loop 상한 도달]** 시각 결함 자동 수정 {_vcl_max_rounds()}회 초과 — "
+                                    f"무한 핑퐁 방지를 위해 Auditor/인간 에스컬레이션으로 전환합니다. "
+                                    f"(잔존 결함: {', '.join(visual_craft_report.failing_rule_ids) or '없음'})"
+                                )
+                        elif visual_craft_report.stalled and not visual_craft_escalated:
+                            visual_craft_escalated = True
+                            await send_transit_notice(
+                                f"⚠️ **[Visual Craft Loop 수렴 실패]** 동일 시각 결함이 반복되어 stalled 판정 — "
+                                f"Auditor 최종 심의로 에스컬레이션합니다. "
+                                f"(규칙: {', '.join(visual_craft_report.failing_rule_ids) or '없음'})"
+                            )
+                    except Exception as _vc_gate_err:
+                        logger.debug(f"Visual craft enforcement gate skipped: {_vc_gate_err}")
 
                 if qa_approved and not is_anti_mock_clean:
                     logger.warning(f"TrioAgentRunner: QA passed verbally but anti-mocking violations exist: {anti_mock_violations}. Overriding to REJECTED.")

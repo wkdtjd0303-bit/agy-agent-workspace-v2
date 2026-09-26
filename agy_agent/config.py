@@ -31,16 +31,8 @@ DISCORD_SERVER_MANAGER_BOT_TOKEN = (
     or os.getenv("DISCORD_SERVER_MANAGER_BOT_Token")
     or ""
 ).strip()
-CONSULTANT_MODEL = (
-    os.getenv("Consultant_MODEL")
-    or os.getenv("CONSULTANT_MODEL")
-    or "opencode-go/glm-5.3"
-).strip()
-CONSULTANT_ENGINE = (
-    os.getenv("Consultant_ENGINE")
-    or os.getenv("CONSULTANT_ENGINE")
-    or "opencode"
-).strip()
+CONSULTANT_MODEL = os.getenv("CONSULTANT_MODEL", "opencode-go/glm-5.3").strip()
+CONSULTANT_ENGINE = os.getenv("CONSULTANT_ENGINE", "opencode").strip()
 DEFAULT_WORKSPACE = os.getenv("DEFAULT_WORKSPACE", str(Path.home() / "Desktop" / "autocoding"))
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 COMMAND_PREFIXES = tuple(p.strip() for p in os.getenv("COMMAND_PREFIXES", f"{COMMAND_PREFIX},~").split(",") if p.strip())
@@ -57,8 +49,14 @@ CODEX_PATH = os.getenv("CODEX_PATH", "/home/jangsung/.npm-global/bin/codex")
 COPILOT_PATH = os.getenv("COPILOT_PATH", "/home/jangsung/.npm-global/bin/copilot")
 CLAUDE_PATH = os.getenv("CLAUDE_PATH", "claude")
 OPENCODE_PATH = os.getenv("OPENCODE_PATH", "opencode")
-# OpenCode Go 구독 사용량/한도 조회용 API 키 (미설정 시 로컬 opencode 인증 저장소에서 자동 조회)
+# OpenCode Go 다중 API 키 (쉼표 구분, 1번 키 한도 소진 시 자동 Failover)
+OPENCODE_API_KEYS: List[str] = [
+    k.strip() for k in os.getenv("OPENCODE_API_KEYS", "").split(",") if k.strip()
+]
+# 하위 호환: 단일 키 변수도 지원
 OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY", "")
+if not OPENCODE_API_KEYS and OPENCODE_API_KEY:
+    OPENCODE_API_KEYS = [OPENCODE_API_KEY]
 
 def _get_clean_openrouter_key() -> str:
     raw = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -219,10 +217,10 @@ def parse_qa_selection(
 CLAUDE_SONNET_MIN_DIFFICULTY = float(os.getenv("CLAUDE_SONNET_MIN_DIFFICULTY", "7.5"))
 CLAUDE_SONNET_MIN_QUOTA_PCT = float(os.getenv("CLAUDE_SONNET_MIN_QUOTA_PCT", "0.10"))
 
-CODER_MODEL = os.getenv("CODER_MODEL", "opencode-go/deepseek-v4.1-flash")
+CODER_MODEL = os.getenv("CODER_MODEL", "opencode-go/space-bunny-free")
 CODER_FALLBACK_MODEL = os.getenv("CODER_FALLBACK_MODEL", "gemini-3.7-flash-high")
 COMMANDER_MODEL = os.getenv("COMMANDER_MODEL", "opencode-go/mimo-v2.6-flash")
-QA_MODEL = os.getenv("QA_MODEL", "opencode-go/deepseek-v4.1-flash")
+QA_MODEL = os.getenv("QA_MODEL", "opencode-go/mimo-v2.6-flash")
 QA_FALLBACK_MODEL = os.getenv("QA_FALLBACK_MODEL", "gemini-3.7-flash-high")
 QA_BACKUP_MODEL = os.getenv("QA_BACKUP_MODEL", "openrouter/qwen/qwen-2.5-coder-32b-instruct")
 QA_BACKUP_MODELS = [
@@ -231,11 +229,11 @@ QA_BACKUP_MODELS = [
 ]
 QA_AUTO_MODEL = os.getenv("QA_AUTO_MODEL", "gemini-3.1-pro-high")
 QA_AUTO_FALLBACK_MODEL = os.getenv("QA_AUTO_FALLBACK_MODEL", "gemini-3.7-flash-high")
-AUDITOR_MODEL = os.getenv("AUDITOR_MODEL", "opencode-go/deepseek-v4.1-flash")
+AUDITOR_MODEL = os.getenv("AUDITOR_MODEL", "opencode-go/space-bunny-free")
 VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.8-flash-high")
 CLAUDE_QUOTA_THRESHOLD = float(os.getenv("CLAUDE_QUOTA_THRESHOLD", "0.05"))
-PAIR_MAX_ROUNDS = int(os.getenv("PAIR_MAX_ROUNDS", "20"))
-QA_MAX_ROUNDS = int(os.getenv("QA_MAX_ROUNDS", "20"))
+PAIR_MAX_ROUNDS = int(os.getenv("PAIR_MAX_ROUNDS", "7"))   # 과거 20 → 7: 무한 핑퐁 루프 방지 (환경변수로 조절 가능)
+QA_MAX_ROUNDS = int(os.getenv("QA_MAX_ROUNDS", "7"))      # 과거 20 → 7: QA 수렴 상한 (환경변수로 조절 가능)
 HOTFIX_MAX_ROUNDS = int(os.getenv("HOTFIX_MAX_ROUNDS", "4"))  # 핫픽스 수렴 상한 (무한 패치 루프 방지)
 
 # ==============================================================================
