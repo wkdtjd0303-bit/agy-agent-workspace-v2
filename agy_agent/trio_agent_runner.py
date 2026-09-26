@@ -30,9 +30,10 @@ from commander import Commander
 from model_manager import GlobalModelManager, QA_PERSONAS
 from quality_state_manager import QualityStateManager
 from convergence_policy import (
+    ConvergenceTelemetry,
     ConvergenceTracker,
     build_blocking_contract_instruction,
-    parse_blocking_defect_count,
+    resolve_blocking_count,
 )
 from discord_screenshot_gallery import (
     collect_candidate_screenshots,
@@ -2135,10 +2136,17 @@ class TrioAgentRunner:
                 #   마커([BLOCKING_DEFECTS: N])가 없으면 기존 동작을 그대로 보존한다.
                 if not qa_approved:
                     try:
-                        _blk_count = parse_blocking_defect_count(latest_qa_output)
+                        _blk_count, _blk_src = resolve_blocking_count(latest_qa_output)
                         if _blk_count is not None:
                             ConvergenceTracker.record(channel_id or 0, _blk_count)
-                        if ConvergenceTracker.should_force_accept(channel_id or 0):
+                        _force_accept = ConvergenceTracker.should_force_accept(channel_id or 0)
+                        _escalate = (not _force_accept) and ConvergenceTracker.should_escalate(channel_id or 0)
+                        # 📊 수렴 계약 계측: 마커 방출률을 증명하기 위한 물리 기록
+                        ConvergenceTelemetry.record(
+                            channel_id or 0, "qa1", _blk_count, _blk_src,
+                            "force_accept" if _force_accept else ("escalate" if _escalate else "observed"),
+                        )
+                        if _force_accept:
                             logger.info(
                                 "TrioAgentRunner: Convergence Contract — QA rejected but "
                                 "[BLOCKING_DEFECTS: 0]; accepting with non-blocking backlog."
@@ -2155,7 +2163,7 @@ class TrioAgentRunner:
                                 f"--- QA 원본 응답 ---\n{latest_qa_output}"
                             )
                             await safe_send_discord_message(main_channel, latest_qa_output)
-                        elif ConvergenceTracker.should_escalate(channel_id or 0):
+                        elif _escalate:
                             _trend = ConvergenceTracker.describe(channel_id or 0)
                             logger.warning(
                                 f"TrioAgentRunner: Convergence Contract — blocking defects not decreasing. {_trend}"
@@ -2400,6 +2408,15 @@ class TrioAgentRunner:
                             await asyncio.sleep(0.5)
 
                             qa_passed = cls.is_qa_approved(current_ext_output)
+                            if not qa_passed:
+                                # 📊 확장 QA도 동일하게 수렴 계약 계측 (마커 방출률 검증에 포함)
+                                try:
+                                    _xc, _xs = resolve_blocking_count(current_ext_output)
+                                    ConvergenceTelemetry.record(
+                                        channel_id or 0, str(qa_name), _xc, _xs, "observed"
+                                    )
+                                except Exception:
+                                    pass
                             if qa_passed and not is_anti_mock_clean:
                                 logger.warning(f"TrioAgentRunner: {qa_name} approved verbally but anti-mocking violations exist. Overriding to REJECTED.")
                                 qa_passed = False
@@ -2855,6 +2872,26 @@ class TrioAgentRunner:
             err_pipe_label = f"{total_steps_val}중 다중" if active_qas_flag else "3중"
             return f"⚠️ {err_pipe_label} 에이전트 실행 중 오류 발생: {str(e)}"
         finally:
+            # 📊 수렴 계약 계측 최종화: 미션이 어떤 경로로 끝나더라도 물리 리포트를 남긴다.
+            #    (승인/최대 라운드/수렴 에스컬레이션/예외 전부 포함 — 감사 가능한 단일 원천)
+            try:
+                _ms = ""
+                _plan = getattr(session, "_current_5w1h_plan", None)
+                _ms = str(getattr(_plan, "version", "") or "")
+                _tel_path = ConvergenceTelemetry.export(
+                    channel_id or 0,
+                    workspace=(effective_ws or session.workspace or None),
+                    milestone=_ms,
+                )
+                _tel = ConvergenceTelemetry.summary(channel_id or 0)
+                logger.info(
+                    f"TrioAgentRunner: convergence telemetry — observations="
+                    f"{_tel.get('observations', 0)}, marker_rate={_tel.get('marker_emission_rate')}, "
+                    f"force_accepts={_tel.get('force_accepts', 0)}, escalations={_tel.get('escalations', 0)}, "
+                    f"report={_tel_path}"
+                )
+            except Exception as _tel_err:
+                logger.debug(f"Convergence telemetry export skipped: {_tel_err}")
             session._in_multi_agent_pipeline = False
             session.set_busy(False, session.status_desc or "정상 대기 중")
             session.current_process = None

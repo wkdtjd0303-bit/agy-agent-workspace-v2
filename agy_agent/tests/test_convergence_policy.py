@@ -27,10 +27,13 @@ from convergence_policy import (  # noqa: E402
     BLOCKING_DEFECT_CATEGORIES,
     BLOCKING_MARKER_SYNTAX,
     NON_BLOCKING_DEFECT_CATEGORIES,
+    ConvergenceTelemetry,
     ConvergenceTracker,
     build_blocking_contract_instruction,
+    estimate_blocking_defect_count,
     has_blocking_marker,
     parse_blocking_defect_count,
+    resolve_blocking_count,
 )
 
 
@@ -134,6 +137,125 @@ class TestConvergenceTracker(unittest.TestCase):
         self.assertIn("1", desc)
 
 
+class TestFallbackHeuristic(unittest.TestCase):
+    """QA가 마커 계약을 지키지 않아도 수렴 정책이 동작해야 한다 (비활성화 방지)."""
+
+    def test_marker_takes_precedence(self):
+        out = "[STATUS: REJECTED]\n[BLOCKING_DEFECTS: 4]\nD1 화면 잘림 발생"
+        self.assertEqual(resolve_blocking_count(out), (4, "marker"))
+
+    def test_heuristic_counts_user_visible_defects(self):
+        out = (
+            "[STATUS: REJECTED]\n"
+            "D1 [High] 화면 잘림 — 마지막 행이 하단 바에 반으로 잘려 있습니다\n"
+            "D2 [MED] 버튼 클릭해도 아무 반응이 없습니다\n"
+            "D3 [LOW] 실행 안 된 테스트가 통과로 기재되어 있습니다"
+        )
+        count, source = resolve_blocking_count(out)
+        self.assertEqual(source, "heuristic")
+        self.assertEqual(count, 3)
+
+    def test_heuristic_returns_zero_for_pure_non_blocking(self):
+        out = (
+            "[STATUS: REJECTED]\n"
+            "D1 [LOW] 코드 스타일이 일관되지 않습니다. 리팩토링을 권고합니다.\n"
+            "D2 [LOW] 문서 포맷과 해시 표기가 어긋납니다. 문서 정리를 권고합니다."
+        )
+        count, source = resolve_blocking_count(out)
+        self.assertEqual(source, "heuristic")
+        self.assertEqual(count, 0)
+
+    def test_none_when_no_defect_statements(self):
+        out = "[STATUS: REJECTED]\n좋은 시도였습니다. 다시 해주세요."
+        self.assertEqual(resolve_blocking_count(out), (None, "none"))
+
+    def test_estimate_returns_none_when_marker_present(self):
+        out = "[STATUS: REJECTED]\n[BLOCKING_DEFECTS: 2]\n문제: 클릭 불가"
+        self.assertIsNone(estimate_blocking_defect_count(out))
+
+    def test_heuristic_ignores_headers_and_status_lines(self):
+        out = (
+            "[STATUS: REJECTED]\n"
+            "## 반려 사유 요약\n"
+            "```\nscreencap 실패\n```\n"
+            "문제: 화면이 깨짐"
+        )
+        count, _src = resolve_blocking_count(out)
+        self.assertEqual(count, 1)
+
+
+class TestConvergenceTelemetry(unittest.TestCase):
+    """'구현했다 = 동작한다' 착각을 막기 위한 계측 자체의 회귀 테스트."""
+
+    def setUp(self):
+        ConvergenceTelemetry.reset_all()
+        self.ch = 777
+
+    def tearDown(self):
+        ConvergenceTelemetry.reset_all()
+
+    def test_records_marker_rate(self):
+        ConvergenceTelemetry.record(self.ch, "qa1", 2, "marker", "observed")
+        ConvergenceTelemetry.record(self.ch, "qa1", 0, "marker", "force_accept")
+        s = ConvergenceTelemetry.summary(self.ch)
+        self.assertEqual(s["observations"], 2)
+        self.assertEqual(s["marker_present"], 2)
+        self.assertEqual(s["marker_emission_rate"], 1.0)
+        self.assertEqual(s["force_accepts"], 1)
+        self.assertTrue(s["contract_active"])
+        self.assertEqual(s["warnings"], [])
+
+    def test_warns_when_marker_never_emitted(self):
+        ConvergenceTelemetry.record(self.ch, "qa1", 1, "heuristic", "observed")
+        s = ConvergenceTelemetry.summary(self.ch)
+        self.assertEqual(s["marker_present"], 0)
+        self.assertEqual(s["heuristic_used"], 1)
+        self.assertTrue(s["contract_active"])
+        self.assertTrue(any("마커" in w for w in s["warnings"]))
+
+    def test_warns_when_never_resolved(self):
+        ConvergenceTelemetry.record(self.ch, "qa1", None, "none", "observed")
+        s = ConvergenceTelemetry.summary(self.ch)
+        self.assertFalse(s["contract_active"])
+        self.assertTrue(any("비활성" in w for w in s["warnings"]))
+
+    def test_no_observations_is_flagged(self):
+        s = ConvergenceTelemetry.summary(self.ch)
+        self.assertEqual(s["observations"], 0)
+        self.assertFalse(s["contract_active"])
+        self.assertTrue(s["warnings"])
+
+    def test_per_stage_breakdown(self):
+        ConvergenceTelemetry.record(self.ch, "qa1", 2, "marker", "observed")
+        ConvergenceTelemetry.record(self.ch, "qa2", None, "none", "observed")
+        s = ConvergenceTelemetry.summary(self.ch)
+        self.assertIn("qa1", s["per_stage"])
+        self.assertEqual(s["per_stage"]["qa1"]["marker"], 1)
+        self.assertEqual(s["per_stage"]["qa2"]["none"], 1)
+
+    def test_export_writes_physical_report(self):
+        import json
+        import os
+        import tempfile
+        ws = tempfile.mkdtemp(prefix="tel_")
+        try:
+            ConvergenceTelemetry.record(self.ch, "qa1", 3, "marker", "observed")
+            path = ConvergenceTelemetry.export(self.ch, ws, milestone="v12.0")
+            self.assertIsNotNone(path)
+            self.assertTrue(os.path.isfile(path))
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["milestone"], "v12.0")
+            self.assertEqual(data["schema"], "convergence_telemetry/v1")
+            self.assertEqual(data["observations"], 1)
+        finally:
+            import shutil
+            shutil.rmtree(ws, ignore_errors=True)
+
+    def test_export_without_workspace_returns_none(self):
+        self.assertIsNone(ConvergenceTelemetry.export(self.ch, None))
+
+
 class TestRunnerWiring(unittest.TestCase):
     """수렴 계약이 실제 러너/프롬프트에 배선되어 있는지 고정한다 (문서만 있는 계약 방지)."""
 
@@ -146,12 +268,18 @@ class TestRunnerWiring(unittest.TestCase):
     def test_runner_imports_and_uses_convergence_policy(self):
         self.assertIn("from convergence_policy import", self.code)
         self.assertIn("build_blocking_contract_instruction", self.code)
-        self.assertIn("parse_blocking_defect_count", self.code)
+        self.assertIn("resolve_blocking_count(", self.code)
         self.assertIn("ConvergenceTracker.should_force_accept", self.code)
         self.assertIn("ConvergenceTracker.should_escalate", self.code)
 
     def test_runner_resets_tracker_per_mission(self):
         self.assertIn("ConvergenceTracker.reset(channel_id", self.code)
+
+    def test_runner_records_and_exports_telemetry(self):
+        # 마커 미방출에도 죽지 않도록 폴백 해석 + 물리 리포트 기록
+        self.assertIn("resolve_blocking_count(", self.code)
+        self.assertIn("ConvergenceTelemetry.record(", self.code)
+        self.assertIn("ConvergenceTelemetry.export(", self.code)
 
     def test_qa_prompts_require_blocking_marker(self):
         # QA1 + 확장 QA 프롬프트 양쪽에 마커 규칙이 존재해야 한다.
