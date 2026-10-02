@@ -67,6 +67,35 @@ def unattended() -> _UnattendedContext:
     return _UnattendedContext()
 
 
+_EXPLICIT_TOOL: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "agy_explicit_tool", default=False
+)
+
+
+class _ExplicitToolContext:
+    """사용자가 명시적으로 요청한 도구 호출(예: Image generator) 구역.
+
+    이 구역에서는 무인 자율 컨텍스트이더라도 Gemini 계열 모델 호출을 허용한다.
+    (이미지 생성 도구는 Antigravity Gemini 이미지 생성기가 유일한 경로이기 때문)
+    """
+
+    def __enter__(self):
+        self._token = _EXPLICIT_TOOL.set(True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            _EXPLICIT_TOOL.reset(self._token)
+        except Exception:
+            _EXPLICIT_TOOL.set(False)
+        return False
+
+
+def explicit_tool() -> _ExplicitToolContext:
+    """명시적 도구 호출 컨텍스트 (Gemini 호출 허용)."""
+    return _ExplicitToolContext()
+
+
 def is_gemini_model(model: Optional[str]) -> bool:
     """Gemini 계열(퍼스트파티) 모델 여부."""
     if not model:
@@ -120,7 +149,7 @@ def check_model(model: Optional[str], source: str = "") -> GuardDecision:
     - 그 외(사용자 직접 요청, 비-Gemini 모델) → 허용
     """
     gemini = is_gemini_model(model)
-    if gemini and is_unattended() and not _allow_unattended_gemini():
+    if gemini and is_unattended() and not _allow_unattended_gemini() and not _EXPLICIT_TOOL.get():
         reason = (
             f"무인 자율 컨텍스트에서 Gemini 모델 자동 호출을 차단했습니다 "
             f"(model={model}). Antigravity 한도 자동 소모 방지 가드가 작동했습니다. "

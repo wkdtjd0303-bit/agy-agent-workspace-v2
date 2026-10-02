@@ -42,9 +42,14 @@ import re
 import sys
 import json
 import time
+import shutil
+import asyncio
 import logging
+import subprocess
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from design_systems_kb import apply_design_system, format_design_system_block
 
 logger = logging.getLogger("VisualCraftLoop")
 
@@ -57,6 +62,7 @@ STATE_REL_PATH = os.path.join("reports", "gate5", "visual_craft_state.json")
 VISUAL_DOMAINS = {
     "mobile_app", "android", "ios", "flutter", "react_native",
     "saas_web", "web", "frontend", "game",
+    "native_desktop", "windows",
 }
 
 BLOCKING_SEVERITIES = {"BLOCKER", "CRITICAL", "MAJOR"}
@@ -121,10 +127,55 @@ HERO_MARKER_PATTERNS = [
 ]
 
 
-def build_design_contract(domain: str = "mobile_app", app_name: str = "") -> Dict[str, Any]:
-    """도메인별 디자인 토큰 계약을 수치로 고정한다 (LLM의 즉흥 여백/색상 남용 방지)."""
+def _apply_style_overrides(contract: Dict[str, Any], style: Optional[Dict[str, Any]]) -> None:
+    """사용자/레퍼런스 유래 스타일(design_tokens.json + craft_inputs.json)을 계약에 상속한다.
+
+    P0-2: 사용자 스타일 SSOT 가 검증 계약에 닿지 않던 이중화를 해소한다.
+    P2-7: 계약에 카피 톤/하우스 룰을 포함시킨다.
+    """
+    if not isinstance(style, dict) or not style:
+        return
+    if style.get("style_archetype"):
+        contract["style_archetype"] = str(style["style_archetype"])
+    palette = style.get("palette")
+    if isinstance(palette, dict) and palette:
+        contract.setdefault("color", {})["reference_palette"] = {
+            str(k): str(v) for k, v in palette.items()
+        }
+    for key in ("primary_color", "accent_color", "background_color"):
+        if style.get(key):
+            contract.setdefault("color", {})[key] = str(style[key])
+    if style.get("card_radius"):
+        contract.setdefault("shape", {})["card_radius"] = str(style["card_radius"])
+    if style.get("motion"):
+        motion = contract.setdefault("motion", {})
+        motion["reference"] = str(style["motion"])
+        if isinstance(style.get("motion"), dict):
+            motion["reference"] = style["motion"]
+    rules = style.get("house_rules")
+    if isinstance(rules, list) and rules:
+        contract["house_rules"] = [str(r).strip() for r in rules if str(r).strip()]
+    if style.get("copy_tone"):
+        contract["copy_tone"] = str(style["copy_tone"])
+
+
+def _style_fingerprint(style: Optional[Dict[str, Any]]) -> str:
+    """스타일 입력 변경 시 계약 캐시를 무효화하기 위한 결정적 지문."""
+    if not style:
+        return ""
+    try:
+        return json.dumps(style, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return ""
+
+
+def build_design_contract(domain: str = "mobile_app", app_name: str = "", style: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """도메인별 디자인 토큰 계약을 수치로 고정한다 (LLM의 즉흥 여백/색상 남용 방지).
+
+    `style`(선택) = `craft_inputs.load_style_tokens()` 결과. 주어지면 사용자 스타일/톤을 상속한다.
+    """
     is_mobile = domain in ("mobile_app", "android", "ios", "flutter", "react_native")
-    return {
+    contract = {
         "version": VISUAL_CRAFT_VERSION,
         "domain": domain,
         "app_name": app_name or "",
@@ -167,16 +218,20 @@ def build_design_contract(domain: str = "mobile_app", app_name: str = "") -> Dic
             "easing": "cubic-bezier(0.16, 1, 0.3, 1)",
         },
     }
+    _apply_style_overrides(contract, style)
+    # 외부 공개 디자인 표준을 상속한다 (사용자 취향 입력이 없어도 디테일 기준 제공).
+    apply_design_system(contract, style)
+    return contract
 
 
 def _format_contract_block(contract: Dict[str, Any]) -> str:
-    """Coder/QA 프롬프트용 고밀도 계약 요약 (토큰 다이어트: ~1,000자 이내)."""
+    """Coder/QA 프롬프트용 고밀도 계약 요약 (토큰 다이어트: 계약+외부 표준 ~2,000자 이내)."""
     spacing = contract.get("spacing", {})
     typo = contract.get("typography", {})
     color = contract.get("color", {})
     touch = contract.get("touch_target", {})
     layout = contract.get("layout", {})
-    return (
+    block = (
         "🎨 **[시각 완성도 계약 (Design Contract — GUI 프로젝트 필수)]**\n"
         f"- 여백/패딩: {spacing.get('grid_unit_dp', 4)}pt 그리드 {spacing.get('scale', [])} 만 사용 (임의값 금지)\n"
         f"- 타이포: 최대 {typo.get('max_distinct_sizes', 6)}단계 (Display/Body/Caption) — 크기 증식 금지\n"
@@ -187,6 +242,16 @@ def _format_contract_block(contract: Dict[str, Any]) -> str:
         f"- 카드 중첩 {layout.get('max_nested_card_depth', 2)}중 초과 금지 — 컨테이너 대신 여백/구분선으로 구획\n"
         f"- 검증: `{EVIDENCE_REL_PATH}` (verdict=PASS) 가 Gate 5 통과 조건\n"
     )
+    if contract.get("style_archetype"):
+        block += f"- 스타일 기준: {str(contract['style_archetype'])[:120]}\n"
+    if contract.get("copy_tone"):
+        block += f"- 카피 톤(버튼/에러/빈 상태): {str(contract['copy_tone'])[:200]}\n"
+    rules = contract.get("house_rules")
+    if isinstance(rules, list) and rules:
+        joined = " / ".join(str(r)[:80] for r in rules[:5])
+        block += f"- 하우스 룰: {joined}\n"
+    block += format_design_system_block(contract)
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -767,7 +832,7 @@ def measure_screenshot_metrics(image_path: str, bands: int = 3) -> Dict[str, Any
             w, h = gray.size
             small = gray.resize((min(w, 360), min(h, 720)), Image.Resampling.BILINEAR)
             sw, sh = small.size
-            pixels = list(small.getdata())
+            pixels = list(small.get_flattened_data()) if hasattr(small, "get_flattened_data") else list(small.getdata())
             hist = small.histogram()
             total = sw * sh
             cumulative = 0
@@ -939,6 +1004,106 @@ async def critique_screenshots(
 
 
 # ---------------------------------------------------------------------------
+# 레퍼런스 델타 감사 (P0-4: '우리 계약'이 아니라 '레퍼런스 대비' 를 본다)
+# ---------------------------------------------------------------------------
+def reference_delta_enabled() -> bool:
+    return _env_flag("VISUAL_CRAFT_REFERENCE_DELTA_ENABLED", "1")
+
+
+def _build_reference_delta_composite(reference_path: str, screenshot_path: str, out_dir: str) -> Optional[str]:
+    """레퍼런스(좌)와 산출물(우)을 나란히 합성해 단일 Vision 입력으로 만든다."""
+    try:
+        from PIL import Image
+        os.makedirs(out_dir, exist_ok=True)
+        with Image.open(reference_path) as ref, Image.open(screenshot_path) as shot:
+            ref = ref.convert("RGB")
+            shot = shot.convert("RGB")
+            target_h = 720
+            def _fit(img):
+                w, h = img.size
+                scale = target_h / float(h or 1)
+                return img.resize((max(1, int(w * scale)), target_h), Image.Resampling.BILINEAR)
+            ref_r, shot_r = _fit(ref), _fit(shot)
+            canvas = Image.new("RGB", (ref_r.width + shot_r.width + 16, target_h), (250, 250, 250))
+            canvas.paste(ref_r, (0, 0))
+            canvas.paste(shot_r, (ref_r.width + 16, 0))
+            out_path = os.path.join(out_dir, f"ref_delta_{int(time.time() * 1000)}.jpg")
+            canvas.save(out_path, format="JPEG", quality=85)
+            return out_path
+    except Exception as e:
+        logger.debug(f"reference delta composite skipped: {e}")
+        return None
+
+
+async def critique_reference_delta(
+    reference_images: Sequence[str],
+    screenshots: Sequence[str],
+    contract: Dict[str, Any],
+    domain: str,
+    measured: Dict[str, Any],
+    app_name: str = "",
+    max_images: int = 2,
+) -> Dict[str, Any]:
+    """레퍼런스 대비 스타일 델타만 판정한다 (정체성 동일성은 평가하지 않음)."""
+    result: Dict[str, Any] = {"engine": "", "verdict": None, "score": None, "defects": [], "summary": "", "raw": ""}
+    if not reference_images or not screenshots or not reference_delta_enabled():
+        return result
+    if os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules or "unittest" in sys.modules:
+        result["engine"] = "skipped-unittest"
+        return result
+    try:
+        import craft_inputs as _ci
+        from vision_attachment_analyzer import VisionAttachmentAnalyzer
+    except Exception as e:
+        logger.debug(f"reference delta engine unavailable: {e}")
+        return result
+
+    rubric = _ci.build_reference_delta_rubric(contract, reference_images, app_name)
+    comp_dir = os.path.join(os.path.dirname(reference_images[0]) or ".", "_delta_tmp")
+    merged_defects: List[Dict[str, Any]] = []
+    scores: List[int] = []
+    verdicts: List[str] = []
+    summaries: List[str] = []
+    engine = ""
+    for shot in list(screenshots)[:max_images]:
+        composite = _build_reference_delta_composite(reference_images[0], shot, comp_dir)
+        if not composite:
+            continue
+        try:
+            res = await VisionAttachmentAnalyzer.analyze_image_file(composite, user_prompt=rubric, role="design_critique")
+        except Exception as e:
+            logger.debug(f"reference delta critique failed for {shot}: {e}")
+            continue
+        if not res or not res.get("success"):
+            continue
+        text = res.get("analysis") or ""
+        parsed = _ci.parse_reference_delta(text)
+        engine = res.get("engine", engine)
+        if parsed.get("score") is not None:
+            scores.append(parsed["score"])
+        if parsed.get("verdict"):
+            verdicts.append(parsed["verdict"])
+        if parsed.get("summary"):
+            summaries.append(f"{os.path.basename(shot)}: {parsed['summary']}")
+        for d in parsed.get("defects", []):
+            d["screenshot"] = os.path.basename(shot)
+            merged_defects.append(d)
+        if not result.get("raw"):
+            result["raw"] = text[:2000]
+
+    if scores:
+        result["score"] = min(scores)
+    if verdicts:
+        result["verdict"] = "FAIL" if "FAIL" in verdicts else "PASS"
+    elif result["score"] is not None:
+        result["verdict"] = "FAIL" if result["score"] < 70 else "PASS"
+    result["defects"] = merged_defects
+    result["summary"] = " / ".join(summaries[:3])
+    result["engine"] = engine or "vision"
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 메인 파이프라인 (라운드 실행)
 # ---------------------------------------------------------------------------
 class VisualCraftLoop:
@@ -952,6 +1117,18 @@ class VisualCraftLoop:
     @staticmethod
     def is_visual_domain(domain: str) -> bool:
         return (domain or "").strip().lower() in VISUAL_DOMAINS
+
+    @staticmethod
+    def _load_style_tokens(workspace: str) -> Dict[str, Any]:
+        """사용자/레퍼런스 유래 스타일 SSOT(craft_inputs) 를 방어적으로 로드한다."""
+        if not workspace:
+            return {}
+        try:
+            from craft_inputs import load_style_tokens as _load_style_tokens
+            return _load_style_tokens(workspace)
+        except Exception as e:
+            logger.debug(f"style token load skipped: {e}")
+            return {}
 
     @staticmethod
     def detect_domain(workspace: str, hint: str = "") -> str:
@@ -980,18 +1157,22 @@ class VisualCraftLoop:
     def ensure_design_contract(cls, workspace: str, domain: str = "", app_name: str = "", force: bool = False) -> Dict[str, Any]:
         """디자인 토큰 계약을 `reports/gate2/design_contract.json`에 물리적으로 고정한다."""
         dom = cls.detect_domain(workspace, domain)
+        style = cls._load_style_tokens(workspace)
         if not workspace or not os.path.isdir(workspace):
-            return build_design_contract(dom, app_name)
+            return build_design_contract(dom, app_name, style=style)
         path = os.path.join(workspace, CONTRACT_REL_PATH)
         if not force and os.path.isfile(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     cached = json.load(f)
-                if cached.get("version") == VISUAL_CRAFT_VERSION and cached.get("domain") == dom:
+                if (cached.get("version") == VISUAL_CRAFT_VERSION
+                        and cached.get("domain") == dom
+                        and cached.get("style_fingerprint") == _style_fingerprint(style)):
                     return cached
             except Exception:
                 pass
-        contract = build_design_contract(dom, app_name)
+        contract = build_design_contract(dom, app_name, style=style)
+        contract["style_fingerprint"] = _style_fingerprint(style)
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -1109,6 +1290,119 @@ class VisualCraftLoop:
                     measured["auto_captured_url"] = _url
                     engine_parts.append("playwright_capture")
 
+        # 모바일 앱의 경우: 에뮬레이터/ADB 기기가 연결되어 있으면 실시간 화면을 자동 캡처하여 보완한다.
+        if not shots and dom in ("mobile_app", "android"):
+            try:
+                _adb_bin = shutil.which("adb")
+                if not _adb_bin:
+                    for _cand in (
+                        os.path.expanduser("~/Android/Sdk/platform-tools/adb"),
+                        "/usr/bin/adb",
+                    ):
+                        if os.path.isfile(_cand) and os.access(_cand, os.X_OK):
+                            _adb_bin = _cand
+                            break
+                if _adb_bin:
+                    _dev_res = subprocess.run(
+                        [_adb_bin, "devices"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=4.0,
+                    )
+                    _lines = [l.strip() for l in _dev_res.stdout.splitlines() if "\tdevice" in l]
+                    _emu_mgr = None
+                    if not _lines:
+                        # 기기가 연결되어 있지 않은 경우: Android SDK AVD 또는 KVM 에뮬레이터를 자율 콜드 부팅 시도!
+                        try:
+                            from android_emulator_manager import AndroidEmulatorManager
+                            # 테스트 환경에서는 Mock이 아닌 실제 하드웨어 에뮬레이터 기동을 방지 (테스트 격리 및 속도 보장)
+                            _is_mocked = not isinstance(AndroidEmulatorManager, type) or hasattr(AndroidEmulatorManager, "mock_calls") or hasattr(AndroidEmulatorManager, "_mock_return_value")
+                            _is_test_env = (os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules or "unittest" in sys.modules)
+                            if not _is_test_env or _is_mocked or os.environ.get("AGY_FORCE_EMULATOR_BOOT"):
+                                _emu_mgr = AndroidEmulatorManager(workspace=workspace)
+                                _boot_ok = await asyncio.to_thread(_emu_mgr.launch_autonomous_emulator, 6.0)
+                                if _boot_ok:
+                                    _dev_res = subprocess.run(
+                                        [_adb_bin, "devices"],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE,
+                                        text=True,
+                                        timeout=4.0,
+                                    )
+                                    _lines = [l.strip() for l in _dev_res.stdout.splitlines() if "\tdevice" in l]
+                                    if _lines:
+                                        engine_parts.append("autonomous_emulator_boot")
+                                else:
+                                    logger.warning("자율 에뮬레이터 부팅 실패 — 스크린샷 생략")
+                                    measured["emulator_boot_status"] = "BOOT_FAILED"
+                        except Exception as _boot_err:
+                            logger.debug(f"Autonomous emulator boot fallback skipped: {_boot_err}")
+
+                    if _lines:
+                        # 최신 빌드 APK가 존재하고 앱이 미기동 상태인 경우 자동 설치 및 액티비티 기동 보장
+                        try:
+                            if not _emu_mgr:
+                                from android_emulator_manager import AndroidEmulatorManager
+                                _emu_mgr = AndroidEmulatorManager(workspace=workspace)
+                            _target_apk = None
+                            for _apk_rel in (
+                                os.path.join("app", "build", "outputs", "apk", "release", "app-release.apk"),
+                                os.path.join("app", "build", "outputs", "apk", "debug", "app-debug.apk"),
+                            ):
+                                _cand_apk = os.path.join(workspace, _apk_rel)
+                                if os.path.isfile(_cand_apk):
+                                    _target_apk = _cand_apk
+                                    break
+                            if not _target_apk:
+                                _apk_cands = []
+                                for _r, _, _fs in os.walk(workspace):
+                                    if any(_ign in _r for _ign in [".gradle", ".git", "node_modules", "reports"]):
+                                        continue
+                                    for _f in _fs:
+                                        if _f.endswith(".apk") and not _f.startswith("."):
+                                            _apk_cands.append(os.path.join(_r, _f))
+                                if _apk_cands:
+                                    _apk_cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                                    _target_apk = _apk_cands[0]
+
+                            if _target_apk:
+                                _pkg, _act = _emu_mgr.resolve_apk_package_and_activity(_target_apk, workspace)
+                                if _pkg and _act:
+                                    _c_f, _out_f, _ = _emu_mgr.run_adb_cmd(["shell", "dumpsys", "activity", "activities"], timeout=4.0)
+                                    if _pkg not in _out_f:
+                                        await asyncio.to_thread(_emu_mgr.install_and_launch_apk, _target_apk, _pkg, _act)
+                        except Exception as _prep_err:
+                            logger.debug(f"Android app launch preparation skipped: {_prep_err}")
+
+                        _auto_shot_dir = os.path.join(workspace, "reports", "gate5", "screenshots")
+                        os.makedirs(_auto_shot_dir, exist_ok=True)
+                        _auto_shot = os.path.join(
+                            _auto_shot_dir, f"visual_craft_android_{int(time.time())}.png"
+                        )
+                        _capture_sh = os.path.join(workspace, "tools", "capture_gate5_evidence.sh")
+                        if os.path.isfile(_capture_sh) and os.access(_capture_sh, os.X_OK):
+                            subprocess.run(
+                                [_capture_sh, _auto_shot, "empty_light", "Visual Craft Loop auto capture"],
+                                cwd=workspace,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=15.0,
+                            )
+                        if not os.path.isfile(_auto_shot) or os.path.getsize(_auto_shot) < 500:
+                            with open(_auto_shot, "wb") as _sf:
+                                subprocess.run(
+                                    [_adb_bin, "exec-out", "screencap", "-p"],
+                                    stdout=_sf,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=8.0,
+                                )
+                        if os.path.isfile(_auto_shot) and os.path.getsize(_auto_shot) >= 500:
+                            shots = [_auto_shot]
+                            engine_parts.append("android_framebuffer_capture")
+            except Exception as _android_cap_err:
+                logger.debug(f"Android auto-capture skipped: {_android_cap_err}")
+
         if shots:
             measured["screenshots"] = {
                 os.path.basename(s): measure_screenshot_metrics(s) for s in shots[:3]
@@ -1140,6 +1434,34 @@ class VisualCraftLoop:
             except Exception as e:
                 logger.debug(f"vision critique failed: {e}")
 
+        # P0-4: 레퍼런스가 있으면 '레퍼런스 대비 스타일 델타'를 별도로 실측한다.
+        reference_delta_result: Dict[str, Any] = {}
+        if shots and use_vision and craft_vision_enabled() and reference_delta_enabled():
+            try:
+                import craft_inputs as _ci
+                # 검증은 프로젝트 고유 레퍼런스만 공정한 기준으로 삼는다 (전역 폴백 제외).
+                _refs = _ci.resolve_reference_images(workspace, max_images=2, include_package_refs=False)
+                if _refs:
+                    reference_delta_result = await critique_reference_delta(
+                        _refs, shots, contract, dom, measured.get("screenshots", {}), app_name
+                    )
+                    engine_parts.append("reference_delta")
+            except Exception as e:
+                logger.debug(f"reference delta audit skipped: {e}")
+
+        for d in reference_delta_result.get("defects", []) or []:
+            sev = str(d.get("severity", "MINOR")).upper()
+            if sev == "WARNING":
+                sev = "MINOR"
+            findings.append(CraftFinding(
+                rule_id=f"REF_{(d.get('rule_id') or 'DELTA').upper()}",
+                severity=sev if sev in ("BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO") else "MINOR",
+                title=(d.get("issue") or "레퍼런스 델타 결함")[:120],
+                evidence=f"[RefDelta] {d.get('screenshot', '')} {d.get('location', '')}".strip(),
+                fix=(d.get("fix") or "레퍼런스 타깃과 밀도/위계/색 사용량을 맞추십시오.")[:400],
+                source="reference_delta",
+            ))
+
         for d in vision_result.get("defects", []) or []:
             sev = str(d.get("severity", "MINOR")).upper()
             if sev == "WARNING":
@@ -1162,7 +1484,8 @@ class VisualCraftLoop:
 
         blocking = report.blocking_findings
         vision_fail = vision_result.get("verdict") == "FAIL"
-        if blocking or vision_fail:
+        ref_delta_fail = reference_delta_result.get("verdict") == "FAIL"
+        if blocking or vision_fail or ref_delta_fail:
             report.verdict = "FAIL"
         elif findings:
             report.verdict = "WARN"
@@ -1171,7 +1494,7 @@ class VisualCraftLoop:
 
         report.stalled = cls._update_state(workspace, report)
         if persist:
-            cls.record_evidence(workspace, report, contract, vision_result)
+            cls.record_evidence(workspace, report, contract, vision_result, reference_delta_result)
         return report
 
     @classmethod
@@ -1181,6 +1504,7 @@ class VisualCraftLoop:
         report: VisualCraftReport,
         contract: Optional[Dict[str, Any]] = None,
         vision_result: Optional[Dict[str, Any]] = None,
+        reference_delta_result: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Gate 5가 물리 검증하는 시각 감사 증거 JSON을 기록한다."""
         if not workspace or not os.path.isdir(workspace):
@@ -1193,6 +1517,12 @@ class VisualCraftLoop:
             "engine": (vision_result or {}).get("engine", ""),
             "verdict": (vision_result or {}).get("verdict"),
             "summary": (vision_result or {}).get("summary", ""),
+        }
+        payload["reference_delta"] = {
+            "engine": (reference_delta_result or {}).get("engine", ""),
+            "verdict": (reference_delta_result or {}).get("verdict"),
+            "score": (reference_delta_result or {}).get("score"),
+            "summary": (reference_delta_result or {}).get("summary", ""),
         }
         payload["directive"] = cls.build_fix_directive(report)
         try:

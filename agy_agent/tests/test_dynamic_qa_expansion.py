@@ -47,8 +47,12 @@ class TestDynamicQARegistry(unittest.TestCase):
     """Unit tests for config.get_extended_qa_configs and dynamic QA registry."""
 
     def test_default_config_discovers_qa2(self):
-        """By default, QA2 is configured with solar-pro4."""
-        with patch.dict(os.environ, {"QA2_MODEL": "upstage/solar-pro4", "QA3_MODEL": ""}, clear=False):
+        """엔진 미지정 상태에서 OpenRouter 슬러그(solar-pro4)는 hermes/openrouter 로 추론된다.
+
+        ※ 현재 .env 기본값은 QA2_ENGINE=opencode 이므로, 엔진 추론 경로 검증을 위해
+          QA2_ENGINE 을 명시적으로 비운 뒤 슬러그 기반 폴백을 확인한다.
+        """
+        with patch.dict(os.environ, {"QA2_MODEL": "upstage/solar-pro4", "QA2_ENGINE": "", "QA3_MODEL": ""}, clear=False):
             configs = config.get_extended_qa_configs()
             qa_indices = [c["index"] for c in configs]
             self.assertIn(2, qa_indices)

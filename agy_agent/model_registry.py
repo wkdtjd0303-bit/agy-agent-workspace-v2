@@ -157,6 +157,58 @@ DEPRECATED_MIGRATION_MAP = {
     "gemini-1.5-flash": "gemini-3-flash",
 }
 
+# Deprecated Antigravity CLI 채팅 모델의 승격 대상 (flash 계열/ pro 계열/ lite 계열)
+_SUPPORTED_FLASH_TARGET = "gemini-3.8-flash-high"
+_SUPPORTED_PRO_TARGET = "gemini-3.1-pro-high"
+_SUPPORTED_LITE_TARGET = "gemini-3-flash"
+
+# 이미지 생성 모델(예: google/gemini-2.5-flash-image = Nano Banana)은 AGY CLI 채팅
+# 모델이 아니라 OpenRouter/Google 이미지 API 전용 실모델이므로 절대 치환하지 않는다.
+_IMAGE_MODEL_MARKERS = ("flash-image", "pro-image", "image-preview", "nano-banana", "nano_banana")
+
+
+def migrate_deprecated_model(model_id: Optional[str]) -> Optional[str]:
+    """
+    [🚫 Deprecated AGY Guard] Antigravity CLI 가 더 이상 서비스하지 않는 구형 Gemini
+    채팅 모델을 지원 중인 3.x 모델로 승격한다. 치환 대상이 아니면 None 을 반환한다.
+
+      · gemini-2.5-flash / gemini-2.5-flash-* / gemini-2.0-flash / gemini-1.5-flash → gemini-3.8-flash-high
+      · gemini-2.5-flash-lite (또는 `*lite*`)                                          → gemini-3-flash
+      · gemini-2.5-pro / gemini-2.0-pro / gemini-1.5-pro                               → gemini-3.1-pro-high
+
+    주의: 이미지 생성 모델(`google/gemini-2.5-flash-image`, `gemini-2.5-flash-image`)과
+    외부 provider slug(`google/…`)는 AGY CLI 채팅 모델이 아니므로 건드리지 않는다.
+    """
+    if not model_id:
+        return None
+    raw = str(model_id).strip()
+    if not raw:
+        return None
+    m = raw.lower()
+    # 외부 provider slug (`provider/model`) 는 이미지 모델을 포함해 OpenRouter 전용이므로 제외.
+    if "/" in m:
+        return None
+    # 이미지 생성 모델은 AGY CLI 채팅 라벨이 아니다 (실모델 ID 보존).
+    if any(marker in m for marker in _IMAGE_MODEL_MARKERS):
+        return None
+
+    compact = re.sub(r"[\s_]+", "-", m)
+    compact = re.sub(r"-+", "-", compact).strip("-")
+
+    if compact in DEPRECATED_MIGRATION_MAP:
+        return DEPRECATED_MIGRATION_MAP[compact]
+
+    if "lite" in compact:
+        return _SUPPORTED_LITE_TARGET
+    if any(tag in compact for tag in ("gemini-2.5-pro", "gemini-2.0-pro", "gemini-1.5-pro")):
+        return _SUPPORTED_PRO_TARGET
+    if any(tag in compact for tag in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")):
+        return _SUPPORTED_FLASH_TARGET
+    # `gemini 2.5 flash`, `gemini-2.5` 등 남은 2.x/1.x 표기도 포괄 승격.
+    if re.search(r"gemini-?[12]\.", compact):
+        return _SUPPORTED_PRO_TARGET if "pro" in compact else _SUPPORTED_FLASH_TARGET
+    return None
+
 
 class AntigravityModelRegistry:
     """
@@ -423,6 +475,14 @@ class AntigravityModelRegistry:
         return root_clean in valid_roots or any(root_clean == r for r in valid_roots) or clean.startswith("gemini-3")
 
     @classmethod
+    def migrate_if_deprecated(cls, model_id: Optional[str]) -> Optional[str]:
+        """
+        Antigravity CLI 미지원(구형) Gemini 채팅 모델이면 지원 3.x 모델로 승격해 반환한다.
+        승격 대상이 아니면 None. (전 모듈 공용 진입점 — `migrate_deprecated_model` 참조)
+        """
+        return migrate_deprecated_model(model_id)
+
+    @classmethod
     def resolve_model(
         cls,
         role: str = "coder",
@@ -441,19 +501,11 @@ class AntigravityModelRegistry:
             pref_clean = preferred.strip()
             pref_lower = pref_clean.lower()
 
-            # Check direct migration map
-            if pref_lower in DEPRECATED_MIGRATION_MAP:
-                upgraded = DEPRECATED_MIGRATION_MAP[pref_lower]
+            # Check direct migration map / any deprecated Gemini 2.x-1.x chat model
+            upgraded = migrate_deprecated_model(pref_clean)
+            if upgraded:
                 logger.info(f"ModelRegistry: Upgraded deprecated model '{pref_clean}' -> '{upgraded}'")
                 return upgraded
-
-            # Check if it starts with gemini-2.5 or gemini-2.
-            if pref_lower.startswith("gemini-2.") or "gemini-2.5" in pref_lower or "gemini-2.0" in pref_lower:
-                if "pro" in pref_lower:
-                    logger.info(f"ModelRegistry: Upgraded '{pref_clean}' -> 'gemini-3.1-pro-high'")
-                    return "gemini-3.1-pro-high"
-                logger.info(f"ModelRegistry: Upgraded '{pref_clean}' -> 'gemini-3.8-flash-high'")
-                return "gemini-3.8-flash-high"
 
             # Check if it's an OpenRouter or external model slug
             if pref_lower.startswith("openrouter/") or "/" in pref_lower:

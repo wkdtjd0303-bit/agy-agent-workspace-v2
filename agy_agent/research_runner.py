@@ -9,16 +9,26 @@ from config import (
     ADMIN_CHANNEL_ID,
     NOTIFICATION_CHANNEL_ID,
     AUDITOR_MENTION_USER_ID,
+    RESEARCH_MAX_ROUNDS,
 )
 from session_manager import ChannelSession
 from agent_runner import AgentRunner
 from thermal_guard import ThermalGuard
 from trio_agent_runner import QuotaManager, TrioAgentRunner, compact_agent_context
+from round_control import continual_round_sequence
 from discord_utils import (
     async_prepare_message_payload,
     safe_send_discord_message
 )
 from model_manager import GlobalModelManager
+from output_guard import REWRITE_ONLY_NOTE
+from convergence_policy import (
+    ConvergenceTelemetry,
+    ConvergenceTracker,
+    build_blocking_contract_instruction,
+    resolve_blocking_count,
+)
+import role_authority
 
 logger = logging.getLogger("ResearchRunner")
 
@@ -61,13 +71,15 @@ class ResearchRunner:
         qa_client: Optional[discord.Client] = None,
         auditor_client: Optional[discord.Client] = None,
         on_status_update: Optional[Callable[[str], Any]] = None,
-        max_rounds: int = 3
+        max_rounds: int = RESEARCH_MAX_ROUNDS
     ) -> str:
         session.is_busy = True
         latest_analyst_output = ""
         latest_qa_output = ""
         latest_auditor_output = ""
         channel_id = getattr(main_channel, "id", None)
+        # 🎯 [수렴 계약] 새 미션 시작 시 해당 채널의 차단 결함 추이 기록을 초기화한다.
+        ConvergenceTracker.reset(channel_id or 0)
 
         noti_channel = None
         if hasattr(main_channel, "guild") and main_channel.guild:
@@ -114,7 +126,10 @@ class ResearchRunner:
         feedback_for_analyst = ""
 
         try:
-            for round_num in range(1, max_rounds + 1):
+            # 라운드 상한 도달 시 곧바로 종료하지 않고 예/아니요로 계속 여부를 확인한다.
+            async for round_num, max_rounds in continual_round_sequence(
+                1, max_rounds, channel=main_channel, batch_size=RESEARCH_MAX_ROUNDS
+            ):
                 await ThermalGuard.check_round_transition_cooldown(main_channel)
 
                 # -------------------------------------------------------------
@@ -167,6 +182,23 @@ class ResearchRunner:
                 if cls.is_system_error(latest_analyst_output):
                     return latest_analyst_output
 
+                # 🛡️ [출력 가드] Analyst 보고가 비한국어 문장이면 한국어 재작성 1회 (판정 태그 강제 없음).
+                latest_analyst_output = await TrioAgentRunner.guard_output(
+                    latest_analyst_output,
+                    approved=None,
+                    kind=None,
+                    repair_note=REWRITE_ONLY_NOTE,
+                    rerun=(lambda _p: AgentRunner.run_prompt(
+                        session=session, prompt=_p, model=CODER_MODEL)),
+                )
+
+                # 🛡️ [역할 권한 물리 강제] Analyst(Coder 계열)가 QA 판정 태그를 선언하면 제거한다.
+                latest_analyst_output, _removed_analyst_verdicts = role_authority.strip_coder_verdict_tags(latest_analyst_output)
+                if _removed_analyst_verdicts:
+                    logger.warning(
+                        f"ResearchRunner: Analyst 출력에서 QA 전용 판정 태그 {_removed_analyst_verdicts} 제거(역할 전도 차단)."
+                    )
+
                 # Post Analyst response to main channel
                 analyst_chunks, analyst_file_attachments = await async_prepare_message_payload(
                     latest_analyst_output,
@@ -218,13 +250,19 @@ class ResearchRunner:
                     f"1. **가격 현실성**: 제시된 가격이 현재 실제 구매 가능한 시세인가? 최근 부품값(RAM/SSD) 상승이나 옵션별 실구매가가 반영되었는가? (필요시 `search_web` 직접 실행 검증)\n"
                     f"2. **스펙 정확도**: RAM 확장 여부(온보드 vs SO-DIMM), SSD 규격, 네트워크 포트 등 하드웨어 제원에 오기가 없는가?\n"
                     f"3. **산출물 완성도**: 워크스페이스 내 파일(`.md`, `.html`)이 온전하게 작성 및 저장되었는가?\n"
-                    f"4. **[📉 케이브맨 토큰 다이어트]**: 인사말/수다 배제, 3~5줄 내외의 명사형 종결 개조식으로 간결하게 작성하십시오.\n"
-                    f"5. **주의: 개발 코드/무인 운영 잣대로 평가하지 마십시오. 오직 '정보의 정확성과 유용성'만 평가하십시오.**\n\n"
+                    f"4. **[🗣️ 충분한 검증 의견 개진]**: 인사말/수다는 배제하되 분량 제한 없이, 검증 근거·판정 이유·잔여 리스크를 충분히 구체적으로 서술하십시오.\n"
+                    f"5. **주의: 개발 코드/무인 운영 잣대로 평가하지 마십시오. 오직 '정보의 정확성과 유용성'만 평가하십시오.**\n"
+                    f"6. **[🚫 환각·골대이동 금지]**: 지적 대상이 Analyst 산출물/워크스페이스 파일에 **실제로 존재함을 확인한 뒤에만** 반려하십시오. "
+                    f"'브라우저 미연결로 재실행 불가', '해시·타임스탬프·파일 포맷', '문서 스타일', '환경 제약'처럼 정보의 정확성과 무관한 항목은 "
+                    f"반려 사유가 아니라 [차기 백로그]입니다. 검증 불가 항목은 `BLOCKED`로만 기록하고 반려로 승격하지 마십시오. "
+                    f"이미 승인한 항목을 다시 반려하거나 새로운 기준을 소급 적용하지 마십시오.\n\n"
+                    f"{build_blocking_contract_instruction()}\n\n"
                     f"**[검증 판정 규칙]:**\n"
-                    f"1. 가격/스펙에 명백한 오류가 있거나 핵심 정보가 누락된 경우에만:\n"
-                    f"   - 반드시 첫 줄에 `[STATUS: REJECTED]`를 표기하고, 보강 지침을 간결하게 제시하십시오.\n"
+                    f"1. 가격/스펙의 명백한 오류 또는 핵심 정보 누락(차단 결함)이 있을 때만:\n"
+                    f"   - 첫 줄에 `[STATUS: REJECTED]`, 둘째 줄에 `[BLOCKING_DEFECTS: N]`을 표기하고, 보강 지침을 구체적 근거와 함께 제시하십시오.\n"
                     f"2. 데이터가 정확하고 사용자의 의도를 충실히 만족한다면:\n"
-                    f"   - 반드시 첫 줄에 `[STATUS: APPROVED]`를 표기하고, 3~5줄 내외의 핵심 검증 요약을 작성하십시오."
+                    f"   - 첫 줄에 `[STATUS: APPROVED]`, 둘째 줄에 `[BLOCKING_DEFECTS: 0]`을 표기하고, 검증 통과 근거와 잔여 리스크를 서술하십시오.\n"
+                    f"3. 비차단 항목(스타일/문서/포맷/환경 제약)은 [차기 백로그]로만 기록하며 반려 사유로 삼지 마십시오."
                 )
 
                 qa_proxy = ChannelSession(
@@ -256,6 +294,65 @@ class ResearchRunner:
                 if cls.is_system_error(latest_qa_output):
                     return latest_qa_output
 
+                # 🛡️ [출력 가드] 판정 태그 첫 줄 강제 + 비한국어 응답 한국어 재작성.
+                latest_qa_output = await TrioAgentRunner.guard_output(
+                    latest_qa_output,
+                    approved=TrioAgentRunner.is_qa_approved(latest_qa_output),
+                    kind="qa",
+                    rerun=(lambda _p: TrioAgentRunner.run_qa_turn(session=session, prompt=_p)),
+                )
+
+                qa_approved = TrioAgentRunner.is_qa_approved(latest_qa_output)
+
+                # 🎯 수렴 계약 (Convergence & Honesty Contract)
+                #   Fact Checker 반려가 "비차단 항목만 잔존"인지 "차단 결함 정체"인지 기계 판정한다.
+                #   마커([BLOCKING_DEFECTS: N])가 없으면 기존 동작을 그대로 보존한다(보수적 폴백).
+                if not qa_approved:
+                    try:
+                        _blk_count, _blk_src = resolve_blocking_count(latest_qa_output)
+                        if _blk_count is not None:
+                            ConvergenceTracker.record(channel_id or 0, _blk_count)
+                        _force_accept = ConvergenceTracker.should_force_accept(channel_id or 0)
+                        _escalate = (not _force_accept) and ConvergenceTracker.should_escalate(channel_id or 0)
+                        ConvergenceTelemetry.record(
+                            channel_id or 0, "fact_checker", _blk_count, _blk_src,
+                            "force_accept" if _force_accept else ("escalate" if _escalate else "observed"),
+                        )
+                        if _force_accept:
+                            logger.info(
+                                "ResearchRunner: Convergence Contract — Fact Checker rejected but "
+                                "[BLOCKING_DEFECTS: 0]; accepting with non-blocking backlog."
+                            )
+                            session.set_status("busy", "📉 비차단 항목만 잔존 → 수렴 승인 처리")
+                            qa_approved = True
+                            latest_qa_output = role_authority.format_system_gate_override(
+                                approved=True,
+                                title="✅ **[시스템 게이트 수렴 승인 — 비차단 항목만 잔존]**",
+                                blocking_defects=0,
+                                detail=(
+                                    "Fact Checker가 반려를 선언했으나 `[BLOCKING_DEFECTS: 0]` — 남은 항목은 정보의 "
+                                    "정확성과 무관한 비차단(스타일/문서/포맷/환경 제약) 항목뿐입니다. 수렴 계약에 따라 "
+                                    "승인 처리하고 잔여 항목은 [차기 백로그]로 이관합니다."
+                                ),
+                                original=latest_qa_output,
+                            )
+                            await send_transit_notice("📉 **[Fact Checker 반려 무효 — 비차단 항목만 잔존]** 차단 결함 0건 → 수렴 승인 처리합니다.")
+                        elif _escalate:
+                            _trend = ConvergenceTracker.describe(channel_id or 0)
+                            logger.warning(
+                                f"ResearchRunner: Convergence Contract — blocking defects not decreasing. {_trend}"
+                            )
+                            session.set_status("warning", "🛑 차단 결함 수렴 실패 (No-Progress)")
+                            _conv_notice = (
+                                f"🚨 **[리서치 수렴 실패 차단 — 차단 결함 감소 정지]**\n{_trend}\n"
+                                f"차단 결함이 2회 연속 줄지 않아 상한까지 라운드를 소진하기 전에 중단합니다. "
+                                f"사용자 개입 또는 범위 축소가 필요합니다."
+                            )
+                            await send_transit_notice(_conv_notice)
+                            return _conv_notice
+                    except Exception as _conv_err:
+                        logger.debug(f"ResearchRunner convergence contract evaluation skipped: {_conv_err}")
+
                 qa_chunks, qa_file_attachments = await async_prepare_message_payload(
                     latest_qa_output,
                     workspace_root=session.workspace,
@@ -265,8 +362,6 @@ class ResearchRunner:
                 for idx, chunk in enumerate(qa_chunks):
                     files_payload = qa_file_attachments if idx == 0 else []
                     await safe_send_discord_message(qa_target_channel, chunk, files=files_payload)
-
-                qa_approved = TrioAgentRunner.is_qa_approved(latest_qa_output)
 
                 if not qa_approved:
                     feedback_for_analyst = f"[Fact Checker({qa_display_name}) 반려 사유]\n{latest_qa_output}"
@@ -278,12 +373,13 @@ class ResearchRunner:
                 await ThermalGuard.check_round_transition_cooldown(main_channel)
 
                 # -------------------------------------------------------------
-                # Step 3: Chief Auditor Turn (Gemini 3.1 Pro High) - One-Shot Fast Approval
+                # Step 3: Chief Auditor Turn (config.AUDITOR_MODEL) - One-Shot Fast Approval
                 # -------------------------------------------------------------
+                auditor_display = GlobalModelManager.get_role_model_display("auditor")
                 session.set_busy(True, f"⚖️ Chief Auditor 최종 승인 검토 중 ({round_num}/{max_rounds}R)")
                 if on_status_update:
                     await on_status_update(
-                        f"⚖️ **[라운드 {round_num}/{max_rounds}] Chief Auditor(Gemini 3.1 Pro High)가 실전 구매 적합성 최종 감사를 시작합니다...**"
+                        f"⚖️ **[라운드 {round_num}/{max_rounds}] Chief Auditor({auditor_display})가 실전 구매 적합성 최종 감사를 시작합니다...**"
                     )
 
                 auditor_target_channel = auditor_channel or main_channel
@@ -308,8 +404,7 @@ class ResearchRunner:
                     f"🚨 **[감사 판정 및 출력 양식]**:\n"
                     f"1. **🎯 사용자 질문에 대한 직접 답변 최우선**: 최상단에 사용자 질문에 대한 명쾌한 답변을 1:1로 직접 작성하십시오.\n"
                     f"2. 사용자 질문 의도에 부합하는 추천 모델, 가격, 스펙 비교, 실전 팁이 갖추어졌다면 **반드시 첫 줄에 `[STATUS: AUDIT_PASSED]`를 표기하여 즉시 승인하십시오.**\n"
-                    f"3. **[📉 케이브맨 토큰 다이어트 & 가독성]**: 인사말/수다 배제, 500~800자 이내의 명사형 종결 개조식(핵심 추천 모델, 장단점 비교, 구매 가이드)으로 압축 작성하십시오.\n"
-                    f"4. 하단에 `---\n### 🛡️ 3중 리서치 팩트체크 검증 요약`을 콤팩트하게 덧붙여주십시오."
+                    f"3. 하단에 `---\n### 🛡️ 3중 리서치 팩트체크 검증 요약`을 콤팩트하게 덧붙여주십시오."
                 )
 
                 auditor_proxy = ChannelSession(
@@ -343,6 +438,14 @@ class ResearchRunner:
 
                 auditor_passed = TrioAgentRunner.is_auditor_approved(latest_auditor_output)
 
+                # 🛡️ [출력 가드] 감사 판정 태그 첫 줄 강제 + 비한국어 응답 한국어 재작성.
+                latest_auditor_output = await TrioAgentRunner.guard_output(
+                    latest_auditor_output,
+                    approved=auditor_passed,
+                    kind="auditor",
+                    rerun=(lambda _p: TrioAgentRunner.run_auditor_turn(session=session, prompt=_p)),
+                )
+
                 # Prepend user mention on AUDIT_PASSED for push notification
                 auditor_send_text = latest_auditor_output
                 if auditor_passed and AUDITOR_MENTION_USER_ID:
@@ -367,6 +470,13 @@ class ResearchRunner:
 
                 if auditor_passed:
                     session.set_status("idle", "🟢 최종 감사 승인 완료 (정상 대기)")
+                    # 📊 수렴 계약 계측: 마커 방출률·수렴/에스컬레이션을 물리 리포트로 남긴다.
+                    try:
+                        ConvergenceTelemetry.export(
+                            channel_id or 0, session.workspace, milestone=prompt[:60]
+                        )
+                    except Exception as _tel_err:
+                        logger.debug(f"Convergence telemetry export skipped: {_tel_err}")
                     user_mention_str = f"<@{AUDITOR_MENTION_USER_ID}> " if AUDITOR_MENTION_USER_ID else ""
                     success_tag = f"{user_mention_str}📚 **[3중 에이전트 심층 리서치 완료 - 최종 승인]** (라운드 {round_num}/{max_rounds})"
                     await send_transit_notice(success_tag)

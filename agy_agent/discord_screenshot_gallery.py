@@ -28,13 +28,24 @@ from typing import Any, Iterable, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger("ScreenshotGallery")
 
-# 스크린샷이 생성되는 대표 디렉터리 (VCL DEFAULT_SCREENSHOT_DIRS와 정합)
+# 스크린샷이 생성되는 대표 디렉터리 (VCL DEFAULT_SCREENSHOT_DIRS 및 E2E 테스트 경로와 정합)
 DEFAULT_SCREENSHOT_DIRS: Tuple[str, ...] = (
     os.path.join("reports", "gate5", "screenshots"),
     os.path.join("reports", "screenshots"),
     os.path.join("reports", "qa_screenshots"),
+    os.path.join("reports", "e2e"),
+    os.path.join("reports"),
     "screenshots",
+    os.path.join("tests", "screenshots"),
+    os.path.join("test", "screenshots"),
+    os.path.join("tests", "e2e", "screenshots"),
+    os.path.join("test-results"),
+    os.path.join("playwright-report"),
+    os.path.join(".playwright"),
     os.path.join("app", "build", "outputs", "roborazzi"),
+    os.path.join("app", "build", "reports", "androidTests", "connected"),
+    os.path.join("build", "reports", "tests"),
+    "",  # 워크스페이스 루트 자체의 screenshot*.png / *.png
 )
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")

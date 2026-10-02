@@ -11,6 +11,11 @@ from config import AGY_PATH, AGY_PRINT_TIMEOUT, WATCHDOG_TOOL_TIMEOUT, WATCHDOG_
 import config
 from session_manager import ChannelSession
 from discord_utils import format_tool_status, cleanse_agent_output
+import role_authority
+
+# [🛡️ 3603초 프리징 차단] 비-AGY 엔진 어댑터의 '하드 상한'에 더하는 여유(초).
+# 어댑터 자체 타임아웃(기본 3600s) + 이 값이 최종 강제 회수 시점이 된다.
+_ADAPTER_CEILING_GRACE_SECONDS = float(os.getenv("NON_AGY_ENGINE_CEILING_GRACE", "90") or 90)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,12 @@ async def safe_tool_notify(on_tool_update_fn: Optional[Callable[[str], Any]], ms
 
 TOOL_SAFETY_HEADER = (
     "[CRITICAL SYSTEM & TOOL SAFETY INSTRUCTIONS]\n"
+    "0. ZERO-CLARIFICATION & UNINTERRUPTED AUTONOMY MANDATE (무질문 자율 진행 — 최우선 규칙):\n"
+    "   - 사용자에게 절대 되묻거나 확인/승인/추가 정보를 요청하지 마십시오. (금지 예: '~해도 될까요?', '어느 방식을 원하세요?', '두 가지만 여쭙겠습니다', '진행할까요?')\n"
+    "   - 요청이 모호하거나 정보가 부족하면, 가장 합리적인 가정(assumption)을 스스로 선택해 짧게 명시하고 즉시 끝까지 실행하십시오.\n"
+    "   - '먼저 파악하겠습니다 / 확인이 필요합니다' 같은 예고·질문으로 턴을 끝내지 말고, 같은 턴에서 실제 산출물(코드/파일/결과)까지 완성하십시오.\n"
+    "   - 이 환경은 비대면(Discord)이므로 사용자의 추가 답변을 받을 수 없습니다. 오직 자율 진행만이 정답입니다.\n"
+    "   - `ask_question` / `question` 도구 및 사용자 입력 대기(wait)를 절대 사용하지 마십시오.\n"
     "1. TOOL USAGE RULES (CRITICAL - AVOIDS SYSTEM CRASH):\n"
     "   - `find_by_name`: MANDATORY `Pattern` required (e.g. `Pattern: \"*\"`). Missing `Pattern` causes fatal crash (`missing property 'Pattern'`)!\n"
     "   - `write_to_file`: NEVER pass `ArtifactMetadata` on workspace/project files. Use only for internal brain/ files.\n"
@@ -41,8 +52,13 @@ TOOL_SAFETY_HEADER = (
     "   - [레퍼런스 이미지 외곽선 추출(Tracing) 및 소스코드 내 로드 원천 금지 / Anti-Tracing & Anti-Plagiarism]: 레퍼런스 이미지 외곽선 추출/픽셀 복사 엄격 금지. 순수 절차적 코드/3D/셰이더 생성.\n"
     "   - [가시적 실체 구현 헌법]: 단순 주석/테스트 눈속임(비가시적 눈속임) 금지. 실동작 UI/핵심 로직 구현 (비UI 과제는 전략/자동화 산출물 완결).\n"
     "7. DEFAULT TIMESTAMPED BUILD ARTIFACT MANDATE: 바이너리/APK 빌드 시 타임스탬프(`{AppName}-YYYYMMDD_HHMMSS.apk`) 및 `-latest.apk` 동시 생성.\n"
-    "8. COMMANDER-APPROVED VISUAL ASSET TAXONOMY: `generate_image`는 사령관(<@1539448922643234876>) 승인 시만 호출. Type A(풀컷)/Type B(단일 객체/단색 배경) 2원화.\n"
+    "8. IMAGE GENERATOR TOOL (실제 AI 이미지 생성): 사용자가 로고·아이콘·배너 등 **실제 이미지 에셋을 요청한 경우에만** 사용하십시오. PIL/Canvas/도형으로 그림을 그려 대체하지 말고, 요청이 있을 때 아래 두 태그 중 하나를 본문에 남기십시오.\n"
+    "   - 신규 생성 태그: `IMAGE_REQUEST` + `:` 뒤에 JSON 객체 — 키는 `prompt`(설명), `asset_name`(영문_이름), `aspect_ratio`(예: 1:1)\n"
+    "   - 기존 수정 태그: `IMAGE_EDIT` + `:` 뒤에 JSON 객체 — 위 키들에 `source_image`(경로) 추가\n"
+    "   ※ 위 설명은 형식 안내이며, **실제 요청이 있을 때만** 태그를 작성하십시오. 요청이 없으면 태그를 절대 출력하지 마십시오. (요청 없이 태그를 남기면 불필요한 이미지 생성이 트리거됩니다.)\n"
+    "8-b. IMAGE EDIT TOOL (기존 이미지 부분 수정): 이미 배치된 에셋을 '고치고' 싶을 때는 위 `IMAGE_EDIT` 태그(`source_image` 필수)를 사용하십시오. 원본을 찾지 못하면 이미지 봇은 새 그림으로 대체하지 않고 정직하게 실패를 보고합니다.\n"
     "9. STRICT WORKSPACE CONFINEMENT: 지정 워크스페이스(CWD) 외부 파일 접근/탐색/수정 절대 금지.\n"
+    "9-b. AGY CODING GUIDELINES (AGY_AGENT.md): 자율완결·단순성·국소변경·목표기반 검증·정직/증거 우선 규범. 아래 AGY_AGENT.md 발췌를 준수하십시오.\n"
     "10. COMPREHENSIVE REASONING & COMPACT CODE REPORT:\n"
     "    - 사용자 질문, 진단, 평가, 해결책에 대해 충분히 깊이 있고 논리적으로 완성도 높은 분석과 답변을 제공하십시오. 단, 불필요한 수백 줄의 소스코드 전체 원본 덤프나 감정적 미사여구는 배제하고 핵심 변경 사항(diff 및 요약)을 명확하게 제시하십시오.\n"
     "11. CLEAN MONOLOGUE-FREE USER-FACING REPORTING:\n"
@@ -55,11 +71,24 @@ TOOL_SAFETY_HEADER = (
     "    - [반응형 텍스트 쪼개짐 방어]: 버튼/탭/칩 텍스트가 공간 부족으로 '단절 / 테스 / 트'처럼 세로로 쪼개지지 않도록 maxLines = 1, overflow = TextOverflow.Ellipsis, minWidth와 패딩을 반드시 지정하십시오.\n"
     "    - [아이콘 대원칙]: 24~48dp 크기 버튼/탭/아이콘 영역에는 절대 생성형 AI 비트맵 썸네일을 축소해 욱여넣지 말고 안드로이드 공식 Material Icons/벡터 드로어블만 사용하십시오.\n"
     "    - [AI 클리셰 더미 데이터 금지]: '김민수 수석연구원', '1페이지 펜 필기 검토 중' 등 천편일률적 LLM 생성 더미 데이터를 배제하고 실제 제품 도메인에 부합하는 자연스러운 데이터를 사용하십시오.\n"
-    "    - [모바일 360dp 뷰포트 적응형 툴바]: 상단 툴바에는 핵심 액션 최대 3개만 노출하고, 4개 이상은 반드시 '더보기(⋮)' 드롭다운 메뉴로 수납하여 화면 밖으로 메뉴가 삐져나가지 않도록 설계하십시오.\n\n"
+    "    - [모바일 360dp 뷰포트 적응형 툴바]: 상단 툴바에는 핵심 액션 최대 3개만 노출하고, 4개 이상은 반드시 '더보기(⋮)' 드롭다운 메뉴로 수납하여 화면 밖으로 메뉴가 삐져나가지 않도록 설계하십시오.\n"
+    "14. ABSOLUTE KOREAN-ONLY OUTPUT LANGUAGE & VERDICT-FIRST MANDATE (한국어 전용 출력 및 판정 첫 줄 강제):\n"
+    "    - **모든 답변/판정/설명/근거는 예외 없이 자연스러운 한국어 문장으로 작성하십시오.** 영어/중국어/일본어 등 외국어 문장 출력은 엄격히 금지됩니다. (코드·명령어·파일명·식별자는 원문 유지 가능)\n"
+    "    - **리뷰어 역할(QA/Auditor)은 답변 첫 줄을 반드시 판정 태그로 시작하십시오**: `[STATUS: APPROVED]`, `[STATUS: REJECTED]`, `[STATUS: AUDIT_PASSED]`, `[STATUS: AUDIT_FAILED]`. 판정 태그를 본문 중간/하단에만 두거나 누락하면 시스템이 무효 처리할 수 있습니다.\n\n"
 )
+
+# [🧭 AGY 코딩 행동규범 주입] AGY_AGENT.md 런타임 요약을 AGY 네이티브 프롬프트 헤더에 결합한다.
+# 파일이 없어도 무중단(빈 문자열 폴백)으로 동작한다.
+try:
+    from agent_guidelines import AGY_AGENT_GUIDELINES as _AGY_HEADER_GUIDELINES
+except Exception:  # 무중단 폴백
+    _AGY_HEADER_GUIDELINES = ""
+if _AGY_HEADER_GUIDELINES:
+    TOOL_SAFETY_HEADER = TOOL_SAFETY_HEADER + _AGY_HEADER_GUIDELINES + "\n\n"
 
 TOOL_SAFETY_FOOTER = (
     "\n\n[TOOL SAFETY REMINDER — CRITICAL]\n"
+    "- ZERO-CLARIFICATION: NEVER ask the user questions/confirmations or wait for approval. Choose the most reasonable assumption, state it briefly, and proceed to full completion in the SAME turn.\n"
     "- Do NOT use `ask_question`, `wait`, `sleep`, or `schedule` tools. (Subagents via `invoke_subagent` are supported.)\n"
     "- STRICT DIRECTORY BOUNDARY: never access or modify files outside the designated workspace.\n"
     "- `find_by_name`: ALWAYS supply `Pattern`. `write_to_file`: OMIT `ArtifactMetadata` on workspace files.\n"
@@ -133,6 +162,36 @@ async def safe_on_tool_update(on_tool_update_fn, msg: str):
         pass
 
 
+# [집중 과제 관련성 판정] 한국어/영문 토큰 단위로 현재 프롬프트와 교집합이 있을 때만 주입한다.
+# 일반적인 개발 동사·명사는 어디에나 등장하므로 제외하여 오탐(무관한 과제 주입)을 막는다.
+_FOCUS_TOKEN_RE = re.compile(r"[0-9A-Za-z]{3,}|[가-힣]{2,}")
+_FOCUS_GENERIC_TOKENS = frozenset({
+    "기능", "추가", "구현", "개발", "개선", "수정", "변경", "적용", "반영",
+    "테스트", "문서", "화면", "버튼", "사용자", "프로젝트", "작업", "지원",
+    "관련", "핵심", "단계", "기본", "메인", "전체", "phase", "step",
+    "implement", "add", "update", "apply", "support", "core", "first",
+})
+
+
+def _is_focused_task_relevant(focused_task: Optional[str], prompt: str) -> bool:
+    """ROADMAP/PRD 의 '집중 과제'가 현재 사용자 프롬프트와 실제로 관련될 때만 주입한다.
+
+    배경: 폴더마다 첫 미완료 ROADMAP 항목 또는 첫 PRD REQ 가 고정 주입되어, 동일한 사용자
+    요청에도 프로젝트 폴더별로 서로 다른 과제가 컨텍스트를 오염시켜 답변 방향/양식이 달라졌다.
+    무관한 고정 과제는 주입하지 않고, 실제로 맞닿은 경우에만 집중 과제로 제공한다.
+    """
+    if not focused_task or not prompt:
+        return False
+    prompt_lower = prompt.lower()
+    for token in _FOCUS_TOKEN_RE.findall(focused_task):
+        t = token.lower()
+        if len(t) < 2 or t in _FOCUS_GENERIC_TOKENS:
+            continue
+        if t in prompt_lower:
+            return True
+    return False
+
+
 def get_workspace_grounding_context(workspace: Optional[str], prompt: str = "") -> str:
     """
     Prompt Injection Diet:
@@ -143,6 +202,9 @@ def get_workspace_grounding_context(workspace: Optional[str], prompt: str = "") 
         return ""
 
     # 1. Focused Milestone Task
+    #    [FIX] `[차기 백로그]`(backlog) 항목은 '지금 집중할 과제'가 아니다. 폴더마다 첫 미완료
+    #          ROADMAP 항목이 고정 주입되면서, 동일한 사용자 요청에도 프로젝트 폴더별로 다른
+    #          백로그 과제가 컨텍스트를 오염시켜 답변 방향/양식이 달라지던 문제를 제거한다.
     focused_task = None
     roadmap_path = os.path.join(workspace, "ROADMAP.md")
     if os.path.isfile(roadmap_path):
@@ -152,9 +214,12 @@ def get_workspace_grounding_context(workspace: Optional[str], prompt: str = "") 
                     line_s = line.strip()
                     if line_s.startswith("- [ ]") or line_s.startswith("* [ ]"):
                         clean_task = re.sub(r"^[-*]\s*\[\s*\]\s*", "", line_s)
-                        if clean_task:
-                            focused_task = clean_task[:150]
-                            break
+                        if not clean_task:
+                            continue
+                        if re.search(r"\[?\s*(차기\s*백로그|backlog)\s*\]?", clean_task, re.IGNORECASE):
+                            continue
+                        focused_task = clean_task[:150]
+                        break
         except Exception:
             pass
 
@@ -170,6 +235,10 @@ def get_workspace_grounding_context(workspace: Optional[str], prompt: str = "") 
                             break
             except Exception:
                 pass
+
+    # 무관한 고정 과제는 주입하지 않는다(폴더별 컨텍스트 오염 → 답변 불일치 방지).
+    if focused_task and not _is_focused_task_relevant(focused_task, prompt):
+        focused_task = None
 
     # 2. Active Profile & Essential Constraints (<= 3 constraints)
     profile_path = os.path.join(workspace, "profiles", "active_profile.md")
@@ -312,6 +381,105 @@ class AgentRunner:
                 pass
 
     @classmethod
+    def _force_reclaim_current_process(cls, session: ChannelSession) -> None:
+        """[🛡️ 프리징 차단] 세션이 붙잡고 있는 CLI 프로세스를 즉시 강제 회수한다."""
+        proc = getattr(session, "current_process", None)
+        if proc is not None:
+            pid = getattr(proc, "pid", None)
+            if pid:
+                try:
+                    cls.kill_descendants(pid)
+                except Exception:
+                    pass
+                # [🛡️ 자살 방지] 봇과 같은 PGID 를 그룹 kill 하면 봇 자신이 죽는다.
+                try:
+                    if os.getpgid(pid) != os.getpgrp():
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except Exception:
+                    pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            session.current_process = None
+        except Exception:
+            pass
+
+    @classmethod
+    async def _run_adapter_with_hard_ceiling(
+        cls,
+        adapter,
+        session: ChannelSession,
+        prompt: str,
+        on_tool_update: Optional[Callable[[str], Any]],
+        model: Optional[str],
+        role: Optional[str],
+        conversation_id_attr: Optional[str] = None,
+    ) -> Tuple[int, str, List[str]]:
+        """비-AGY 엔진 어댑터 실행을 '하드 상한'으로 감싼다.
+
+        어댑터 내부 타임아웃(기본 3600s)을 넘겨도 프로세스가 reap 되지 못해
+        채널이 영구 프리징(예: 상태 타이머 3603초 고정)되는 것을 원천 차단한다.
+        """
+        engine_timeout = float(getattr(config, "NON_AGY_ENGINE_TIMEOUT", 3600.0))
+        # [⏱️ 확장 QA 장기 대기] QA 역할(qa1..qa10/auditor/single_qa2)은 느리게 응답하는
+        # 모델의 정상 생성을 끝까지 기다리도록 EXTENDED_QA_TIMEOUT(기본 4000s) 예산을 보장한다.
+        role_str = (role or getattr(session, "role", "") or "").lower().strip()
+        is_qa_role = (
+            role_str.startswith("qa")
+            or role_str in ("reviewer", "qa_bot", "auditor", "single_qa2")
+        )
+        if is_qa_role:
+            engine_timeout = max(engine_timeout, float(getattr(config, "EXTENDED_QA_TIMEOUT", 4000.0)))
+        ceiling = max(1.0, engine_timeout + _ADAPTER_CEILING_GRACE_SECONDS)
+        # [🚫 무질문 자율 진행] build_command 단계에서 지시문을 주입하지 않는 엔진
+        # (codex/claude/copilot 등)은 여기서 프롬프트 최상단에 강제 주입하여,
+        # 비대면(Discord) 환경에서 에이전트가 사용자에게 되묻고 멈추는 것을 원천 차단한다.
+        if not getattr(adapter, "injects_autonomy_directive", False):
+            try:
+                from engine_manager import AUTONOMY_NO_QUESTION_DIRECTIVE as _no_q
+                if _no_q not in (prompt or ""):
+                    prompt = f"{_no_q}\n\n{prompt}"
+            except Exception:
+                pass
+        try:
+            exec_kwargs = dict(
+                session=session,
+                prompt=prompt,
+                on_tool_update=on_tool_update,
+                model=model,
+                role=role,
+                conversation_id_attr=conversation_id_attr,
+            )
+            # QA 역할에만 어댑터 자체 상한을 장기 예산으로 명시 전달한다(비-QA 기본값 불변).
+            if is_qa_role:
+                exec_kwargs["timeout"] = engine_timeout
+            return await asyncio.wait_for(
+                adapter.execute(**exec_kwargs),
+                timeout=ceiling,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Engine '{getattr(adapter, 'engine_id', '?')}' adapter exceeded hard ceiling "
+                f"({ceiling:.0f}s). Force-terminating and returning control."
+            )
+            cls._force_reclaim_current_process(session)
+            await safe_tool_notify(
+                on_tool_update,
+                "⛔ **[하드 타임아웃 회수]** 엔진 응답이 제한 시간을 초과하여 프로세스를 강제 회수했습니다. 모델/라우터 상태를 확인하세요.",
+            )
+            return (
+                -2,
+                (
+                    f"⛔ **[{getattr(adapter, 'icon', '')} {getattr(adapter, 'name', 'Engine')}] 하드 타임아웃 초과**\n"
+                    f"실행 제한 시간({int(engine_timeout)}초)을 넘겨 프로세스를 안전하게 회수했습니다.\n"
+                    "💡 모델/라우터 오류(HTTP 400) 또는 네트워크 정체 여부를 확인하세요."
+                ),
+                ["Hard ceiling timeout — process reclaimed"],
+            )
+
+    @classmethod
     async def _execute_single_run(
         cls,
         session: ChannelSession,
@@ -400,6 +568,24 @@ class AgentRunner:
         except Exception:
             is_native = any(nm in effective_model.lower() for nm in ("gemini-3", "claude-sonnet", "claude-opus", "gpt-oss", "oss"))
 
+        from engine_manager import normalize_engine_id, EngineManager
+        current_sess_eng = normalize_engine_id(getattr(session, "engine", "agy") if session else "agy")
+        if current_sess_eng == "cmdc":
+            cmdc_adapter = EngineManager.get_adapter("cmdc")
+            if cmdc_adapter:
+                logger.info(
+                    f"Direct Dispatch: Engine is Command Code (cmdc); dispatching model '{effective_model}' to cmdc adapter."
+                )
+                code, resp, errors = await cls._run_adapter_with_hard_ceiling(
+                    cmdc_adapter,
+                    session=session,
+                    prompt=prompt,
+                    on_tool_update=on_tool_update,
+                    model=effective_model,
+                    role=session_role,
+                )
+                return code, resp, errors, []
+
         if is_native:
             pass
         elif effective_model.lower().startswith(("opencode-go/", "opencode/")):
@@ -411,12 +597,13 @@ class AgentRunner:
                 logger.info(
                     f"Direct Dispatch: OpenCode model '{effective_model}' dispatched directly to OpenCode adapter (opencode CLI session)."
                 )
-                code, resp, errors = await opencode_adapter.execute(
+                code, resp, errors = await cls._run_adapter_with_hard_ceiling(
+                    opencode_adapter,
                     session=session,
                     prompt=prompt,
                     on_tool_update=on_tool_update,
                     model=effective_model,
-                    role=session_role
+                    role=session_role,
                 )
                 return code, resp, errors, []
         elif (
@@ -430,12 +617,13 @@ class AgentRunner:
                 logger.info(
                     f"Direct Dispatch: Non-Antigravity OpenRouter model '{effective_model}' dispatched directly to Hermes Agent (OpenRouter API) without Gemini fallback."
                 )
-                code, resp, errors = await hermes_adapter.execute(
+                code, resp, errors = await cls._run_adapter_with_hard_ceiling(
+                    hermes_adapter,
                     session=session,
                     prompt=prompt,
                     on_tool_update=on_tool_update,
                     model=effective_model,
-                    role=session_role
+                    role=session_role,
                 )
                 return code, resp, errors, []
 
@@ -524,6 +712,11 @@ class AgentRunner:
         last_activity_time = time.time()
         last_heartbeat_time = time.time()
         last_discord_update_time = time.time()
+        # [🛡️ StallGuard] 작업 시작 시점 하트비트 (무응답 감시 기준 시각)
+        try:
+            session.touch("turn_start")
+        except Exception:
+            pass
         is_tool_running = False
         is_subagent_running = False
         has_subagents_active = False
@@ -634,6 +827,11 @@ class AgentRunner:
 
                 last_activity_time = time.time()
                 child_swept = False  # Reset child sweep flag on new output
+                # [🛡️ StallGuard] CLI 가 실제로 출력을 내뿜었다 = 진짜 진행 → 채널 하트비트 갱신
+                try:
+                    session.touch("stdout")
+                except Exception:
+                    pass
 
                 line_str = line.decode("utf-8", errors="replace").strip()
                 if not line_str:
@@ -662,6 +860,12 @@ class AgentRunner:
                             tool_info = step.get("tool_info", {})
                             if state == "ACTIVE":
                                 is_tool_running = True
+                                # [🛡️ StallGuard] 도구 전이는 '진짜 진행' → 하트비트 갱신.
+                                # (디스코드 8초 임베드가 아닌 실제 상태 전이만 갱신한다.)
+                                try:
+                                    session.touch("tool_active")
+                                except Exception:
+                                    pass
                                 is_subagent_running = bool(tool_name == "invoke_subagent" or "subagent" in (tool_name or "").lower())
                                 if is_subagent_running:
                                     has_subagents_active = True
@@ -679,6 +883,11 @@ class AgentRunner:
                             elif state in ("DONE", "ERROR", "CANCELED"):
                                 is_tool_running = False
                                 is_subagent_running = False
+                                # [🛡️ StallGuard] 도구 종료도 '진짜 진행' → 하트비트 갱신.
+                                try:
+                                    session.touch("tool_done")
+                                except Exception:
+                                    pass
                                 tool_cost_sec = int(time.time() - tool_start_time) if tool_start_time > 0 else 0
                                 tool_start_time = 0.0
                                 last_discord_update_time = time.time()
@@ -757,6 +966,48 @@ class AgentRunner:
         model: Optional[str] = None,
         conversation_id_attr: Optional[str] = None,
         engine: Optional[str] = None,
+        role: Optional[str] = None,
+        guard_role_authority: bool = True,
+    ) -> str:
+        """[역할 권한 경계 강제] 모든 실행 경로의 단일 관문.
+
+        구현 역할(Coder/Analyst/Architect/General 등)이 `[STATUS: ...]` 판정 태그를
+        선언하면 반환 직전에 결정론적으로 제거한다. 이로써 trio 파이프라인뿐 아니라
+        single/qa_hub/auto_pilot/self_healing 등 `run_prompt` 를 직접 호출하는 모든 경로에서
+        "Coder 가 승인/반려를 판정한다"는 역할 전도(Role Inversion)가 원천 차단된다.
+
+        - 판정 역할(qa/auditor*)은 원문을 그대로 보존한다(정상 판정).
+        - `guard_role_authority=False` 는 trio 처럼 탐지→재작업 지시→정화의 정교한
+          절차를 자체 수행하는 호출자만 사용한다(이중 처리 방지).
+        """
+        response = await cls._run_prompt_impl(
+            session=session,
+            prompt=prompt,
+            on_tool_update=on_tool_update,
+            model=model,
+            conversation_id_attr=conversation_id_attr,
+            engine=engine,
+            role=role,
+        )
+        if guard_role_authority and isinstance(response, str):
+            session_role = (role or getattr(session, "role", None) or "coder")
+            response, removed = role_authority.enforce_role_output_authority(session_role, response)
+            if removed:
+                logger.warning(
+                    f"AgentRunner: 역할 전도 차단 — '{session_role}' 출력에서 판정 태그 "
+                    f"{removed} 를 물리 제거했습니다(판정 권한은 QA/Auditor 전용)."
+                )
+        return response
+
+    @classmethod
+    async def _run_prompt_impl(
+        cls,
+        session: ChannelSession,
+        prompt: str,
+        on_tool_update: Optional[Callable[[str], Any]] = None,
+        model: Optional[str] = None,
+        conversation_id_attr: Optional[str] = None,
+        engine: Optional[str] = None,
         role: Optional[str] = None
     ) -> str:
         """
@@ -816,8 +1067,8 @@ class AgentRunner:
                     effective_model = model or getattr(session, "qa_model", None) or getattr(session, "engine_model", None)
                 elif session_role.startswith("qa"):
                     effective_model = model or getattr(session, "engine_model", None)
-                elif session_role == "consultant" or getattr(session, "mode", "") == "single_plus":
-                    effective_model = model or getattr(session, "consultant_model", None) or getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
+                elif session_role == "image":
+                    effective_model = model or getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
                 else:
                     effective_model = model or getattr(session, "engine_model", None)
                 # [FIX] opencode-go/* · opencode/* 모델은 배정 엔진과 무관하게 OpenCode CLI 로 직행합니다.
@@ -829,7 +1080,11 @@ class AgentRunner:
                             f"Direct Dispatch: OpenCode model '{effective_model}' rerouted from engine '{engine_id}' to OpenCode adapter."
                         )
                         adapter = opencode_adapter
-                code, resp, errors = await adapter.execute(
+                # [🛡️ 프리징 차단] 엔진 어댑터가 내부적으로 멈춰도 채널이 영구 정지하지 않도록
+                # 어댑터 자체 타임아웃(기본 3600s)보다 약간 긴 상한(hard ceiling)을 건다.
+                # (실제 장애: 3603초 상태 타이머 고정 → 채널 영구 프리징)
+                code, resp, errors = await cls._run_adapter_with_hard_ceiling(
+                    adapter,
                     session=session,
                     prompt=prompt,
                     on_tool_update=on_tool_update,
@@ -1007,7 +1262,9 @@ class AgentRunner:
                 not getattr(session, "is_stopped", False)
                 and (
                     "무응답 교착" in err_msg
+                    or "무응답 상태 지속" in err_msg
                     or "Deadlock" in err_msg
+                    or "안전 종료되었습니다" in err_msg
                     or returncode in (-9, 137)
                 )
             )

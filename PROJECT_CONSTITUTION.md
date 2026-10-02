@@ -44,6 +44,7 @@
 ## 8. 🎨 시각 완성도 계약 (Visual Craft Contract · GUI 프로젝트 강제)
 * **작업 도구 우선 (Tool-first)**: 앱/웹의 첫 화면은 마케팅 랜딩페이지가 아니라 작업 공간입니다. 상단 히어로/홍보 배너를 1차 콘텐츠 위에 배치하지 않습니다.
 * **수치 규격화**: 여백은 4/8pt 그리드, 타이포는 3단계(Display/Body/Caption), 색상은 Primary 1종 + Neutral 계조로 제한합니다.
+* **공개 표준 그라운딩 (Public Standard First)**: 플랫폼별 공개 디자인 표준(Google Material 3 · Apple HIG · Microsoft Fluent 2 · IBM Carbon)을 기본값으로 삼습니다. 사용자 취향 입력이 없어도 형태(radius)·엘리베이션·인터랙션 상태·접근성(명암비 4.5:1)·필수 상태 커버리지(로딩/빈 상태/에러/비활성) 디테일을 표준에서 결정적으로 채우며, 사용자 입력은 오버라이드로만 반영합니다. 기준은 `design_systems_kb.py` 이고 계약의 `design_system` 섹션으로 Coder/QA 프롬프트에 강제 주입됩니다.
 * **인체공학**: 주요 액션은 엄지 도달 영역(화면 하단 1/3·하단바·FAB)에 두고 최소 터치 타깃을 확보합니다.
 * **중첩 금지**: 컨테이너(카드/박스) 3중 이상 중첩을 금지하고, 여백·구분선·타이포 위계로 구획합니다.
 * **자동 검증 (무인 자율 `!mode 3/3+`)**: `reports/gate2/design_contract.json` + `reports/gate5/visual_craft_review.json`(verdict=PASS)이 Gate 5 통과 조건이며, MAJOR 결함 잔존 시 Coder 구조 재작업을 강제합니다.
@@ -57,4 +58,4 @@
 * **정직성 게이트 (Honesty Gate · 상시 엄격)**: 위 비차단 면제는 **거짓 주장**에는 적용되지 않는다. 실행하지 않은 테스트의 통과 기재, 상태를 표현하지 않는 캡처의 근거 제출, 재현 불가 수치의 재현 주장 등은 즉시 REJECTED 대상이다. 계측이 불가하면 `BLOCKED`로 정직하게 기록하고 `PASS` 위장을 금지한다.
 * **증거 범위 제한 (Evidence Scope Limit)**: Gate 5(시각/상태 검증)는 실제 앱 화면과 핵심 상태 전이에 한정된다.
 * **진척 기반 수렴 (Progress-based Convergence)**: QA는 반려 시 `[BLOCKING_DEFECTS: N]`(사용자 체감 차단 결함 수) 마커를 표기한다. 시스템은 차단 결함 수가 2회 연속 감소하지 않으면 라운드 상한 전에 조기 에스컬레이션하고, 잔존 항목이 비차단뿐이면(`[BLOCKING_DEFECTS: 0]`) 백로그로 이관하고 승인으로 수렴한다.
-* **라운드 상한 (Round Cap)**: 기본 `PAIR_MAX_ROUNDS=7`, `QA_MAX_ROUNDS=7`. 7라운드 내 수렴하지 못하면 Commander가 사용자에게 현황 보고 후 범위를 축소하거나 사용자 개입을 요청한다.
+* **라운드 상한 (Round Cap)**: 기본 `PAIR_MAX_ROUNDS=20`, `QA_MAX_ROUNDS=20`, `RESEARCH_MAX_ROUNDS=20` (`.env`로 조절 가능). 상한에 도달하면 곧바로 스탑하지 않고 **"N회가 끝났습니다. 이어서 진행하시겠습니까?"** 를 Discord 예/아니요 버튼으로 확인한다. '예' 선택 시 다음 라운드 배치를 이어서 진행하고, '아니요'/무응답 시 Commander가 사용자에게 현황 보고 후 안전하게 종료한다. 수렴 실패 시 `convergence_policy`가 상한 전에 조기 에스컬레이션한다.

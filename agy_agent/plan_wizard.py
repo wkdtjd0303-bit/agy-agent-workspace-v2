@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import discord
 
 from session_manager import SessionManager
@@ -153,6 +153,13 @@ class PlanWizardState:
         self.monetization = "기본 2회 무료 체험 ➔ 프리미엄 기능 잠금 결제모달 (토스/카카오페이)"
         self.viral_loop = "카카오톡/인스타그램 공유 시 무료 1회 추가 리워드 바이럴"
         self.custom_notes = ""
+
+        # 🎯 가치 브리프 & 하우스 룰 (P0-3/P2-7 — 디테일·우선순위의 외부 신호)
+        self.value_who = ""
+        self.value_one_job = ""
+        self.value_cost_of_wrong = ""
+        self.house_rules = ""
+        self.copy_tone = ""
 
         # 🎮 Deep Game & Specification fields (Addresses user feedback on references & quality)
         self.benchmark_reference = ""
@@ -549,8 +556,27 @@ class PlanWizardState:
 * **추가 요구사항**: {self.custom_notes if self.custom_notes else "결함 0건, 가로 스크롤 0px, 반응형 모바일(390px)~데스크톱(1280px) 완비"}
 """
 
+    def build_craft_brief_lines(self) -> List[str]:
+        """가치 브리프/하우스 룰/카피 톤을 프롬프트 라인으로 만든다 (비어 있으면 빈 목록)."""
+        lines: List[str] = []
+        if self.value_who:
+            lines.append(f"- 👤 사용자(누가): {self.value_who}")
+        if self.value_one_job:
+            lines.append(f"- 🎯 단 하나의 Job: {self.value_one_job}")
+        if self.value_cost_of_wrong:
+            lines.append(f"- ⚠️ 틀리면 비용(치명도): {self.value_cost_of_wrong}")
+        if self.house_rules:
+            lines.append(f"- 🏠 하우스 룰: {self.house_rules}")
+        if self.copy_tone:
+            lines.append(f"- ✍️ 카피 톤: {self.copy_tone}")
+        return lines
+
     def generate_full_prompt(self) -> str:
         domain_tag = "🎮 게임 스펙" if self.is_game_domain() else "📱 제품 스펙"
+        _brief_lines = self.build_craft_brief_lines()
+        craft_brief = (
+            "\n\n[🎯 가치/스타일 브리프 (우선순위·디테일의 외부 신호)]\n" + "\n".join(_brief_lines)
+        ) if _brief_lines else ""
         return f"""[PROJECT SPECIFICATION: {self.initial_idea}]
 반드시 다음 PRD 기획서와 플랫폼 헌법에 따라 완벽히 동작하는 프로덕션 코드를 구현하고 배포해주세요.
 
@@ -562,7 +588,7 @@ class PlanWizardState:
 6. 🎨 비주얼 디자인 테마: {self.design_mood}
 7. 🔐 온보딩 & 데이터 보관: {self.auth_policy}
 8. 💰 수익화 & 바이럴: {self.monetization} (바이럴: {self.viral_loop})
-9. 📝 추가 요구사항: {self.custom_notes if self.custom_notes else "결함 0건, 가로 스크롤 0px, 반응형 모바일(390px)~데스크톱(1280px) 완비"}
+9. 📝 추가 요구사항: {self.custom_notes if self.custom_notes else "결함 0건, 가로 스크롤 0px, 반응형 모바일(390px)~데스크톱(1280px) 완비"}{craft_brief}
 
 배포 후 E2E 검증에서 결함과 콘솔 에러가 0건이 될 때까지 스스로 핫픽스하여 완성해주세요."""
 
@@ -1074,6 +1100,26 @@ class PlanWizardView(discord.ui.View):
 
     async def _execute_trio_kickoff(self, channel: discord.abc.Messageable, prompt: str, session: Any):
         try:
+            # P0-3/P2-7: 기획 단계의 가치/스타일 브리프를 워크스페이스 SSOT(craft_inputs.json)에 영속화한다.
+            try:
+                _ws = getattr(session, "workspace", "") or ""
+                _patch: Dict[str, Any] = {}
+                if self.state.house_rules:
+                    _patch["house_rules"] = [r.strip() for r in self.state.house_rules.splitlines() if r.strip()]
+                if self.state.copy_tone:
+                    _patch["copy_tone"] = self.state.copy_tone
+                if self.state.value_who or self.state.value_one_job or self.state.value_cost_of_wrong:
+                    _patch["value_brief"] = {
+                        "who": self.state.value_who,
+                        "one_job": self.state.value_one_job,
+                        "cost_of_wrong": self.state.value_cost_of_wrong,
+                    }
+                if _ws and os.path.isdir(_ws) and _patch:
+                    from craft_inputs import save_inputs as _save_craft_inputs
+                    _save_craft_inputs(_ws, _patch)
+            except Exception as _cb_err:
+                logger.debug(f"Craft input persistence skipped: {_cb_err}")
+
             from config import PAIR_MAX_ROUNDS
             status_msg = await channel.send(
                 f"🚀 👨‍💻 **[Coder 라운드 1 개발 중...]** `{self.state.platform}` 기반으로 비즈니스 로직과 UI 컴포넌트를 구축하고 있습니다..."

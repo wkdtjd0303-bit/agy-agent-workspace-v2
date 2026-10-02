@@ -39,7 +39,7 @@ flowchart TD
 
 ---
 
-## 🌟 핵심 기능 7선 (쉬운 설명 & 상세 기능)
+## 🌟 핵심 기능 8선 (쉬운 설명 & 상세 기능)
 
 ### 1. 👥 4대 AI 두뇌 협업 시스템 (The Trio + Commander)
 혼자서 코딩하면 누구나 실수나 착각(환각)을 할 수 있습니다. AGY Agent는 실제 개발 회사의 분업 체계처럼 **4개의 전문 AI가 한 팀**이 되어 서로를 교차 검증합니다:
@@ -130,6 +130,43 @@ AGY Agent는 "코드 다 짰습니다"라는 AI의 말만 믿지 않습니다. �
 
 ---
 
+### 8. 📸 스크린샷 실측 기획 결손 폐루프 (Planner Visual Gap)
+> **"E2E 스크린샷은 CODER·QA만의 검증 재료가 아니다. COMMANDER가 다음에 무엇을 기획할지 판단하는 1차 물리 증거다."**
+
+소스코드/PRD만 보고 기획하면 "전체 E2E 시나리오 테스트 100% 무결점 통과" 같은, 겉보기엔 그럴듯하지만
+사용자가 화면에서 체감하는 부족함은 하나도 못 고치는 자기참조적 과제가 나옵니다.
+
+* **실 렌더링 화면 비전 진단**: `reports/gate5/screenshots/*.png` 를 CPO(제품 책임자) 관점 멀티모달 Vision으로 분석하여
+  "화면에 아직 없는 핵심 기능/패널/UX 단계"를 `[CORE_FEATURE / UX_WORKFLOW / LAYOUT_PANEL / ACCESSIBILITY / PERFORMANCE / POLISH]` 로 구조화합니다.
+* **기획 프롬프트 물리 증거 주입 + 일반론 차단**: 차기 마일스톤 기획 시 가장 가치 높은 결손 1건을 원자적으로 해소하도록 강제하고,
+  화면 결손이 남아 있는데 "전체 E2E 통과/품질 하드닝" 류 일반론으로 도망가면 강제 교체합니다.
+* **자문/로드맵까지 확장**: `!read`("무엇이 부족해?") 자문과 `ROADMAP.md` 자동 확장에도 스크린샷 결손을 1순위 후보로 승격합니다.
+* 물리 증거: `reports/planner/visual_gap_review.json` · 상세 설계: [`docs/PLANNER_VISUAL_GAP.md`](docs/PLANNER_VISUAL_GAP.md)
+
+---
+
+### 9. 📦 제품 가치 기획 — 하드닝 단독 마일스톤 원천 차단 (Product Value Planning)
+> **"품질 하드닝은 기획이 아니다. 기획자는 '사용자가 화면·동작에서 아직 체감하지 못한 신규 기능'을 다음 마일스톤으로 발주한다."**
+
+스크린샷 결손(Visual Gap)은 '이미 렌더링된 화면'이 있어야 동작합니다. 초기/헤드리스/CLI/백엔드
+프로젝트에서는 증거가 없어 Commander가 곧바로
+`경계 조건 및 대용량 데이터 입력 시 크래시 방어` · `응답 속도 최적화 및 불필요한 연산 제거` ·
+`전체 E2E 시나리오 테스트 100% 무결점 통과` 같은 **자기참조적 품질 하드닝**으로 수렴했습니다.
+
+* **도메인별 사용자 가치 카탈로그**: `product_value_planner.py` 가 도메인별(웹/모바일/게임/CLI/백엔드)
+  "아직 없는 사용자 체감 기능"(내보내기·공유, 검색·필터, 설정·개인화, 즐겨찾기, 업적/리더보드,
+  일시정지·옵션, 플러그인, 페이지네이션, 웹훅, API 문서 등)을 물리 디스크 증거와 대조해
+  가장 가치 높은 1건을 다음 마일스톤 후보로 선택합니다.
+* **하드닝 전용 판정 가드**: `is_hardening_only_plan()` 이 제목/과제가 순수 방어·검증으로만 구성된
+  기획을 판정하고, 사용자 가치 기능이 남아 있으면 **강제 교체**합니다.
+  (사용자 피드백 · 코드 신호 결손 · 심도 심화 · 스크린샷 결손 플랜은 절대 덮어쓰지 않습니다.)
+* **폴백 위치 교정**: Commander 결정론적 폴백(게임 종단/모바일 캐시/웹 SaaS 종단),
+  AI 5W1H 기획, `ROADMAP.md` 자동 확장 모두 하드닝 템플릿보다 가치 기능을 먼저 발주합니다.
+* **표시**: 기획서/임베드/Coder 훈령에 `📦 제품 가치 기획` 블록이 동봉됩니다 (source 배지: 📦 `product_value`).
+* 설정: `COMMANDER_PRODUCT_VALUE_ENABLED=1` (기본 ON) · 상세 설계: [`docs/PRODUCT_VALUE_PLANNING.md`](docs/PRODUCT_VALUE_PLANNING.md)
+
+---
+
 ## 🛡️ 가시적 실체 구현 & 안티 모킹(Anti-Mocking) 헌법
 
 AGY Agent의 코드베이스에는 엄격한 개발 헌법(`PROJECT_CONSTITUTION.md`)과 물리적 검증기(`evidence_validator.py`)가 상시 작동합니다:
@@ -194,6 +231,8 @@ AGY Agent의 코드베이스에는 엄격한 개발 헌법(`PROJECT_CONSTITUTION
 agy_agent/
 ├── bot.py                        # 🚀 디스코드 봇 메인 게이트웨이 & 이벤트 라우터
 ├── commander.py                  # 👑 Commander (의도 분석 및 지능형 배차 사령관)
+├── planner_visual_gap_analyzer.py # 📸 Commander 기획용 스크린샷 실측 제품 결손 분석기
+├── product_refinement_governor.py # 🧭 심도 우선(Depth-First) 제품 완성도 거버너
 ├── trio_agent_runner.py          # 👥 3-Agent 파이프라인 (Coder ↔ QA ↔ Auditor)
 ├── mode_classifier.py            # 🧠 딥러닝/LLM 기반 질문/개발 모드 자동 분류기
 ├── evidence_validator.py         # 🏛️ Gate 0~7 물리적 검증기 & 안티 모킹/트레이싱 감사

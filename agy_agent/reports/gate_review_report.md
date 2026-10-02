@@ -88,7 +88,7 @@
 ### 1. `GlobalModelManager` 싱글톤 엔진 구축 (`model_manager.py`)
 - **실제 소스코드 위치**: `model_manager.py` Lines 1~520
 - **10개 역할 중앙 집중 관리**:
-  - Coder (코더), QA1 (선임 검증관), QA2~QA6 (심층 품질 스쿼드), Auditor (보안/감사관), Consultant (컨설턴트), Commander (총괄 사령탑)
+  - Coder (코더), QA1 (선임 검증관), QA2~QA6 (심층 품질 스쿼드), Auditor (보안/감사관), Image generator (이미지 생성 도구), Commander (총괄 사령탑)
 - **실시간 영구 저장 & 무중단 동기화 (Hot-Sync)**:
   - 설정 변경 시 `state/global_model_config.json`에 영구 보존.
   - `.env` 파일을 파싱 및 백업하여 대상 키(`CODER_MODEL`, `QA_MODEL`, `AUDITOR_MODEL`, `EXTENDED_QA_CONFIGS` 등)를 원자적으로 업데이트.

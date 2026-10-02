@@ -51,7 +51,7 @@ class TestHelpManagerLatestCommands(unittest.TestCase):
         # Commands
         self.assertIn("!pair", all_text)
         self.assertIn("!single", all_text)
-        self.assertIn("!single+", all_text)
+        self.assertIn("!image", all_text)
         self.assertIn("!pair+", all_text)
         self.assertIn("!single_qa2", all_text)
         self.assertIn("!read", all_text)
@@ -64,7 +64,6 @@ class TestHelpManagerLatestCommands(unittest.TestCase):
         self.assertIn("!mode 2+", all_text)
         self.assertIn("!mode 2", all_text)
         self.assertIn("!mode single_qa2", all_text)
-        self.assertIn("!mode 1+", all_text)
         self.assertIn("!mode 1", all_text)
         self.assertIn("!mode read", all_text)
         self.assertIn("!mode all", all_text)

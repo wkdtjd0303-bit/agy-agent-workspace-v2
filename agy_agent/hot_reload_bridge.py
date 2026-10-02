@@ -99,24 +99,35 @@ def sync_in_memory_state():
                     if bot_module and hasattr(bot_module, "execute_all_in_one_hot_reset"):
                         bot_module.perform_master_reset = getattr(bot_module, "execute_all_in_one_hot_reset")
 
-                # Update discord event handlers on main.bot and main.commander_bot
-                bot_inst = getattr(main, "bot", None)
-                if bot_inst is not None:
-                    for evt in ["on_message", "on_ready", "on_guild_channel_update"]:
-                        if evt in main.__dict__ and callable(main.__dict__[evt]):
+                # [🔒 Hot-Reload Fix] discord 이벤트 핸들러를 모든 봇 클라이언트에 대해
+                # 현재 소스 기준으로 재바인딩한다.
+                # - 기존에는 on_message/on_ready/on_guild_channel_update 3개만 하드코딩되어
+                #   on_command_error/on_error 변경이 !reset 후에도 반영되지 않았다.
+                # - 또한 commander_bot.on_ready 를 main.on_ready(=메인 봇 핸들러)로 덮어써
+                #   on_commander_ready 가 유실되는 결함이 있었다.
+                # 각 클라이언트의 이벤트 속성이 가리키는 함수의 __name__ 을 기준으로
+                # main 에 재컴파일된 최신 함수로 교체한다. (커맨드 콜백 치유와 동일 원리)
+                _clients = []
+                for _cname in ("bot", "commander_bot", "qa_bot", "qa2_bot", "auditor_bot",
+                               "server_manager_bot", "image_bot"):
+                    _client = getattr(main, _cname, None)
+                    if _client is not None:
+                        _clients.append(_client)
+                _ext_clients = getattr(main, "extended_qa_bots", None)
+                if isinstance(_ext_clients, dict):
+                    _clients.extend([c for c in _ext_clients.values() if c is not None])
+                for _client in _clients:
+                    for _evt, _handler in list(vars(_client).items()):
+                        if not _evt.startswith("on_"):
+                            continue
+                        _fn = getattr(_handler, "__func__", _handler)
+                        _fn_name = getattr(_fn, "__name__", None)
+                        _latest = main.__dict__.get(_fn_name) if _fn_name else None
+                        if callable(_latest) and _latest is not _fn:
                             try:
-                                setattr(bot_inst, evt, main.__dict__[evt])
+                                setattr(_client, _evt, _latest)
                             except Exception as _evt_err:
-                                logger.debug(f"[HotReloadBridge] Failed setting {evt} on bot: {_evt_err}")
-
-                commander_inst = getattr(main, "commander_bot", None)
-                if commander_inst is not None:
-                    for evt in ["on_ready"]:
-                        if evt in main.__dict__ and callable(main.__dict__[evt]):
-                            try:
-                                setattr(commander_inst, evt, main.__dict__[evt])
-                            except Exception as _evt_err:
-                                logger.debug(f"[HotReloadBridge] Failed setting {evt} on commander_bot: {_evt_err}")
+                                logger.debug(f"[HotReloadBridge] Failed rebinding event {_evt} ({_fn_name}): {_evt_err}")
 
                 if callable(getattr(main, "init_extended_qa_bots", None)):
                     try:
@@ -124,11 +135,11 @@ def sync_in_memory_state():
                     except Exception as _init_err:
                         logger.debug(f"[HotReloadBridge] init_extended_qa_bots notice: {_init_err}")
 
-                if callable(getattr(main, "ensure_consultant_bot_started", None)):
+                if callable(getattr(main, "ensure_image_bot_started", None)):
                     try:
-                        main.ensure_consultant_bot_started()
+                        main.ensure_image_bot_started()
                     except Exception as _c_err:
-                        logger.debug(f"[HotReloadBridge] ensure_consultant_bot_started notice: {_c_err}")
+                        logger.debug(f"[HotReloadBridge] ensure_image_bot_started notice: {_c_err}")
 
                 if callable(getattr(main, "ensure_qa2_bot_started", None)):
                     try:
@@ -230,8 +241,8 @@ def sync_in_memory_state():
                     setattr(main, cmd_func_name, new_cmd)
 
             _rebind_target_command("mode_command", ["mode", "모드", "동작모드"])
-            _rebind_target_command("single_command", ["single", "solo", "단일", "싱글"])
-            _rebind_target_command("single_plus_command", ["single+", "single_plus", "1+", "1plus", "consultant", "컨설턴트"])
+            _rebind_target_command("single_command", ["single", "solo", "단일", "싱글", "single+", "single_plus", "1+", "1plus", "1플러스"])
+            _rebind_target_command("image_command", ["image", "img", "이미지", "이미지생성", "그려줘", "draw"])
             _rebind_target_command("pair_plus_command", ["pair+", "pair_plus", "2+", "2plus", "2플러스", "pair_quad", "quad_pair"])
             _rebind_target_command("mode3_command", ["mode3", "3", "자율3", "무인3", "3자율", "3차자율", "auto_trio"])
             _rebind_target_command("mode3_plus_command", ["mode3+", "mode3_plus", "3+", "3plus", "3플러스", "자율3+", "무인3+", "auto_multi"])

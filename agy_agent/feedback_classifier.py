@@ -62,6 +62,16 @@ FEATURE_EXPANSION_KEYWORDS: List[str] = [
     "검색", "필터", "정렬", "내보내기", "공유", "동기화", "알림"
 ]
 
+# Fragments that are pure preamble / meta commentary and carry no actionable request.
+REQUIREMENT_FRAGMENT_DISCARD: Set[str] = {
+    "앱이", "앱은", "앱을", "앱의", "앱도", "앱에", "앱", "어플", "어플이", "어플은", "앱에서",
+    "그리고", "또한", "하지만", "그런데", "그 외", "그외", "기타",
+    "요청사항", "요청 사항", "수정사항", "수정 사항", "피드백", "개선사항", "개선 사항",
+    "다음과", "아래와", "아래", "다음", "사항", "요청", "확인", "부탁", "부탁해", "부탁드립니다",
+    "다른걸로", "다른걸로해줘", "다른걸로해주세요", "다른것으로", "다른것으로해줘",
+    "해줘", "해주세요", "해줘요", "부탁해요", "좋을듯", "좋을것같아", "좋겠어", "감사합니다",
+}
+
 
 @dataclass
 class IntentVerdict:
@@ -92,6 +102,81 @@ class FeedbackIntentClassifier:
         if not prompt:
             return ""
         return re.sub(r'^[!/]?mode\s+\S+\s*', '', prompt, flags=re.IGNORECASE).strip()
+
+    # ──────────────────────────────────────────────
+    # Requirement Ledger (요구사항 원장) — SoT for intent coverage auditing
+    # ──────────────────────────────────────────────
+
+    @classmethod
+    def extract_requirement_units(cls, prompt: str) -> List[str]:
+        """Decomposes a raw user prompt into distinct, actionable request units.
+
+        This is the Single Source of Truth for the Commander "요구사항 커버리지 계약".
+        Unlike keyword detectors, it is grounded purely in the user's own wording, so
+        an off-target plan can be detected independently of any intent taxonomy.
+
+        Strategy:
+        1. Strip command prefix (`!mode 3`) and split on numbered/lettered markers.
+        2. Fall back to sentence/newline splitting when no explicit list markers exist.
+        3. Drop pure preamble/meta fragments and units without meaningful tokens.
+        4. De-duplicate while preserving order.
+        """
+        clean = cls.clean_prompt(prompt)
+        if not clean:
+            return []
+
+        # 1. Prefer explicit numbered/lettered list markers (1. / 2) / ① ...),
+        #    even when the first marker is not at the very start of a line
+        #    (e.g. "앱이 1. 디자인이 ...").
+        marker_split = re.split(r'(?:^|\s)(?:\d+[.)]|[①-⑩])\s+', clean)
+        if len(marker_split) > 1:
+            # Each chunk = one user-listed request; collapse its inner line breaks.
+            chunks = [re.sub(r'\s+', ' ', c).strip() for c in marker_split]
+        else:
+            # No list markers: fall back to sentence / line boundaries.
+            chunks = re.split(r'(?<=[.?!~])\s+|\n', clean)
+
+        units: List[str] = []
+        for chunk in chunks:
+            text = re.sub(r'^[0-9]+[.)]\s*|[①-⑩]\s*|[-*•]\s*', '', chunk).strip()
+            text = re.sub(r'\s+', ' ', text).strip()
+            if not text:
+                continue
+            norm = re.sub(r'[\s.,:;!?~\-]', '', text).lower()
+            if not norm or norm in REQUIREMENT_FRAGMENT_DISCARD:
+                continue
+            if not cls.extract_tokens(text):
+                continue
+            units.append(text)
+
+        seen: Set[str] = set()
+        ordered: List[str] = []
+        for u in units:
+            if u not in seen:
+                seen.add(u)
+                ordered.append(u)
+        return ordered
+
+    @classmethod
+    def is_unit_covered(cls, request_unit: str, plan_text: str) -> bool:
+        """Returns True when a user request unit is represented in the given plan text.
+
+        Uses substring-aware token matching so Korean agglutination
+        (e.g. '도큐크래프트라는' vs plan token '도큐크래프트') does not cause
+        false negatives that would spam the plan with duplicate tasks.
+        """
+        if not request_unit or not plan_text:
+            return False
+        unit_low = request_unit.lower()
+        plan_tokens = cls.extract_tokens(plan_text)
+        plan_low = plan_text.lower()
+        for token in plan_tokens:
+            if len(token) >= 2 and token in unit_low:
+                return True
+        for ut in cls.extract_tokens(request_unit):
+            if len(ut) >= 2 and (ut in plan_low or any(len(pt) >= 3 and (ut.startswith(pt[:3]) or pt.startswith(ut[:3])) for pt in plan_tokens)):
+                return True
+        return False
 
     @classmethod
     def classify(

@@ -8,6 +8,7 @@ import asyncio
 import logging
 import subprocess
 import psutil
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -701,60 +702,69 @@ def fetch_real_ai_quota() -> str:
 # ==============================================================================
 _opencode_usage_cache: Dict[str, Any] = {"time": 0.0, "data": None}
 _OPENCODE_USAGE_TTL = 300.0  # 5분 캐시
+# 다중 키 Failover: 현재 활성 키 인덱스 (한도 소진 시 다음 키로 전환)
+_opencode_active_key_index: int = 0
+
+
+def _get_all_opencode_go_api_keys() -> List[str]:
+    """모든 OpenCode Go API 키를 반환합니다. (OPENCODE_API_KEYS > OPENCODE_API_KEY > 로컬 DB 순)"""
+    keys: List[str] = []
+    try:
+        import config as _cfg
+        # 1. 다중 키 (.env OPENCODE_API_KEYS=key1,key2,key3)
+        multi = getattr(_cfg, "OPENCODE_API_KEYS", [])
+        if multi and isinstance(multi, list):
+            keys.extend([k for k in multi if k])
+        # 2. 단일 키 하위 호환 (.env OPENCODE_API_KEY=key)
+        if not keys:
+            single = (os.getenv("OPENCODE_API_KEY") or getattr(_cfg, "OPENCODE_API_KEY", "") or "").strip()
+            if single:
+                keys.append(single)
+    except Exception:
+        pass
+    # 3. 로컬 opencode credential DB 폴백 (~/.local/share/opencode/opencode.db)
+    if not keys:
+        try:
+            import sqlite3
+            db_path = os.path.expanduser("~/.local/share/opencode/opencode.db")
+            if os.path.exists(db_path):
+                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3.0)
+                try:
+                    row = con.execute(
+                        "SELECT value FROM credential WHERE integration_id='opencode-go' "
+                        "AND active=1 ORDER BY time_updated DESC LIMIT 1"
+                    ).fetchone()
+                finally:
+                    con.close()
+                if row and row[0]:
+                    val = json.loads(row[0])
+                    if isinstance(val, dict):
+                        db_key = str(val.get("key") or val.get("apiKey") or "").strip()
+                        if db_key:
+                            keys.append(db_key)
+        except Exception as e:
+            logger.debug(f"OpenCode credential read note: {e}")
+    return keys
 
 
 def _get_opencode_go_api_key() -> str:
-    """OpenCode Go API 키를 조회합니다. (env/config 우선 → 로컬 opencode 인증 저장소 폴백)"""
-    try:
-        import config as _cfg
-        key = (os.getenv("OPENCODE_API_KEY") or getattr(_cfg, "OPENCODE_API_KEY", "") or "").strip()
-        if key:
-            return key
-    except Exception:
-        pass
-    # 로컬 opencode credential DB (~/.local/share/opencode/opencode.db)
-    try:
-        import sqlite3
-        db_path = os.path.expanduser("~/.local/share/opencode/opencode.db")
-        if os.path.exists(db_path):
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3.0)
-            try:
-                row = con.execute(
-                    "SELECT value FROM credential WHERE integration_id='opencode-go' "
-                    "AND active=1 ORDER BY time_updated DESC LIMIT 1"
-                ).fetchone()
-            finally:
-                con.close()
-            if row and row[0]:
-                val = json.loads(row[0])
-                if isinstance(val, dict):
-                    return str(val.get("key") or val.get("apiKey") or "").strip()
-    except Exception as e:
-        logger.debug(f"OpenCode credential read note: {e}")
-    return ""
+    """현재 활성 OpenCode Go API 키를 반환합니다. (다중 키 Failover 지원)"""
+    global _opencode_active_key_index
+    keys = _get_all_opencode_go_api_keys()
+    if not keys:
+        return ""
+    idx = _opencode_active_key_index % len(keys)
+    return keys[idx]
 
 
-def fetch_opencode_go_usage() -> Optional[Dict[str, Any]]:
-    """
-    OpenCode Go 플랜의 실시간 사용량(rolling 5h / weekly / monthly)을 공식 엔드포인트에서 조회합니다.
-    실패 시 마지막 캐시를 반환하고, 캐시도 없으면 None 을 반환합니다.
-    """
-    global _opencode_usage_cache
-    now = time.time()
-    if _opencode_usage_cache.get("data") and (now - _opencode_usage_cache.get("time", 0.0) < _OPENCODE_USAGE_TTL):
-        return _opencode_usage_cache["data"]
-
-    key = _get_opencode_go_api_key()
-    if not key:
-        logger.debug("OpenCode Go usage: API 키를 찾을 수 없습니다.")
-        return _opencode_usage_cache.get("data")
-
+def _fetch_usage_for_key(api_key: str) -> Optional[Dict[str, Any]]:
+    """단일 API 키로 OpenCode Go 사용량을 조회합니다."""
     try:
         import urllib.request
         req = urllib.request.Request(
             "https://opencode.ai/zen/go/v1/usage",
             headers={
-                "Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
                 "User-Agent": "opencode/2.0.12",
             },
@@ -763,10 +773,57 @@ def fetch_opencode_go_usage() -> Optional[Dict[str, Any]]:
             payload = json.loads(resp.read().decode("utf-8"))
         usage = payload.get("usage") if isinstance(payload, dict) else None
         if isinstance(usage, dict) and usage:
-            _opencode_usage_cache = {"time": now, "data": usage}
             return usage
     except Exception as e:
-        logger.debug(f"OpenCode Go usage fetch note: {e}")
+        logger.debug(f"OpenCode Go usage fetch note (key=...{api_key[-6:] if len(api_key) > 6 else '***'}): {e}")
+    return None
+
+
+def fetch_opencode_go_usage() -> Optional[Dict[str, Any]]:
+    """
+    OpenCode Go 플랜의 실시간 사용량(rolling 5h / weekly / monthly)을 조회합니다.
+    다중 키 지원: 현재 키의 5시간 한도 소진 시 자동으로 다음 키로 Failover합니다.
+    """
+    global _opencode_usage_cache, _opencode_active_key_index
+    now = time.time()
+    if _opencode_usage_cache.get("data") and (now - _opencode_usage_cache.get("time", 0.0) < _OPENCODE_USAGE_TTL):
+        return _opencode_usage_cache["data"]
+
+    keys = _get_all_opencode_go_api_keys()
+    if not keys:
+        logger.debug("OpenCode Go usage: API 키를 찾을 수 없습니다.")
+        return _opencode_usage_cache.get("data")
+
+    # 현재 활성 키부터 시작하여 순회 (Failover)
+    start_idx = _opencode_active_key_index % len(keys)
+    best_usage = None
+    best_rolling_remain = -1.0
+
+    for offset in range(len(keys)):
+        idx = (start_idx + offset) % len(keys)
+        usage = _fetch_usage_for_key(keys[idx])
+        if not usage:
+            continue
+
+        # 5시간(rolling) 한도 잔여율 확인
+        rolling_used = float((usage.get("rolling") or {}).get("percent", 100.0))
+        rolling_remain = 100.0 - rolling_used
+
+        if rolling_remain > best_rolling_remain:
+            best_rolling_remain = rolling_remain
+            best_usage = usage
+            _opencode_active_key_index = idx
+
+        # 5시간 한도 여유가 10% 이상이면 이 키를 사용
+        if rolling_remain >= 10.0:
+            break
+
+    if best_usage:
+        _opencode_usage_cache = {"time": now, "data": best_usage}
+        if len(keys) > 1:
+            active_label = f"키 #{_opencode_active_key_index + 1}/{len(keys)}"
+            logger.debug(f"OpenCode Go Failover: {active_label} 활성 (5h 잔여 {best_rolling_remain:.0f}%)")
+        return best_usage
 
     return _opencode_usage_cache.get("data")
 
@@ -834,6 +891,164 @@ def format_opencode_go_quota_section() -> Optional[str]:
     return "\n".join(lines)
 
 
+_COMMAND_CODE_USAGE_TTL = 30.0
+_command_code_usage_cache: Dict[str, Any] = {"time": 0.0, "data": None}
+
+
+def _get_command_code_api_key() -> str:
+    """Command Code API 키를 환경변수 또는 ~/.commandcode/auth.json 에서 읽습니다."""
+    key = os.getenv("COMMAND_CODE_API_KEY", "").strip() or os.getenv("CMDC_API_KEY", "").strip()
+    if key:
+        return key
+    auth_file = Path(os.path.expanduser("~/.commandcode/auth.json"))
+    if auth_file.is_file():
+        try:
+            data = json.loads(auth_file.read_text(encoding="utf-8"))
+            return str(data.get("apiKey") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def fetch_command_code_usage() -> Optional[Dict[str, Any]]:
+    """
+    Command Code (cmdc) 실시간 사용량 및 한도(5h / weekly / monthly credits)를 조회합니다.
+    """
+    global _command_code_usage_cache
+    now = time.time()
+    if _command_code_usage_cache.get("data") and (now - _command_code_usage_cache.get("time", 0.0) < _COMMAND_CODE_USAGE_TTL):
+        return _command_code_usage_cache["data"]
+
+    key = _get_command_code_api_key()
+    if not key:
+        return _command_code_usage_cache.get("data")
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "command-code/1.74.0",
+        "Accept": "application/json",
+    }
+
+    result: Dict[str, Any] = {
+        "monthly_credits": 0,
+        "purchased_credits": 0,
+        "plan_id": "individual-goat",
+        "plan_name": "GOAT",
+        "five_hour": {
+            "used": 0.0,
+            "cap": 14.0,
+            "remaining_pct": 100.0,
+            "percent": 0.0,
+            "reset_at": 0,
+        },
+        "weekly": {
+            "used": 0.0,
+            "cap": 35.0,
+            "remaining_pct": 100.0,
+            "percent": 0.0,
+            "reset_at": 0,
+        },
+        "summary": {
+            "total_tokens": 0,
+            "total_credits": 0.0,
+        },
+    }
+
+    # 1. Credits & Window Limits
+    try:
+        req = urllib.request.Request("https://api.commandcode.ai/alpha/billing/credits", headers=headers)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+            cr = data.get("credits", {})
+            result["monthly_credits"] = cr.get("monthlyCredits", 0)
+            result["purchased_credits"] = cr.get("purchasedCredits", 0)
+            wl = data.get("windowLimits", {})
+            fh = wl.get("fiveHour", {})
+            fh_used = float(fh.get("used", 0.0))
+            fh_cap = float(fh.get("cap", 14.0)) or 14.0
+            fh_pct = min(100.0, (fh_used / fh_cap) * 100.0) if fh_cap > 0 else 0.0
+            result["five_hour"] = {
+                "used": fh_used,
+                "cap": fh_cap,
+                "percent": fh_pct,
+                "remaining_pct": max(0.0, 100.0 - fh_pct),
+                "reset_at": fh.get("resetAt", 0),
+            }
+            wk = wl.get("weekly", {})
+            wk_used = float(wk.get("used", 0.0))
+            wk_cap = float(wk.get("cap", 35.0)) or 35.0
+            wk_pct = min(100.0, (wk_used / wk_cap) * 100.0) if wk_cap > 0 else 0.0
+            result["weekly"] = {
+                "used": wk_used,
+                "cap": wk_cap,
+                "percent": wk_pct,
+                "remaining_pct": max(0.0, 100.0 - wk_pct),
+                "reset_at": wk.get("resetAt", 0),
+            }
+    except Exception as e:
+        logger.debug(f"Command Code credits fetch error: {e}")
+
+    # 2. Subscription (Plan Name)
+    try:
+        req = urllib.request.Request("https://api.commandcode.ai/alpha/billing/subscriptions", headers=headers)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+            sub_data = data.get("data", {})
+            plan_id = sub_data.get("planId") or "individual-goat"
+            result["plan_id"] = plan_id
+            tail = plan_id.split("-")[-1].upper()
+            result["plan_name"] = tail
+    except Exception:
+        pass
+
+    # 3. Usage Summary
+    try:
+        req = urllib.request.Request("https://api.commandcode.ai/alpha/usage/summary", headers=headers)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+            result["summary"]["total_tokens"] = data.get("totalTokens", 0)
+            result["summary"]["total_credits"] = data.get("totalCredits", 0)
+    except Exception:
+        pass
+
+    _command_code_usage_cache = {"time": now, "data": result}
+    return result
+
+
+def format_command_code_quota_section() -> Optional[str]:
+    """Command Code 사용량을 Antigravity / OpenCode 와 동일한 스타일의 텍스트 블록으로 포맷합니다."""
+    usage = fetch_command_code_usage()
+    if not usage:
+        return None
+
+    lines = [
+        "```text",
+        f"💻 COMMAND CODE ({usage.get('plan_name', 'Pro')} 플랜 · 5h / 주간 한도)",
+        "─────────────────────────────────────────────",
+    ]
+    fh = usage.get("five_hour", {})
+    wk = usage.get("weekly", {})
+
+    for key, label, info in [
+        ("five_hour", "[5시간 한도] 5-Hour Limit", fh),
+        ("weekly", "[주간 한도] Weekly Limit", wk),
+    ]:
+        rem_pct = float(info.get("remaining_pct", 100.0))
+        used_val = float(info.get("used", 0.0))
+        cap_val = float(info.get("cap", 0.0))
+        gauge = make_antigravity_gauge(rem_pct / 100.0, 20)
+        lines.append(label)
+        lines.append(f"{gauge} {rem_pct:.1f}%")
+        lines.append(f"{round(rem_pct)}% remaining • Used: ${used_val:.2f} / Cap: ${cap_val:.2f}\n")
+
+    lines.append("```")
+    m_credits = usage.get("monthly_credits", 0)
+    m_str = f"${float(m_credits):.2f}" if isinstance(m_credits, (int, float)) else str(m_credits)
+    plan_name = usage.get("plan_name", "Pro")
+    lines.append(f"💻 **Command Code**: 플랜 `{plan_name}` · 잔여 월간 {m_str} 크레딧 · CLI 명령어 `cmdc`")
+    return "\n".join(lines)
+
+
 CHANNEL_NICKNAMES: Dict[int, str] = {
     1539483630089273435: "!5_agy_agent",
     1539993680788586496: "qa-tester",
@@ -880,49 +1095,10 @@ def add_safe_field(embed: discord.Embed, name: str, value: str, inline: bool = F
 
 
 def build_telemetry_embed(session_manager: SessionManager) -> discord.Embed:
-    """Builds a rich, real-time telemetry embed for Discord Status Channel."""
-    sessions_data = {}
-    state_file = getattr(session_manager, "_state_file", "state/channel_sessions.json") if session_manager else "state/channel_sessions.json"
-    try:
-        if os.path.exists(state_file):
-            with open(state_file, "r", encoding="utf-8") as f:
-                sessions_data = json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to read session state file directly ({state_file}): {e}")
+    """Builds a clean, simplified telemetry embed for Discord Status Channel."""
 
-    busy_list: List[str] = []
-    idle_list: List[str] = []
-
-    for ch_id, nick in CHANNEL_NICKNAMES.items():
-        ch_str = str(ch_id)
-        sess = sessions_data.get(ch_str, {})
-        is_busy = sess.get("is_busy", False)
-        status_desc = sess.get("status_desc", "정상 대기 중")
-
-        if is_busy:
-            busy_list.append(f"🔴 <#{ch_id}> **{nick}** `작업중` · {status_desc}")
-        else:
-            idle_list.append(f"🟢 <#{ch_id}> **{nick}** `대기` · {status_desc}")
-
-    summary_hdr = (
-        f"🔴 **작업 중:** {len(busy_list)}개   "
-        f"🟢 **대기 중:** {len(idle_list)}개   "
-        f"🟠 **주의:** 0개\n"
-        f"────────────────────────"
-    )
-    all_lines = busy_list + idle_list
-    lines_to_add = []
-    curr_len = len(summary_hdr) + 1
-    for line in all_lines:
-        if curr_len + len(line) + 1 > 1000:
-            break
-        lines_to_add.append(line)
-        curr_len += len(line) + 1
-    channels_val = summary_hdr + "\n" + "\n".join(lines_to_add)
-
-    # System Metrics (CPU / Temp / RAM)
+    # ── 1. System Metrics (CPU / Temp / RAM / Disk) ──
     cpu_pct = psutil.cpu_percent(interval=None)
-    cpu_bar = make_progress_bar(cpu_pct)
     try:
         temp = ThermalGuard.get_current_temperature() or 38.0
     except Exception:
@@ -930,72 +1106,219 @@ def build_telemetry_embed(session_manager: SessionManager) -> discord.Embed:
 
     vm = psutil.virtual_memory()
     ram_pct = vm.percent
-    ram_bar = make_progress_bar(ram_pct)
     ram_used_gib = vm.used / (1024 ** 3)
     ram_total_gib = vm.total / (1024 ** 3)
-    ram_free_gib = vm.available / (1024 ** 3)
 
-    sys_val = (
-        f"**CPU**  {cpu_bar} **{cpu_pct:.1f}%**\n"
-        f"**PC 온도**  🌡️ **{temp:.1f}°C**\n"
-        f"**RAM**  {ram_bar} **{ram_pct:.1f}%**\n"
-        f"{ram_used_gib:.1f} GiB / {ram_total_gib:.1f} GiB · 여유 {ram_free_gib:.1f} GiB"
-    )
-
-    # Disk Storage
     try:
         du = psutil.disk_usage("/")
         disk_pct = du.percent
-        disk_bar = make_progress_bar(disk_pct)
-        disk_used_gib = du.used / (1024 ** 3)
-        disk_total_gib = du.total / (1024 ** 3)
         disk_free_gib = du.free / (1024 ** 3)
-        disk_val = (
-            f"{disk_bar} **{disk_pct:.0f}% 사용**\n"
-            f"{disk_total_gib:.1f} GiB 중 {disk_used_gib:.1f} GiB 사용\n"
-            f"여유 {disk_free_gib:.1f} GiB"
-        )
     except Exception:
-        disk_val = "스토리지 정보 수집 중..."
+        disk_pct = 0.0
+        disk_free_gib = 0.0
 
-    # Real-time AI Engine Quota Status
-    gemini_quota, external_quota = fetch_real_ai_quota_sections()
+    # Thermal emoji
+    if temp >= 85:
+        temp_emoji = "🔴"
+    elif temp >= 75:
+        temp_emoji = "🟠"
+    else:
+        temp_emoji = "🟢"
 
-    # OpenRouter Real-time Usage & Credits Status
-    openrouter_quota: Optional[str] = None
+    sys_val = (
+        f"**CPU**  {make_progress_bar(cpu_pct)} **{cpu_pct:.1f}%**\n"
+        f"**온도**  {temp_emoji} **{temp:.0f}°C**\n"
+        f"**RAM**  {make_progress_bar(ram_pct)} **{ram_pct:.0f}%** ({ram_used_gib:.1f}/{ram_total_gib:.1f} GiB)\n"
+        f"**디스크**  {make_progress_bar(disk_pct)} **{disk_pct:.0f}%** (여유 {disk_free_gib:.1f} GiB)"
+    )
+
+    # ── 2. AI Quota (동적: 존재하는 제공자만 자동 표시) ──
+    quota_lines: List[str] = []
+
+    def _status_emoji(pct: float) -> str:
+        if pct <= 5:
+            return "🔴"
+        elif pct <= 30:
+            return "🟡"
+        return "🟢"
+
+    # 2-a. Antigravity 쿼터 (그룹 이름 기반 동적 매핑 — 새 그룹 자동 대응)
+    usage_info = fetch_native_antigravity_usage()
+    agy_groups = usage_info.get("groups", [])
+
+    # 표시 이름 매핑 (알려진 그룹은 짧은 이름, 미지의 그룹은 원본 이름 그대로)
+    _GROUP_DISPLAY = {
+        "gemini": "Gemini",
+        "claude": "Claude·GPT",
+        "gpt": "Claude·GPT",
+    }
+
+    seen_labels: set = set()
+    for g in agy_groups:
+        g_name = g.get("name", "")
+        g_name_l = g_name.lower()
+        buckets = g.get("buckets", [])
+        if not buckets:
+            continue
+
+        # 표시 이름 결정 (알려진 키워드 매칭 → 없으면 원본 이름)
+        display_label = None
+        for keyword, label in _GROUP_DISPLAY.items():
+            if keyword in g_name_l:
+                display_label = label
+                break
+        if not display_label:
+            display_label = g_name or "Unknown"
+
+        # 중복 방지 (Claude & GPT가 같은 라벨로 매핑될 수 있음)
+        if display_label in seen_labels:
+            continue
+        seen_labels.add(display_label)
+
+        # 가장 제한적인 버킷(최저 잔여)을 기준으로 한 줄 표시
+        min_frac = 1.0
+        min_reset = ""
+        for b in buckets:
+            if b.get("disabled", False):
+                frac = 0.0
+            else:
+                frac = float(b.get("remaining_fraction", 0.0))
+            if frac < min_frac:
+                min_frac = frac
+                min_reset = b.get("reset_time", "")
+
+        pct = min_frac * 100.0
+        bar = make_progress_bar(pct)
+        emoji = _status_emoji(pct)
+        reset_desc = format_iso_duration(min_reset) if min_reset else ""
+        reset_part = f" · 갱신 {reset_desc}" if reset_desc and reset_desc != "N/A" else ""
+        quota_lines.append(f"{emoji} **{display_label}**  {bar} **{pct:.0f}%**{reset_part}")
+
+    # 2-b. OpenCode Go 쿼터 (API 키 설정 시에만 표시)
+    try:
+        oc_usage = fetch_opencode_go_usage()
+        if oc_usage:
+            oc_parts = []
+            for key, short_label in [("rolling", "5h"), ("weekly", "주간"), ("monthly", "월간")]:
+                info = oc_usage.get(key) or {}
+                used = info.get("percent")
+                if used is None:
+                    continue
+                rem_pct = max(0.0, 100.0 - float(used))
+                oc_parts.append(f"{_status_emoji(rem_pct)}{short_label} **{rem_pct:.0f}%**")
+            if oc_parts:
+                quota_lines.append(f"⚡ **OpenCode**  {' · '.join(oc_parts)}")
+    except Exception:
+        pass
+
+    # 2-c. OpenRouter 쿼터 (API 키 설정 시에만 표시)
     try:
         import openrouter_usage_monitor
-        openrouter_quota = openrouter_usage_monitor.format_openrouter_telemetry_field()
-    except Exception as e:
-        logger.debug(f"Error fetching OpenRouter telemetry section: {e}")
+        or_data = openrouter_usage_monitor.get_openrouter_usage_data()
+        if or_data.get("configured") and not or_data.get("error"):
+            used = or_data.get("usage", 0.0)
+            limit = or_data.get("limit")
+            pct_rem = or_data.get("percent_remain", 100.0)
+            bar = make_progress_bar(pct_rem)
+            emoji = _status_emoji(pct_rem)
+            if limit is not None:
+                rem_val = limit - used
+                quota_lines.append(f"{emoji} **OpenRouter**  {bar} **{pct_rem:.0f}%** · ${rem_val:.2f} 남음")
+            else:
+                quota_lines.append(f"{emoji} **OpenRouter**  {bar} **{pct_rem:.0f}%**")
+    except Exception:
+        pass
 
-    # ⚡ OpenCode Go Real-time Usage & Limits (5시간 · 주간 · 월간)
-    opencode_quota: Optional[str] = None
+    # 2-d. Command Code 쿼터 (인증 시에만 표시)
     try:
-        opencode_quota = format_opencode_go_quota_section()
-    except Exception as e:
-        logger.debug(f"Error fetching OpenCode Go telemetry section: {e}")
+        cc_usage = fetch_command_code_usage()
+        if cc_usage:
+            cc_parts = []
+            fh = cc_usage.get("five_hour", {})
+            wk = cc_usage.get("weekly", {})
+            fh_rem = float(fh.get("remaining_pct", 100.0))
+            wk_rem = float(wk.get("remaining_pct", 100.0))
+            cc_parts.append(f"{_status_emoji(fh_rem)}5h **{fh_rem:.0f}%**")
+            cc_parts.append(f"{_status_emoji(wk_rem)}주간 **{wk_rem:.0f}%**")
+            if cc_parts:
+                quota_lines.append(f"💻 **Command Code**  {' · '.join(cc_parts)}")
+    except Exception:
+        pass
 
+    # 쿼터 정보가 하나도 없으면 안내 메시지
+    quota_val = "\n".join(quota_lines) if quota_lines else "⚪ 연동된 AI 제공자 없음"
+
+    # ── 5. Active Tasks Summary (compact, 1 line) ──
+    sessions_data = {}
+    state_file = getattr(session_manager, "_state_file", "state/channel_sessions.json") if session_manager else "state/channel_sessions.json"
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r", encoding="utf-8") as f:
+                sessions_data = json.load(f)
+    except Exception:
+        pass
+
+    busy_count = 0
+    idle_count = 0
+    for ch_id, nick in CHANNEL_NICKNAMES.items():
+        sess = sessions_data.get(str(ch_id), {})
+        if sess.get("is_busy", False):
+            busy_count += 1
+        else:
+            idle_count += 1
+
+    if busy_count > 0:
+        task_line = f"🔴 **작업 중 {busy_count}개** · 🟢 대기 {idle_count}개"
+    else:
+        task_line = f"🟢 **전체 대기 중** ({idle_count}개 채널)"
+
+    # ── Build Embed ──
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     embed = discord.Embed(
-        title="🎛️ HP ProDesk Control Tower",
-        description="디바이스 하드웨어 및 전체 채널 AI 작업 상태를 실시간 통합 관제합니다.",
-        color=0x2ecc71 if not busy_list else 0x3498db,
+        title="🎛️ Control Tower",
+        color=0x2ecc71 if busy_count == 0 else 0xe74c3c,
     )
-    add_safe_field(embed, "📡 채팅방별 AI 실시간 작업 관제 (10분 갱신)", channels_val, inline=False)
-    add_safe_field(embed, "📊 시스템 리소스 (10분 갱신)", sys_val, inline=False)
-    add_safe_field(embed, "💾 저장공간", disk_val, inline=False)
-    add_safe_field(embed, "🤖 Antigravity AI Engine Status (실시간 연동)", gemini_quota, inline=False)
-    if opencode_quota:
-        add_safe_field(embed, "⚡ OpenCode Go AI Status (5시간·주간·월간 한도)", opencode_quota, inline=False)
-    if openrouter_quota:
-        add_safe_field(embed, "🌐 OpenRouter AI Status (qa2·크레딧 관제)", openrouter_quota, inline=False)
-    if external_quota:
-        add_safe_field(embed, "📦 Claude & GPT Models (공유 쿼터)", external_quota, inline=False)
-    embed.set_footer(text=f"호스트 HP-ProDesk-600-G5 · 🎛️ 10분 자동 갱신 ({now_str})")
+    add_safe_field(embed, "💻 시스템", sys_val, inline=False)
+    add_safe_field(embed, "📊 AI 쿼터 현황", quota_val, inline=False)
+    add_safe_field(embed, "📡 작업 현황", task_line, inline=False)
+    embed.set_footer(text=f"HP-ProDesk-600-G5 · 10분 자동 갱신 ({now_str})")
 
     return embed
+
+
+class TelemetryStatusView(discord.ui.View):
+    """
+    Persistent view for the Discord Control Tower status message.
+    Provides a manual refresh button ('🔄 새로고침') with zero timeout.
+    """
+    def __init__(self, session_manager: Optional[SessionManager] = None):
+        super().__init__(timeout=None)
+        self.session_manager = session_manager
+
+    @discord.ui.button(
+        label="새로고침",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔄",
+        custom_id="telemetry_status_refresh"
+    )
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Silent ACK: Acknowledge the component interaction without creating any ephemeral popup message
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+        sm = self.session_manager
+        if sm is None:
+            sm = getattr(interaction.client, "session_manager", None) or SessionManager(clear_on_startup=False)
+
+        try:
+            ok = await update_status_message(interaction.client, sm, force=True)
+            if not ok:
+                await asyncio.to_thread(update_status_via_rest_api, sm, True)
+        except Exception as e:
+            logger.error(f"Error handling telemetry status refresh button: {e}", exc_info=True)
 
 
 import urllib.request
@@ -1033,10 +1356,11 @@ def find_existing_status_message_via_rest(token: str) -> Tuple[Optional[int], Li
     return primary_id, duplicates
 
 
-def update_status_via_rest_api(session_manager: Optional[SessionManager] = None) -> bool:
+def update_status_via_rest_api(session_manager: Optional[SessionManager] = None, force: bool = False) -> bool:
     """
     Directly updates the status message via Discord REST API using Server Manager Bot token.
     Enforces the single-message invariant: never creates duplicates; edits existing message.
+    Attaches the interactive manual refresh button.
     """
     global STATUS_MESSAGE_ID
     now = time.time()
@@ -1056,11 +1380,15 @@ def update_status_via_rest_api(session_manager: Optional[SessionManager] = None)
     try:
         embed = build_telemetry_embed(session_manager)
         embed_h = compute_embed_hash(embed)
-        if embed_h and embed_h == _get_last_embed_hash() and STATUS_MESSAGE_ID:
+        if not force and embed_h and embed_h == _get_last_embed_hash() and STATUS_MESSAGE_ID:
             logger.debug("REST update: embed unchanged. Skipping Discord API call (No-Op deduplication).")
             return True
 
-        payload = {"embeds": [embed.to_dict()]}
+        view = TelemetryStatusView(session_manager)
+        payload = {
+            "embeds": [embed.to_dict()],
+            "components": view.to_components()
+        }
         data_bytes = json.dumps(payload).encode("utf-8")
 
         headers = {
@@ -1208,11 +1536,16 @@ async def find_existing_status_message_via_client(
     return primary_msg, duplicates
 
 
-async def update_status_message(client: Optional[discord.Client], session_manager: SessionManager) -> bool:
+async def update_status_message(
+    client: Optional[discord.Client],
+    session_manager: SessionManager,
+    force: bool = False
+) -> bool:
     """
     Fetches and edits the single persistent status message on Discord.
     Guarantees that exactly ONE message exists in the channel and is continuously updated.
     Never spams new messages — auto-discovers existing messages and cleans up duplicates.
+    Attaches the interactive manual refresh button.
     """
     global STATUS_MESSAGE_ID
 
@@ -1232,10 +1565,11 @@ async def update_status_message(client: Optional[discord.Client], session_manage
             if channel:
                 embed = await asyncio.to_thread(build_telemetry_embed, session_manager)
                 embed_h = compute_embed_hash(embed)
-                if embed_h and embed_h == _get_last_embed_hash() and STATUS_MESSAGE_ID:
+                if not force and embed_h and embed_h == _get_last_embed_hash() and STATUS_MESSAGE_ID:
                     logger.debug("Client status update: embed unchanged. Skipping edit API call (No-Op deduplication).")
                     return True
 
+                view = TelemetryStatusView(session_manager)
                 msg: Optional[discord.Message] = None
 
                 # 1. Try fetching existing known message ID
@@ -1279,7 +1613,7 @@ async def update_status_message(client: Optional[discord.Client], session_manage
                 # 3. Edit the discovered or existing single message
                 if msg:
                     try:
-                        await msg.edit(embed=embed)
+                        await msg.edit(embed=embed, view=view)
                         _set_last_embed_hash(embed_h)
                         save_status_message_id(msg.id)
                         logger.info(f"Telemetry status message {msg.id} updated via client.")
@@ -1302,7 +1636,7 @@ async def update_status_message(client: Optional[discord.Client], session_manage
                     if now - getattr(update_status_message, "_last_created_time", 0.0) < 120.0:
                         logger.warning("Throttling status message creation (under 120s since last create).")
                         return False
-                    new_msg = await channel.send(embed=embed)
+                    new_msg = await channel.send(embed=embed, view=view)
                     save_status_message_id(new_msg.id)
                     _set_last_embed_hash(embed_h)
                     update_status_message._last_created_time = now
@@ -1331,7 +1665,7 @@ async def update_status_message(client: Optional[discord.Client], session_manage
     # 2. Fallback to Direct REST API (only if NOT in rate limit cooldown)
     if time.time() < _get_rate_limit_until():
         return False
-    return await asyncio.to_thread(update_status_via_rest_api, session_manager)
+    return await asyncio.to_thread(update_status_via_rest_api, session_manager, force)
 
 
 async def start_telemetry_status_loop(
@@ -1380,9 +1714,16 @@ async def start_telemetry_status_loop(
 
 def ensure_telemetry_status_loop_running(client: Optional[discord.Client], session_manager: SessionManager):
     """
-    Ensures the background telemetry status polling loop is running.
+    Ensures the background telemetry status polling loop is running and registers persistent interactive views.
     Safe to call multiple times — uses process-level registry to prevent duplicate tasks.
     """
+    if client and hasattr(client, "add_view"):
+        try:
+            client.add_view(TelemetryStatusView(session_manager))
+            logger.debug("TelemetryStatusManager: Registered persistent TelemetryStatusView on client.")
+        except Exception as e:
+            logger.debug(f"TelemetryStatusManager: add_view notice: {e}")
+
     if os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules:
         return
     existing_task = _get_loop_task()

@@ -2287,7 +2287,10 @@ class QAHubManager:
                     await safe_send_discord_message(exec_channel, embed=d_embed, files=batch_files)
 
             # Copy screenshots to persistent QA Hub workspace for LLM view_file access (isolated per project)
-            qa_hub_ws = exec_session.workspace or "/home/jangsung/Desktop/autocoding/!9_qa_hub"
+            qa_hub_ws = exec_session.workspace or config.DEFAULT_CHANNEL_WORKSPACES.get(
+                config.QA_HUB_CHANNEL_ID,
+                os.path.join(config.DEFAULT_WORKSPACE, "!9_qa_hub"),
+            )
             safe_proj_name = re.sub(r'[^a-zA-Z0-9_\-가-힣]', '_', packet.source_channel_name or "unknown").strip("_") or "default"
             hub_screenshot_dir = os.path.join(qa_hub_ws, "screenshots", safe_proj_name)
             os.makedirs(hub_screenshot_dir, exist_ok=True)

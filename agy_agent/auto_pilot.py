@@ -17,6 +17,21 @@ from discord_utils import split_message, safe_send_discord_message, DISCORD_MAX_
 
 logger = logging.getLogger("AutoPilot")
 
+
+def get_autopilot_model_display() -> str:
+    """AutoPilot 전담 감사 모델의 표시명 (SSOT).
+
+    `!model`·디스코드 프레즌스와 동일한 `GlobalModelManager.format_model_name()` 을 사용해
+    `config.QA_AUTO_MODEL`(기본 gemini-3.1-pro-high)을 표기한다. 기존에는 배너/프롬프트에
+    'Gemini 3.1 Pro High' 가 하드코딩되어 실제 설정과 어긋날 수 있었다.
+    """
+    try:
+        from model_manager import GlobalModelManager
+        return GlobalModelManager.format_model_name(QA_AUTO_MODEL)
+    except Exception:
+        return QA_AUTO_MODEL
+
+
 URL_REGEX = re.compile(r'https?://[^\s<>"`\'\]\)\,\;]+', re.IGNORECASE)
 
 class PersistentTyping:
@@ -658,7 +673,7 @@ class AutoPilotManager:
 
         if state.current_cycle > 1:
             status_msg = await active_channel.send(
-                f"👑 🧐 **[AutoPilot 자율 검수 {cycle_label}]** `{app_name}` {phase_name} 모드 순환 가동 중... (Gemini 3.1 Pro High)"
+                f"👑 🧐 **[AutoPilot 자율 검수 {cycle_label}]** `{app_name}` {phase_name} 모드 순환 가동 중... ({get_autopilot_model_display()})"
             )
         else:
             status_msg = await active_channel.send(
@@ -666,7 +681,7 @@ class AutoPilotManager:
                 f"• 작전 모드: **{phase_name}**\n"
                 f"• 프로젝트 타입: **{project_type_label}**\n"
                 f"• 디스플레이: **{display_label}**\n"
-                f"• 감사 모델: `Gemini 3.1 Pro High` (AutoPilot 전담 PO/아키텍처 검수)\n"
+                f"• 감사 모델: `{get_autopilot_model_display()}` (AutoPilot 전담 PO/아키텍처 검수)\n"
                 f"• 파이프라인 규격: 📱 **단일화된 100% Android Full Emulator MCP E2E (KVM 가속 + 12 MCP Tools)**\n"
                 f"• 무결성 보증: 🛡️ **구형 Fast-Path(TC-FAST-01) 전면 폐지 & 실기기 프레임버퍼 6-Step 전수 검증**\n"
                 f"• 대상: `{target_url if is_web_project else (workspace or '워크스페이스')}`\n"
@@ -957,7 +972,7 @@ class AutoPilotManager:
             log_title = "디바이스 Logcat 로그" if is_android_project else ("시스템 실행 로그" if is_native_project else "브라우저 콘솔 로그")
 
             embed = discord.Embed(
-                title=f"👑 🧐 [Gemini 3.1 Pro 수석 감사관 E2E 진단 보고{cycle_label}]",
+                title=f"👑 🧐 [{get_autopilot_model_display()} 수석 감사관 E2E 진단 보고{cycle_label}]",
                 description=(
                     f"**검증 대상:** {target_display}\n"
                     f"**작전 모드:** {phase_name} (종합 진단 점수: `{plan['health_score']}점`)\n"
@@ -971,7 +986,7 @@ class AutoPilotManager:
                 ),
                 color=discord.Color.gold()
             )
-            embed.set_footer(text=f"감사관: Gemini 3.1 Pro High | {plan['briefing']}")
+            embed.set_footer(text=f"감사관: {get_autopilot_model_display()} | {plan['briefing']}")
             embed_files = []
             if collage_file:
                 embed.set_image(url="attachment://storyboard_collage.png")
@@ -1112,7 +1127,7 @@ class AutoPilotManager:
                         pass
 
                 obs_prompt = (
-                    f"[역할: 수석 제품 총괄 PO & 아키텍처 감사관 (Chief Product Officer / Gemini 3.1 Pro High)]\n\n"
+                    f"[역할: 수석 제품 총괄 PO & 아키텍처 감사관 (Chief Product Officer / {get_autopilot_model_display()})]\n\n"
                     f"👑 Commander 사령관의 지휘에 따라 현재 작업 워크스페이스({session.workspace})의 `PRD.md` 및 `PROJECT_CONSTITUTION.md` 기획서와 실제 소스코드 전체를 정밀 대조 검수하십시오.\n\n"
                     f"**[Commander 사령관 전술 평가]:**\n"
                     f"- 사령관 진단: {plan['assessment']}\n"
@@ -1124,7 +1139,7 @@ class AutoPilotManager:
                     f"- 인터랙션 수행 내역:\n{interaction_summary}\n"
                     f"- {log_title}:\n```\n{console_summary}\n```\n\n"
                     f"{_obs_design_spec_block}"
-                    f"**[🚨 Gemini 3.1 Pro 핵심 정합성 검수 지침]:**\n"
+                    f"**[🚨 {get_autopilot_model_display()} 핵심 정합성 검수 지침]:**\n"
                     f"1. **PRD 요구사항 일치도 점검**: `PRD.md`에 정의된 요구사항(예: `REQ-001`~)이 실제 코드로 온전히 구현되었는지 대조하고 구현 달성률(%)을 산출하십시오.\n"
                     f"2. **누락/미완성 기능 색출**: 기획서에는 있으나 실제 UI/코드에서 Mock이거나 누락된 부분을 구체적으로 적시하십시오.\n"
                     f"{ux_instruction}"
@@ -1170,7 +1185,7 @@ class AutoPilotManager:
                     f"{session.user_directive}\n\n"
                     f"**[🚨 QA & Auditor 심사 헌법]**:\n"
                     f"QA 봇들은 Coder가 자체 작성한 코드 범위에만 한정하여 검토하지 말고, "
-                    f"사령관(<@{1540273467453345812}>)의 5대 종합 기획 청사진(설계/FE/BE/에셋/E2E 기준) 및 "
+                    f"사령관(<@{config.COMMANDER_BOT_ID}>)의 5대 종합 기획 청사진(설계/FE/BE/에셋/E2E 기준) 및 "
                     f"위 사용자 의뢰에 대비하여 Coder의 구현 완성도를 엄격히 교차 검증하십시오.\n\n"
                 )
 
@@ -1217,7 +1232,7 @@ class AutoPilotManager:
                     f"• 사령관 평가: {plan['assessment']}\n"
                     f"• 최우선 타격 과제: {plan['priority_target']}\n"
                     f"• 👨‍💻 Coder 지시: {plan['coder_directive']}\n"
-                    f"• 🕵️ QA 지시 (Gemini 3.1 Pro): {plan['qa_directive']}\n"
+                    f"• 🕵️ QA 지시 ({get_autopilot_model_display()}): {plan['qa_directive']}\n"
                     f"{mech_fail_line}\n"
                     f"{_design_spec_block}"
                     f"**[{diag_title}]:**\n"
@@ -1226,11 +1241,11 @@ class AutoPilotManager:
                     f"- 가로 스크롤(Overflow) 버그: {'발생 (수정 필요)' if crawl_report.horizontal_overflow else '정상'}\n"
                     f"- 인터랙션 수행 내역:\n{interaction_summary}\n"
                     f"- {log_title}:\n```\n{console_summary}\n```\n\n"
-                    f"**[🚨 Phase 3 완전 자율 발전 필수 지침 - Gemini 3.1 Pro QA 협업]:**\n"
+                    f"**[🚨 Phase 3 완전 자율 발전 필수 지침 - {get_autopilot_model_display()} QA 협업]:**\n"
                     f"1. **단 하나의 타격 과제 집중 완수**: 사령관이 지정한 최우선 과제(`{plan['priority_target']}`)를 완벽히 구현하는 것을 최우선 목표로 삼으십시오. 두리뭉실한 스타일 수정에 그치지 말고, 명시된 비즈니스 로직과 UI 인터랙션을 실제 소스코드에 실구현(Implement & Patch)하십시오.\n"
                     f"2. **인간 수준의 완성도 디테일 + 디자인 비브 준수**: 단순 기능 추가에 그치지 않고 반응형 모바일 최적화, 로딩 스피너, 토스트 알림, 빈 상태(Empty State) 일러스트, 예외 방어까지 완벽히 구현하십시오. DESIGN_SPEC.md의 Apple.com 미니멀 바이브 & Pinterest Aesthetic 토큰을 디자인에 반드시 반영하십시오.\n"
                     f"3. **빌드 및 즉각 배포**: 수정한 코드를 빌드/테스트하고 배포 스크립트(또는 firebase deploy, gradlew assembleRelease)를 실행하여 라이브에 즉시 반영하십시오.\n"
-                    f"4. **3중 협업 교차 검증**: QA(Gemini 3.1 Pro)의 시니어 기획/코드 리뷰와 Auditor의 전수 감사를 거쳐 최종 자율 발전 리포트를 제출하십시오."
+                    f"4. **3중 협업 교차 검증**: QA({get_autopilot_model_display()})의 시니어 기획/코드 리뷰와 Auditor의 전수 감사를 거쳐 최종 자율 발전 리포트를 제출하십시오."
                 )
             else:
                 audit_prompt = (
@@ -1239,7 +1254,7 @@ class AutoPilotManager:
                     f"• 사령관 평가: {plan['assessment']}\n"
                     f"• 최우선 타격 과제: {plan['priority_target']}\n"
                     f"• 👨‍💻 Coder 지시: {plan['coder_directive']}\n"
-                    f"• 🕵️ QA 지시 (Gemini 3.1 Pro): {plan['qa_directive']}\n"
+                    f"• 🕵️ QA 지시 ({get_autopilot_model_display()}): {plan['qa_directive']}\n"
                     f"{mech_fail_line}\n"
                     f"**[{diag_title}]:**\n"
                     f"- 라이브 대상: {target_display}\n"
@@ -1251,7 +1266,7 @@ class AutoPilotManager:
                     f"1. **식별된 결함 및 미비점 정밀 핫픽스**: 지적된 콘솔 에러, 레이아웃 깨짐, 또는 미구현 PRD 요구사항이 있을 경우 사령관 타격 과제(`{plan['priority_target']}`)를 최우선으로 실제 소스코드를 수정(Patch)하십시오.\n"
                     f"2. **기존 정상 동작 보존 (Zero Regression)**: 이미 안정적으로 동작하는 컴포넌트를 무의미하게 변경하지 말고, 견고한 예외 방어(Null Check, 에러 핸들링)와 UI 완성도 디테일(로딩 스피너, 반응형 정렬)을 강화하십시오.\n"
                     f"3. **빌드 및 즉각 반영**: 수정한 코드를 빌드/테스트하고, 배포 스크립트(또는 APK 빌드)를 실행하여 프로덕션에 즉시 반영하십시오.\n"
-                    f"4. QA(Gemini 3.1 Pro)와 Auditor의 철저한 검증을 거쳐 최종 자율 패치 리포트를 제출하십시오."
+                    f"4. QA({get_autopilot_model_display()})와 Auditor의 철저한 검증을 거쳐 최종 자율 패치 리포트를 제출하십시오."
                 )
 
             if (not state.enabled and not manual_trigger) or getattr(session, "is_stopped", False):
@@ -1342,7 +1357,7 @@ class AutoPilotManager:
                                 mode=state.mode
                             )
 
-                            # Send Product Critic Embed from Commander Bot (1540273467453345812)
+                            # Send Product Critic Embed from Commander Bot
                             critic_embed = AutonomousProductPlanner.build_critic_embed(eval_res)
                             await safe_send_discord_message(active_channel, embed=critic_embed)
 

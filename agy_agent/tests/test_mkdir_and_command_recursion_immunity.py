@@ -109,7 +109,7 @@ class TestMkdirAndRecursionImmunity(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=mock_ctx), \
              patch("bot.reload_helper_modules"), \
              patch("bot.ensure_commander_bot_started"), \
-             patch("bot.ensure_consultant_bot_started"), \
+             patch("bot.ensure_image_bot_started"), \
              patch("bot.ensure_qa2_bot_started"), \
              patch("bot.mkdir_command", new_callable=AsyncMock) as mock_mkdir, \
              patch("bot.check_and_apply_finish_project_freeze", new_callable=AsyncMock):

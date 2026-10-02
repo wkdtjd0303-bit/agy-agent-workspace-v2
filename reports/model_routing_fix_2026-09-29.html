@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>!model 봇 ≠ 실제 동작 봇 — 원인 분석 및 수정 보고서</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --fg:#e7eaf0; --muted:#9aa4b2; --accent:#5b8cff; --ok:#37d67a; --warn:#ffb020; --bad:#ff5c5c; --line:#2a2f3a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans KR",sans-serif; line-height:1.65; }
+  .wrap { max-width:900px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  h2 { font-size:19px; margin:36px 0 12px; padding-left:10px; border-left:4px solid var(--accent); }
+  h3 { font-size:16px; margin:22px 0 8px; color:#cfd6e4; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin:14px 0; }
+  code { background:#0b0d11; border:1px solid var(--line); padding:1px 6px; border-radius:6px; font-size:13px; color:#9fe8ff; }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow:auto; font-size:12.5px; }
+  pre code { border:0; padding:0; background:none; color:#cfe3ff; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:13.5px; }
+  th,td { border:1px solid var(--line); padding:9px 10px; text-align:left; vertical-align:top; }
+  th { background:#121620; color:#cfd6e4; }
+  .ok { color:var(--ok); font-weight:600; }
+  .warn { color:var(--warn); font-weight:600; }
+  .bad { color:var(--bad); font-weight:600; }
+  .badge { display:inline-block; font-size:12px; padding:2px 9px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+  ul { padding-left:20px; }
+  .kv { display:flex; gap:8px; flex-wrap:wrap; }
+  .kv span { color:var(--muted); }
+  hr { border:0; border-top:1px solid var(--line); margin:28px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔧 <code>!model</code> 봇 ≠ 실제 동작 봇 문제 — 원인 분석 및 수정 보고서</h1>
+  <div class="meta">2026-09-29 · 대상: <code>!05_agy_agent/agy_agent</code> Discord 자율 협업 AI 봇</div>
+
+  <div class="card">
+    <strong>증상</strong><br>
+    "나는 분명히 <b>OpenCode 봇</b>으로 세팅해뒀는데 실제로는 <b>OpenRouter(Hermes) 봇</b>이 동작했다."
+  </div>
+
+  <h2>1. 진단 요약 (Root Cause)</h2>
+  <p>런타임에서 <b>“표시되는 봇(설정)”과 “실제 실행 엔진”이 분리</b>되어 있었다. 서로 맞물린 3가지 원인:</p>
+  <table>
+    <tr><th>#</th><th>원인</th><th>위치</th><th>결과</th></tr>
+    <tr>
+      <td>①</td>
+      <td>엔진-모델 정합성 가드가 <b>OpenCode 엔진에 Hermes 전용 slug</b>(<code>upstage/solar-pro4</code> 등)를 “호환”으로 오인</td>
+      <td><code>model_manager.py</code><br><code>is_model_compatible_with_engine()</code></td>
+      <td>실행 불가 조합이 저장되고 런타임 <b>OpenRouter(Hermes) 분기로 샘</b></td>
+    </tr>
+    <tr>
+      <td>②</td>
+      <td>QA1/QA2/Auditor 런타임이 <b>세션의 오래된 엔진값</b>을 <code>!model</code>(SSOT)보다 먼저 읽음</td>
+      <td><code>trio_agent_runner.py</code><br><code>run_qa_turn / run_qa2_turn / run_auditor_turn</code></td>
+      <td>화면은 OpenCode, 실제 호출은 <code>agy</code>/<code>openrouter</code></td>
+    </tr>
+    <tr>
+      <td>③</td>
+      <td>기동 로그/라벨이 <b>agy 가 아니면 무조건 “Hermes”</b>, QA2는 <b>“OpenRouter” 하드코딩</b></td>
+      <td><code>bot.py</code> <code>on_ready / on_qa2_ready</code></td>
+      <td>OpenCode 로 돌아도 로그가 Hermes/OpenRouter 로 찍혀 <b>오동작으로 오인</b></td>
+    </tr>
+  </table>
+
+  <h3>실측 증거 (진단 스크립트)</h3>
+  <p>SSOT(<code>global_model_config.json</code> · <code>.env</code>)는 이미 전 역할 OpenCode 였으나, 채널 세션 58개에 과거 값이 잔존했다.</p>
+<pre><code> 1) 전역 역할 설정 (GlobalModelManager = !model SSOT)
+  coder      opencode   opencode-go/deepseek-v4.1-flash   OK
+  qa1        opencode   opencode-go/mimo-v2.6-flash       OK
+  qa2        opencode   opencode-go/deepseek-v4-flash     OK
+  auditor    opencode   opencode-go/deepseek-v4.1-flash   OK
+
+ 2) 채널 세션의 stale 엔진 값 (런타임 덮어쓰기 위험)
+  qa_engine      : 불일치 58건  (세션=agy         ≠ !model=opencode)
+  qa2_engine     : 불일치 58건  (세션=openrouter  ≠ !model=opencode)   &lt;-- ★ 오픈라우터 봇의 정체
+  auditor_engine : 불일치 58건  (세션=agy         ≠ !model=opencode)</code></pre>
+
+  <h2>2. 수정 내용</h2>
+
+  <h3>2-1. 엔진-모델 정합성 가드 강화 — <code>model_manager.py</code></h3>
+<pre><code>if eng == "opencode":
+    # [FIX] OpenCode CLI 는 'opencode-go/*' · 'opencode/*' 모델만 실행 가능하다.
+    return owner == "opencode"        # 기존: ("/" in m) and (owner != "agy")</code></pre>
+  <ul>
+    <li>OpenCode 엔진에는 OpenCode 소속 모델만 저장 가능.</li>
+    <li>위반 조합은 저장 시/<b>로드 시</b> 모두 자동 교정 → 거짓 OpenCode 표시 소멸.</li>
+  </ul>
+
+  <h3>2-2. 런타임 엔진을 <code>!model</code> SSOT 우선으로 — <code>trio_agent_runner.py</code></h3>
+<pre><code># run_qa_turn
+target_engine = GlobalModelManager.get_role_engine("qa1") or getattr(session, "qa_engine", "agy") or "agy"
+# run_auditor_turn
+target_engine = GlobalModelManager.get_role_engine("auditor") or getattr(session, "auditor_engine", None) or "agy"
+# run_qa2_turn
+"engine": GlobalModelManager.get_role_engine("qa2") or getattr(session, "qa2_engine", config.QA2_ENGINE) or "agy"</code></pre>
+
+  <h3>2-3. 표시 정직성 + 세션 정합화 — <code>bot.py</code></h3>
+  <ul>
+    <li><b><code>_engine_display_label()</code></b>: <code>agy</code> 외 전부 “Hermes” 로 뭉뚱그리던 표기를 실제 엔진명으로 정정
+      (<code>OpenCode Coder Bot</code>, <code>OpenCode qa2 Bot</code> …).</li>
+    <li><b><code>sync_sessions_with_global_model()</code></b>: <code>!model</code> 변경/기동 시 모든 채널 세션의 stale 엔진 필드를 SSOT 로 정합화.</li>
+  </ul>
+
+  <h3>2-4. 재발 방지 테스트 — <code>tests/test_model_routing_ssot.py</code> (신규, 9 tests)</h3>
+  <p class="badge">OpenCode×Hermes slug 비호환 · 엔진-모델 정합화 · 런타임 SSOT 우선 · 세션 치유</p>
+
+  <h3>2-5. 진단 도구 — <code>scripts/diagnose_model_routing.py</code> (신규)</h3>
+<pre><code>cd agy_agent &amp;&amp; ./.venv/bin/python scripts/diagnose_model_routing.py</code></pre>
+
+  <h2>3. 검증 결과</h2>
+  <table>
+    <tr><th>항목</th><th>결과</th></tr>
+    <tr><td>신규 회귀 테스트 <code>test_model_routing_ssot.py</code></td><td class="ok">9 passed</td></tr>
+    <tr><td>정합성 테스트 <code>test_model_engine_coherence.py</code></td><td class="ok">10 passed</td></tr>
+    <tr><td>전체 테스트 스위트</td><td class="ok">1170 passed, 11 skipped</td></tr>
+    <tr><td>기존/환경 의존 실패 2건 (수정과 무관)</td><td class="warn">test_ling_real_execution (OpenRouter HTTP 404), test_opencode_latest_models (라이브 CLI 30&lt;35)</td></tr>
+    <tr><td>진단 스크립트</td><td class="ok">전 역할 정합성 100%</td></tr>
+  </table>
+
+  <h2>4. 적용(반영) 방법</h2>
+  <ol>
+    <li><b>무중단 핫리로드 (권장)</b>: Discord 에서 <code>!reset</code> (또는 <code>!리셋</code>)</li>
+    <li><b>서비스 재시작</b>: <code>systemctl --user restart agy-discord-bot</code></li>
+    <li><b>확인</b>: <code>journalctl --user -u agy-discord-bot -n 50 --no-pager | grep -iE 'OpenCode|ModelRouting|Healed'</code></li>
+  </ol>
+
+  <hr>
+  <p class="meta">
+    <b>요약</b> — 원인은 ① OpenCode 엔진에 Hermes 모델 저장 허용, ② 런타임이 stale 세션 엔진값 우선, ③ 표시 라벨 오류.
+    수정은 정합성 가드 강화 + 런타임 SSOT 우선 + 세션 자동 치유 + 표시 정정 + 회귀 테스트/진단도구.
+    이제 <code>!model</code> 에서 고른 엔진이 <b>표시·실행·로그 모두에서 일치</b>한다.
+  </p>
+</div>
+</body>
+</html>

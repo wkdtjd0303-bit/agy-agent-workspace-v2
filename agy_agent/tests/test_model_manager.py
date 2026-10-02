@@ -33,7 +33,7 @@ class TestGlobalModelManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qa5", roles)
         self.assertIn("qa6", roles)
         self.assertIn("auditor", roles)
-        self.assertIn("consultant", roles)
+        self.assertIn("image", roles)
         self.assertIn("commander", roles)
 
     def test_qa_enable_disable_toggle(self):
@@ -323,6 +323,49 @@ class TestGlobalModelManager(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(qa2_entry) > 0)
         self.assertIn("persona", qa2_entry[0])
         self.assertIn("persona_name", qa2_entry[0])
+
+    def test_model_dashboard_view_all_roles_row_weights_within_limits(self):
+        """Ensures ModelDashboardView complies with Discord 5-row and 5-width limits across all roles."""
+        roles = model_manager.GlobalModelManager.get_all_roles()
+        for role in roles:
+            view = model_manager.ModelDashboardView(selected_role=role)
+            row_widths = [0] * 5
+            for item in view.children:
+                w = getattr(item, "width", 1)
+                r = getattr(item, "row", 0) or 0
+                row_widths[r] += w
+            for row_idx, total_w in enumerate(row_widths):
+                self.assertLessEqual(
+                    total_w,
+                    5,
+                    f"Row {row_idx} exceeded width 5 (weight: {total_w}) for role '{role}'"
+                )
+
+    async def test_search_callbacks_trigger_search_modal(self):
+        """Ensures both search button and preset dropdown __search__ value open ModelSearchModal."""
+        view = model_manager.ModelDashboardView(selected_role="coder")
+        btn_search = [c for c in view.children if getattr(c, "custom_id", None) == "btn_model_search"][0]
+
+        mock_interaction = AsyncMock()
+        mock_interaction.response = MagicMock()
+        mock_interaction.response.send_modal = AsyncMock()
+
+        await btn_search.callback(mock_interaction)
+        mock_interaction.response.send_modal.assert_awaited_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        self.assertIsInstance(modal_arg, model_manager.ModelSearchModal)
+
+        # Dropdown __search__
+        preset_dropdown = [c for c in view.children if isinstance(c, model_manager.ModelPresetDropdown)][0]
+        preset_dropdown._values = ["__search__"]
+        mock_interaction2 = AsyncMock()
+        mock_interaction2.response = MagicMock()
+        mock_interaction2.response.send_modal = AsyncMock()
+
+        await preset_dropdown.callback(mock_interaction2)
+        mock_interaction2.response.send_modal.assert_awaited_once()
+        modal_arg2 = mock_interaction2.response.send_modal.call_args[0][0]
+        self.assertIsInstance(modal_arg2, model_manager.ModelSearchModal)
 
 
 if __name__ == "__main__":

@@ -732,6 +732,47 @@ class EvidenceValidator:
         return result
 
     @classmethod
+    def check_visual_craft_review(cls, workspace: str) -> Dict[str, Any]:
+        """
+        [!mode 3/3+ Visual Craft Loop 연동 게이트]
+        `reports/gate5/visual_craft_review.json` 이 존재하면 verdict 를 물리 검증한다.
+        - 파일이 없으면 (레거시/비 GUI 프로젝트) 통과 → 기존 동작 100% 보존.
+        - verdict == "FAIL" 이면 Gate 5 반려 (MAJOR 이상 시각 결함 잔존).
+        Returns: {"checked": bool, "passed": bool, "verdict": str, "summary": str}
+        """
+        result = {"checked": False, "passed": True, "verdict": "ABSENT", "summary": "시각 완성도 감사 미실행(선택)"}
+        if not workspace or not os.path.isdir(workspace):
+            return result
+        path = os.path.join(workspace, "reports", "gate5", "visual_craft_review.json")
+        if not os.path.isfile(path):
+            return result
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            result.update({"checked": True, "passed": True, "verdict": "UNREADABLE", "summary": f"감사 파일 판독 불가(무시): {e}"})
+            return result
+
+        verdict = str(data.get("verdict", "PASS")).upper()
+        failing = data.get("failing_rule_ids") or []
+        blocking = int(data.get("blocking_count", 0) or 0)
+        score = data.get("score")
+        result.update({"checked": True, "verdict": verdict})
+        if verdict == "FAIL":
+            # 판정이 FAIL 이면 (MAJOR 결함 또는 Vision 기준 미달) Gate 5 통과 불가.
+            result["passed"] = False
+            result["summary"] = (
+                f"시각 완성도 계약 위반 {blocking}건 잔존 "
+                f"(규칙: {', '.join(failing[:5]) or 'vision 판정 FAIL'}"
+                + (f", vision score: {score}" if score is not None else "")
+                + ") — Coder 구조 재작업 필요"
+            )
+        else:
+            result["passed"] = True
+            result["summary"] = f"시각 완성도 감사 통과 (verdict={verdict}" + (f", score={score}" if score is not None else "") + ")"
+        return result
+
+    @classmethod
     def inspect_production_diff(cls, workspace: str, diff_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         [Zero-Production-Diff 기계적 차단 게이트 전용 인스펙터]
@@ -2232,6 +2273,12 @@ class EvidenceValidator:
                 has_rep, msg_rep = cls.validate_file(os.path.join(workspace, "reports", "gate4", "e2e_test.json"), min_bytes=10, is_json=True)
                 details["checks"]["headless_state_integrity"] = {"passed": True, "domain": domain, "e2e_evidence": msg_rep}
                 return True, f"Gate 5 passed: Headless {domain.upper()} runtime state verified (GUI screenshots not required)", details
+
+            # 0. Visual Craft Loop (시각 완성도 계약) — !mode 3/3+ 무인 자율 감사 증거가 존재하면 물리 검증
+            craft_check = cls.check_visual_craft_review(workspace)
+            details["checks"]["visual_craft_review"] = craft_check
+            if craft_check.get("checked") and not craft_check.get("passed"):
+                return False, f"Gate 5 failed: {craft_check.get('summary')}", details
 
             # 1. Anti-Forgery Gate: Scan for fake canvas generator scripts (e.g. PIL generate_screenshots.py, manual Android canvas test drawing)
             is_forged, forged_scripts = cls.detect_synthetic_artifacts(workspace)

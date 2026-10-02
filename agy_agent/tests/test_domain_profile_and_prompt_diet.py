@@ -67,7 +67,7 @@ class TestDomainProfileAndPromptDiet(unittest.TestCase):
         with open(os.path.join(self.test_dir, "ROADMAP.md"), "w", encoding="utf-8") as f:
             f.write("# Project Roadmap\n- [x] Phase 0: Init\n- [ ] Phase 1: Implement Async Telegram Bot Client\n- [ ] Phase 2: Add Monitoring\n")
 
-        ctx = get_workspace_grounding_context(self.test_dir, "코드 구현해줘")
+        ctx = get_workspace_grounding_context(self.test_dir, "Telegram Bot 클라이언트 구현해줘")
 
         self.assertIn("[🎯 WORKSPACE FOCUS & CONSTRAINTS]", ctx)
         self.assertIn("Phase 1: Implement Async Telegram Bot Client", ctx)
@@ -76,6 +76,14 @@ class TestDomainProfileAndPromptDiet(unittest.TestCase):
         self.assertNotIn("48dp", ctx)
         self.assertNotIn("390px", ctx)
         self.assertLess(len(ctx), 1000, f"Grounding context diet violated: length={len(ctx)} chars")
+
+        # [회귀] 무관한 고정 과제(폴더별 ROADMAP/PRD 첫 항목)는 주입하지 않는다.
+        # → 동일한 사용자 요청이 프로젝트 폴더마다 다른 과제로 오염되어 답변이 갈라지는 문제 방지.
+        unrelated_ctx = get_workspace_grounding_context(self.test_dir, "버튼 색상을 파란색으로 바꿔줘")
+        self.assertNotIn("Phase 1: Implement Async Telegram Bot Client", unrelated_ctx)
+        self.assertNotIn("🎯 **집중 과제**", unrelated_ctx)
+        # 도메인 제약(프로파일)은 의도적으로 유지된다.
+        self.assertIn("cli_agent_rules", unrelated_ctx)
 
     def test_domain_detection_across_presets(self):
         """Verifies that EvidenceValidator.get_project_domain accurately classifies domains."""

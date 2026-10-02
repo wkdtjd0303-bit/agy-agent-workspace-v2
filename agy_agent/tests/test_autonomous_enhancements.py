@@ -148,8 +148,16 @@ class TelemetryCollector:
         new_milestones = rm.auto_expand_roadmap()
         self.assertTrue(len(new_milestones) > 0)
         titles = [m.title for m in new_milestones]
-        # Should contain intent-first or quality hardening, NOT game AI or sound synthesizer
-        self.assertTrue(any("기획" in t or "품질" in t or "아키텍처" in t for t in titles))
+        # [기획자 역할] 클린 디스크 확장은 품질 하드닝이 아니라 '아직 없는 사용자 체감 신규 기능'을
+        # 우선 발주해야 한다. 단, 도메인 무관 환각(게임 AI / 사운드 신디사이저)은 금지한다.
+        from product_value_planner import is_hardening_only_plan
+        self.assertTrue(
+            any(
+                not is_hardening_only_plan(m.title, [t.text for t in m.tasks])
+                for m in new_milestones
+            ),
+            f"클린 디스크 자동 확장이 사용자 가치 기능을 생성하지 않았습니다: {titles}",
+        )
         self.assertFalse(any("신디사이저" in t or "적 AI" in t for t in titles))
 
 

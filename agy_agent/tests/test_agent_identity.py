@@ -19,7 +19,7 @@ from session_manager import SessionManager
 class TestAgentIdentity(unittest.IsolatedAsyncioTestCase):
     """
     Test suite verifying agent identity separation (agy vs hermes),
-    identity command execution (!identity, !whoami), natural language ping detection,
+    identity command execution (!identity, !whoami), natural language ping forwarding to the coder,
     and OpenRouter/Hermes endpoint stability.
     """
 
@@ -66,9 +66,10 @@ class TestAgentIdentity(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(embed)
         self.assertIn("hermes", embed.title.lower())
 
-    async def test_on_message_natural_language_ping_agy(self):
-        """When user sends test ping to agy channel, bot replies with 'agy'."""
+    async def test_on_message_natural_language_ping_forwarded_to_coder_agy(self):
+        """A natural-language identity ping must be forwarded to the coder, not auto-answered by an identity embed."""
         self.session.engine = "agy"
+        self.session.is_busy = False
         message = MagicMock()
         message.author.bot = False
         message.webhook_id = None
@@ -81,16 +82,20 @@ class TestAgentIdentity(unittest.IsolatedAsyncioTestCase):
         message.attachments = []
 
         with patch("bot.ensure_commander_bot_started"), \
-             patch("bot.ensure_consultant_bot_started"):
+             patch("bot.ensure_image_bot_started"), \
+             patch("bot.execute_channel_prompt", new=AsyncMock()) as mock_exec:
             await bot.on_message(message)
 
-        message.reply.assert_called_once()
-        reply_text = message.reply.call_args[0][0]
-        self.assertEqual(reply_text, "agy")
+        mock_exec.assert_awaited_once()
+        forwarded_message, forwarded_prompt = mock_exec.call_args[0]
+        self.assertIs(forwarded_message, message)
+        self.assertIn("정상적으로 구동하고 있는지 테스트", forwarded_prompt)
+        message.reply.assert_not_called()
 
-    async def test_on_message_natural_language_ping_hermes(self):
-        """When user sends test ping to hermes channel, bot replies with 'hermes'."""
+    async def test_on_message_natural_language_ping_forwarded_to_coder_hermes(self):
+        """A casual identity-ping message must reach the coder pipeline for the hermes engine too."""
         self.session.engine = "hermes"
+        self.session.is_busy = False
         message = MagicMock()
         message.author.bot = False
         message.webhook_id = None
@@ -98,17 +103,20 @@ class TestAgentIdentity(unittest.IsolatedAsyncioTestCase):
         message.channel.id = self.channel_id
         message.channel.category_id = None
         message.channel.category = None
-        message.content = '한번 agy agent로 동작하는 봇은"agy"라고, hermes agnet로 구동하는 봇은 "hermes"라고 답장해줄래?? 그래서 다들 정상적으로 구동하고 있는지 테스트 할거야.'
+        message.content = '너 hermes야? 정체성이 뭐야?'
         message.reply = AsyncMock()
         message.attachments = []
 
         with patch("bot.ensure_commander_bot_started"), \
-             patch("bot.ensure_consultant_bot_started"):
+             patch("bot.ensure_image_bot_started"), \
+             patch("bot.execute_channel_prompt", new=AsyncMock()) as mock_exec:
             await bot.on_message(message)
 
-        message.reply.assert_called_once()
-        reply_text = message.reply.call_args[0][0]
-        self.assertEqual(reply_text, "hermes")
+        mock_exec.assert_awaited_once()
+        forwarded_message, forwarded_prompt = mock_exec.call_args[0]
+        self.assertIs(forwarded_message, message)
+        self.assertIn("정체성이 뭐야", forwarded_prompt)
+        message.reply.assert_not_called()
 
     def test_hermes_adapter_llama4_scout_fallback(self):
         """HermesAdapter automatically falls back from nonexistent llama-4-scout (404) to llama-3.3-70b-instruct."""

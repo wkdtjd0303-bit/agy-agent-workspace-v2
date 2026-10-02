@@ -18,6 +18,7 @@ import json
 import time
 import asyncio
 import logging
+import config
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -491,6 +492,21 @@ class RoadmapManager:
         except Exception as e:
             logger.debug(f"[RoadmapManager] GapSignalScanner scan notice: {e}")
 
+        # 1.5. 📸 스크린샷 실측 제품 결손 (Commander Planner Visual Gap) — 실 렌더링 화면에
+        #      아직 없는 기능 공백을 코드 신호보다 먼저 로드맵 후보로 승격한다.
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            vg_review = PlannerVisualGapAnalyzer.load_review(self.workspace)
+            vg_tasks = PlannerVisualGapAnalyzer.build_gap_tasks(vg_review, limit=4) if vg_review else []
+            vg_top = PlannerVisualGapAnalyzer.select_top_gap(vg_review) if vg_review else None
+            if vg_top and vg_tasks:
+                vg_title = f"스크린샷 실측 결손 해소: {vg_top.get('feature')}"
+                if not any(vg_title in et for et in existing_titles) and not any(vg_title == dc[0] for dc in disk_candidates):
+                    disk_candidates.append((vg_title, vg_tasks))
+                    logger.info(f"[RoadmapManager] Auto-expand prioritized PlannerVisualGap: {vg_title}")
+        except Exception as e:
+            logger.debug(f"[RoadmapManager] PlannerVisualGap scan notice: {e}")
+
         # 2. 제품 완성도 심도 결손 (Interaction, State, A11y, Maintenance)
         try:
             from product_refinement_governor import ProductRefinementGovernor
@@ -504,7 +520,25 @@ class RoadmapManager:
         except Exception as e:
             logger.debug(f"[RoadmapManager] ProductRefinementGovernor scan notice: {e}")
 
-        # 3. 실측 신호나 목표가 전혀 없을 때만: 단 1개의 품질 안정화 템플릿만 fallback으로 제공 (가상 기능 사다리 패딩 엄격 금지)
+        # 3. 실측 신호나 목표가 전혀 없을 때: 품질 하드닝 템플릿을 찍어내기 전에
+        #    '아직 없는 사용자 체감 신규 기능'(제품 가치 기획)을 먼저 로드맵 후보로 승격한다.
+        if not disk_candidates:
+            try:
+                from product_value_planner import ProductValuePlanner
+                value_plans = ProductValuePlanner.select_roadmap_plans(
+                    domain=domain,
+                    workspace=self.workspace,
+                    existing_titles=existing_titles,
+                    limit=1,
+                )
+                for title, tasks in value_plans:
+                    if not any(title in et or et in title for et in existing_titles):
+                        disk_candidates.append((title, tasks))
+                        logger.info(f"[RoadmapManager] Auto-expand prioritized ProductValue: {title}")
+            except Exception as e:
+                logger.debug(f"[RoadmapManager] ProductValuePlanner scan notice: {e}")
+
+        # 3.1 실측 신호/사용자 가치 기능이 전혀 없을 때만: 단 1개의 품질 안정화 템플릿만 fallback으로 제공
         if not disk_candidates:
             available_templates = self._synthesize_codebase_aware_milestones(existing_titles)
             for tpl in available_templates:
@@ -1028,7 +1062,7 @@ class RoadmapManager:
             )
             if is_visual_target:
                 prompt += (
-                    f"\n🎨 **[사령관 <@1539448922643234876> 공식 시각 에셋 생성 승인]**:\n"
+                    f"\n🎨 **[사령관 {config.COMMANDER_USER_MENTION} 공식 시각 에셋 생성 승인]**:\n"
                     f"- 본 마일스톤의 UI/UX 완성도 및 브랜드 품질 극대화를 위해 `generate_image` 호출을 정식 승인합니다.\n"
                     f"- **Rule 8 에셋 2원화 분류 체계 필수 준수**:\n"
                     f"  ① **Type A (풀컷 씬/일러스트)**: Splash, Title Hero, Background (9:16 또는 16:9 전체 배경 포함 구도)\n"
@@ -1077,7 +1111,7 @@ class RoadmapManager:
             )
             if is_visual_target:
                 prompt += (
-                    f"\n🎨 **[사령관 <@1539448922643234876> 공식 시각 에셋 생성 승인]**:\n"
+                    f"\n🎨 **[사령관 {config.COMMANDER_USER_MENTION} 공식 시각 에셋 생성 승인]**:\n"
                     f"- 본 마일스톤의 UI/UX 완성도 및 브랜드 품질 극대화를 위해 `generate_image` 호출을 정식 승인합니다.\n"
                     f"- **Rule 8 에셋 2원화 분류 체계 필수 준수**:\n"
                     f"  ① **Type A (풀컷 씬/일러스트)**: Splash, Title Hero, Background (9:16 또는 16:9 전체 배경 포함 구도)\n"

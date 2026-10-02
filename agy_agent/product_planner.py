@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 👑 ProductPlanner & ProductCritic Module (AGY !mode 3 / !mode 3+ Autonomous Product Planning)
-Designated Bot: 1540273467453345812 (Commander Bot)
+Designated Bot: Commander Bot
 
 This module implements the Autonomous Product Planning and Multi-Dimensional Quality Critic
 architecture for !mode 3 (Evolve) and !mode 3+ (Quad Evolve+):
@@ -29,7 +29,8 @@ except ImportError:
 
 logger = logging.getLogger("ProductPlanner")
 
-COMMANDER_BOT_ID = 1540273467453345812
+COMMANDER_BOT_ID = config.COMMANDER_BOT_ID
+COMMANDER_USER_MENTION = config.COMMANDER_USER_MENTION
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -350,7 +351,7 @@ def normalize_product_title(prompt: str, domain: Optional[str] = None) -> str:
 
 class AutonomousProductPlanner:
     """
-    👑 Product Planner & Critic Engine (Commander Bot 1540273467453345812)
+    👑 Product Planner & Critic Engine (Commander Bot)
     Analyzes ambiguous requests, creates comprehensive multi-dimensional quality specifications,
     manages quality-ladder milestones, and rigorously critiques products against commercial standards.
     """
@@ -1045,7 +1046,7 @@ class AutonomousProductPlanner:
         vis_spec = ""
         if domain == "game":
             vis_spec = (
-                "🎨 [사령관 <@1539448922643234876> 시각 에셋 공식 승인 완료]\n"
+                f"🎨 [사령관 {COMMANDER_USER_MENTION} 시각 에셋 공식 승인 완료]\n"
                 "• 에셋 정책: Rule 8 분류 체계 준수 하에 generate_image 호출 및 캔버스 리소스 바인딩 전격 허가\n"
                 "• Type A (풀컷 씬/일러스트): 16:9 메인 타이틀 배경 및 스테이지 아트 (assets/)\n"
                 "• Type B (모듈러 독립 파츠): 1:1 플레이어/적/아이템 스프라이트 및 조이스틱 UI (assets/)\n"
@@ -1053,7 +1054,7 @@ class AutonomousProductPlanner:
             )
         elif domain == "mobile_app":
             vis_spec = (
-                "🎨 [사령관 <@1539448922643234876> 시각 에셋 공식 승인 완료]\n"
+                f"🎨 [사령관 {COMMANDER_USER_MENTION} 시각 에셋 공식 승인 완료]\n"
                 "• 에셋 정책: Rule 8 분류 체계 준수 하에 generate_image 호출 및 네이티브 리소스 바인딩 전격 허가\n"
                 "• Type A (풀컷 씬/일러스트): 9:16 모바일 스플래시(Splash) 화면 및 온보딩 랜딩 아트 (res/drawable/)\n"
                 "• Type B (모듈러 독립 파츠): 1:1 앱 런처 아이콘, 기능 배지, 커스텀 액션 버튼 (res/drawable/)\n"
@@ -1061,7 +1062,7 @@ class AutonomousProductPlanner:
             )
         elif domain == "saas_web":
             vis_spec = (
-                "🎨 [사령관 <@1539448922643234876> 시각 에셋 공식 승인 완료]\n"
+                f"🎨 [사령관 {COMMANDER_USER_MENTION} 시각 에셋 공식 승인 완료]\n"
                 "• 에셋 정책: Rule 8 분류 체계 준수 하에 generate_image 호출 및 웹 리소스 바인딩 전격 허가\n"
                 "• Type A (풀컷 씬/일러스트): 16:9 대시보드 히어로 배너 및 랜딩 배경 일러스트 (assets/images/)\n"
                 "• Type B (모듈러 독립 파츠): 1:1 브랜드 로고, 빈 화면(Empty State) 일러스트, 상태 배지 (assets/images/)\n"
@@ -1071,7 +1072,7 @@ class AutonomousProductPlanner:
             vis_spec = "시각 에셋 불필요 (CLI/헤드리스/백엔드 환경: 터미널 텍스트 UI 또는 REST 규격 준수)"
 
         full_directive = initial_directive
-        if vis_spec and "<@1539448922643234876>" in vis_spec:
+        if vis_spec and COMMANDER_USER_MENTION in vis_spec:
             full_directive = f"{initial_directive}\n\n{vis_spec}"
 
         return ProductPlan(
@@ -1125,7 +1126,7 @@ class AutonomousProductPlanner:
         if not vis_spec:
             if domain == "game":
                 vis_spec = (
-                    "🎨 [사령관 <@1539448922643234876> 시각 에셋 공식 승인 완료]\n"
+                    f"🎨 [사령관 {COMMANDER_USER_MENTION} 시각 에셋 공식 승인 완료]\n"
                     "• 에셋 정책: Rule 8 분류 체계 준수 하에 generate_image 호출 및 캔버스 리소스 바인딩 전격 허가\n"
                     "• Type A (풀컷 씬/일러스트): 16:9 메인 타이틀 배경 및 스테이지 아트 (assets/)\n"
                     "• Type B (모듈러 독립 파츠): 1:1 플레이어/적/아이템 스프라이트 및 조이스틱 UI (assets/)\n"
@@ -1133,7 +1134,7 @@ class AutonomousProductPlanner:
                 )
             elif domain == "mobile_app":
                 vis_spec = (
-                    "🎨 [사령관 <@1539448922643234876> 시각 에셋 공식 승인 완료]\n"
+                    f"🎨 [사령관 {COMMANDER_USER_MENTION} 시각 에셋 공식 승인 완료]\n"
                     "• 에셋 정책: Rule 8 분류 체계 준수 하에 generate_image 호출 및 네이티브 리소스 바인딩 전격 허가\n"
                     "• Type A (풀컷 씬/일러스트): 9:16 모바일 스플래시(Splash) 화면 및 온보딩 랜딩 아트 (res/drawable/)\n"
                     "• Type B (모듈러 독립 파츠): 1:1 앱 런처 아이콘, 기능 배지, 커스텀 액션 버튼 (res/drawable/)\n"
@@ -1141,7 +1142,7 @@ class AutonomousProductPlanner:
                 )
             elif domain == "saas_web":
                 vis_spec = (
-                    "🎨 [사령관 <@1539448922643234876> 시각 에셋 공식 승인 완료]\n"
+                    f"🎨 [사령관 {COMMANDER_USER_MENTION} 시각 에셋 공식 승인 완료]\n"
                     "• 에셋 정책: Rule 8 분류 체계 준수 하에 generate_image 호출 및 웹 리소스 바인딩 전격 허가\n"
                     "• Type A (풀컷 씬/일러스트): 16:9 대시보드 히어로 배너 및 랜딩 배경 일러스트 (assets/images/)\n"
                     "• Type B (모듈러 독립 파츠): 1:1 브랜드 로고, 빈 화면(Empty State) 일러스트, 상태 배지 (assets/images/)\n"
@@ -1151,7 +1152,7 @@ class AutonomousProductPlanner:
                 vis_spec = "시각 에셋 불필요 (CLI/헤드리스/백엔드 환경: 터미널 텍스트 UI 또는 REST 규격 준수)"
 
         full_directive = initial_directive or ""
-        if vis_spec and "<@1539448922643234876>" in vis_spec and "<@1539448922643234876>" not in full_directive:
+        if vis_spec and COMMANDER_USER_MENTION in vis_spec and COMMANDER_USER_MENTION not in full_directive:
             full_directive = f"{full_directive}\n\n{vis_spec}"
 
         return ProductPlan(
@@ -1180,7 +1181,7 @@ class AutonomousProductPlanner:
         lines = [
             f"# 📋 Product Requirements Document (PRD) — {display_name}",
             "",
-            "> 본 문서는 AGY 3.0 / Commander Bot (1540273467453345812) 수석 제품 기획관이",
+            f"> 본 문서는 AGY 3.0 / Commander Bot ({COMMANDER_BOT_ID}) 수석 제품 기획관이",
             "> 사용자의 원본 요청과 상용 벤치마크 기준을 융합하여 자동 수립한 공식 제품 기획 헌법입니다.",
             "",
             "## 1. 제품 개요 및 가치 제안 (Product Overview)",
@@ -1234,7 +1235,7 @@ class AutonomousProductPlanner:
         if p_def.domain in ("game", "mobile_app", "saas_web"):
             lines.extend([
                 "## 4. 시각 에셋 승인 규격 (Visual Asset Taxonomy)",
-                "> 사령관 <@1539448922643234876> 공식 승인 하에 생성형 비주얼 에셋(Rule 8) 파이프라인을 가동합니다.",
+                f"> 사령관 {COMMANDER_USER_MENTION} 공식 승인 하에 생성형 비주얼 에셋(Rule 8) 파이프라인을 가동합니다.",
                 "* **Type A (풀컷 씬/일러스트)**: 16:9 메인 타이틀 배경 및 대시보드 히어로 배너 (assets/)",
                 "* **Type B (모듈러 독립 파츠)**: 1:1 스프라이트, 런처 아이콘, 기능 배지 (assets/)",
                 "* **도구 정책**: `generate_image` 호출 허가 및 네이티브/웹 리소스 바인딩 규격 준수",
@@ -1261,7 +1262,7 @@ class AutonomousProductPlanner:
         rm_path = os.path.join(workspace, "ROADMAP.md")
         lines = [
             f"# 🗺️ Project Roadmap (AGY Autonomous Quality Ladder: {p_def.title})",
-            "> 이 파일은 AGY Commander Bot (1540273467453345812)이 제품 품질 진화 사다리를 관리합니다.",
+            f"> 이 파일은 AGY Commander Bot ({COMMANDER_BOT_ID})이 제품 품질 진화 사다리를 관리합니다.",
             "> 기능 구현뿐만 아니라 다차원 품질 게이트(Quality Gate)를 통과할 때마다 다음 사다리로 진화합니다.",
             ""
         ]
@@ -1295,7 +1296,7 @@ class AutonomousProductPlanner:
         mode: str = "evolve"
     ) -> ProductCriticEvaluation:
         """
-        👑 Product Critic Evaluation Engine (Commander Bot 1540273467453345812)
+        👑 Product Critic Evaluation Engine (Commander Bot)
         Strictly distinguishes 'Functional Completion' from 'Product Quality Completion'.
         Evaluates across multi-dimensional quality scores, enforces Critical Quality Gates,
         and answers the 8 Core Critic Questions.
@@ -1697,7 +1698,7 @@ class AutonomousProductPlanner:
         return True, "제품 가치 및 품질 갭에 직결된 합당한 개발 과제 승인"
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Discord Embed Builders (Commander Bot 1540273467453345812)
+    # Discord Embed Builders (Commander Bot)
     # ──────────────────────────────────────────────────────────────────────────
 
     @classmethod

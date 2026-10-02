@@ -15,7 +15,7 @@ PARENT_DIR = os.path.dirname(CURRENT_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
-from model_registry import AntigravityModelRegistry, DEPRECATED_MIGRATION_MAP
+from model_registry import AntigravityModelRegistry, DEPRECATED_MIGRATION_MAP, migrate_deprecated_model
 
 
 class TestAntigravityModelRegistry(unittest.TestCase):
@@ -61,6 +61,30 @@ class TestAntigravityModelRegistry(unittest.TestCase):
 
         resolved_pro = AntigravityModelRegistry.resolve_model("qa", "gemini-2.5-pro")
         self.assertEqual(resolved_pro, "gemini-3.1-pro-high")
+
+    def test_migrate_deprecated_model_covers_all_variants(self):
+        """Gemini 2.5 Flash 의 모든 표기 변형은 지원 3.x 모델로 승격되어야 한다."""
+        # flash 계열 → Gemini 3.8 Flash High
+        for variant in ("gemini-2.5-flash", "gemini 2.5 flash", "gemini-2.5-flash-exp",
+                        "gemini-2.5-flash-preview-04-17", "gemini 2.5"):
+            self.assertEqual(
+                migrate_deprecated_model(variant), "gemini-3.8-flash-high",
+                f"'{variant}' 는 gemini-3.8-flash-high 로 승격되어야 함"
+            )
+        # 구형 2.0 flash 는 기존 정책대로 경량 Gemini 3 Flash 로 승격
+        self.assertEqual(migrate_deprecated_model("gemini-2.0-flash"), "gemini-3-flash")
+        self.assertEqual(migrate_deprecated_model("gemini-1.5-flash"), "gemini-3-flash")
+        # lite 계열 → Gemini 3 Flash
+        self.assertEqual(migrate_deprecated_model("gemini-2.5-flash-lite"), "gemini-3-flash")
+        # pro 계열 → Gemini 3.1 Pro High
+        for variant in ("gemini-2.5-pro", "gemini-2.0-pro", "gemini-1.5-pro"):
+            self.assertEqual(migrate_deprecated_model(variant), "gemini-3.1-pro-high")
+        # 지원 중인 3.x 모델은 치환 대상이 아니다
+        self.assertIsNone(migrate_deprecated_model("gemini-3.8-flash-high"))
+        self.assertIsNone(migrate_deprecated_model("gemini-3-flash"))
+        # OpenRouter 전용 이미지 모델(Nano Banana)은 AGY CLI 채팅 모델이 아니므로 보존
+        self.assertIsNone(migrate_deprecated_model("google/gemini-2.5-flash-image"))
+        self.assertIsNone(migrate_deprecated_model("gemini-2.5-flash-image"))
 
     def test_resolve_role_defaults(self):
         """Tests that omitting preferred model resolves to Antigravity 3.x official models per role."""

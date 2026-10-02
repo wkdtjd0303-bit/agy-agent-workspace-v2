@@ -1,6 +1,11 @@
 import re
 from typing import Tuple, Optional
 
+try:
+    import mode_registry
+except Exception:  # pragma: no cover - 무중단 폴백 (레지스트리 부재 시에도 모듈 import 실패 금지)
+    mode_registry = None  # type: ignore
+
 # Keywords/patterns indicating single-agent mode (questions, inquiries, conceptual explanations, inspections)
 QUESTION_INDICATORS = [
     r"\?",
@@ -111,7 +116,10 @@ RESEARCH_INDICATORS = [
     r"조사\s*(해줘|진행|해|부탁|바람)?",
     r"비교\s*(해줘|진행|해|부탁|표|해봐|분석)?",
     r"분석\s*(해줘|진행|해|부탁|바람)?",
-    r"추천\s*(해줘|해|리스트|제품|모델|부탁|알려줘|좀|해줄|해줄래)",
+    # [FIX] '추천해주는 알고리즘적 오류'처럼 "추천"이 요청이 아니라 서술(불만)로 쓰인 경우를
+    #       리서치 의도로 오인해 코딩 요청이 ResearchRunner(Fact Checker)로 잘못 라우팅되던 버그 수정.
+    #       맨몸 '추천해' 대신 실제 요청형(추천해줘/추천 리스트/추천 모델 …)만 리서치로 판정한다.
+    r"추천\s*(?:해\s*줘|해\s*주세요|해\s*줄래|해\s*봐|해줘|해줄|해줄래|리스트|제품|모델|부탁|알려줘|좀)",
     r"시세\s*(확인|조회|알려줘|정리)",
     r"가격\s*(비교|조회|알려줘|정리|대|얼마)",
     r"스펙\s*(비교|정리|확인|알려줘)",
@@ -137,7 +145,10 @@ RESEARCH_INDICATORS = [
     r"뭐가\s*(좋을까|나을까|괜찮|맞을까)",
     r"견적\s*(짜줘|내줘|봐줘|알려줘|추천)",
     # Pricing, amounts, used markets, and shopping inquiries
-    r"(금액|가격|시세|비용|실구매가|최저가|중고가)\s*(이|가|은|는|도|대|얼마|비교|확인|조회|정리|차이|다른|다르|알려)?",
+    # [FIX] '합산 금액/결제 금액'처럼 명세서·결제·정산 문맥의 단독 명사가 리서치로 오분류되어
+    #       코딩 요청이 ResearchRunner(Fact Checker)로 잘못 라우팅되던 버그 수정.
+    #       시세 조회/비교를 뜻하는 실제 동사가 뒤따를 때만 리서치 의도로 판정한다.
+    r"(금액|가격|시세|비용|실구매가|최저가|중고가)\s*(?:이|가|은|는|도|만)?\s*(?:비교|조회|알려|정리|차이|다른|다르|얼마|확인)",
     r"금액\s*(비교|조회|알려줘|정리|대|얼마|확인|차이|다르|차이나)",
     r"(중고|당근|당근마켓|번개장터|중고나라|알리|알리익스프레스|다나와|네이버쇼핑|쿠팡)\s*(매물|시세|가격|비교|검색|조회|추천)?",
     r"가성비\s*(추천|비교|모델|제품|pc|기기)?",
@@ -468,41 +479,42 @@ def classify_mode(prompt: str, session_mode: Any = "auto") -> Tuple[str, str]:
         pass
 
     # 1. Manually pinned modes
-    if mode_normalized in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성") or first_token in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성"):
-        return "read", "수동 고정 모드 (🔍 3중 읽기/기획 전용 아키텍처 자문)"
-    elif (
-        mode_normalized in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+", "자율3+", "무인3+", "auto_multi", "multi_auto")
-        or mode_normalized.replace(" ", "") in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+", "auto_multi", "multi_auto")
-        or first_token in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+", "auto_multi", "multi_auto")
-    ):
-        return "mode3_plus", f"수동 고정 모드 (🤖 {multi_label} 에이전트 무인 자율 순환 · !mode 3+)"
-    elif (
-        mode_normalized in ("3", "mode3", "자율3", "무인3", "3자율", "3차자율", "auto_trio", "trio_auto")
-        or mode_normalized.replace(" ", "") in ("3", "mode3", "auto_trio", "trio_auto")
-        or first_token in ("3", "mode3", "auto_trio", "trio_auto")
-    ):
-        return "mode3", "수동 고정 모드 (🤖 3중 에이전트 무인 자율 순환 · !mode 3)"
-    elif (
-        mode_normalized in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스")
-        or mode_normalized.replace(" ", "") in ("pair+", "pair_plus", "pair_quad", "quad_pair", "2+", "2plus", "2플러스")
-        or first_token in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스")
-    ):
-        task_type = classify_task_type(prompt)
-        if task_type == "research":
-            return "pair_quad", f"수동 고정 모드 (👥 {multi_label} 에이전트 심층 리서치 협업 · !mode 2+)"
-        return "pair_quad", f"수동 고정 모드 (👥 {multi_label} 에이전트 사용자 주도 협업 · !mode 2+)"
-    elif mode_normalized in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo") or mode_normalized.replace(" ", "") in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo"):
-        return "single_qa2", "수동 고정 모드 (🥷 단일 qa2 에이전트 전용)"
-    elif mode_normalized in ("pair", "trio", "dual", "collab", "team", "3중", "페어", "협업", "2") or first_token in ("pair", "trio", "dual", "team", "collab", "3중", "페어", "협업", "2"):
-        task_type = classify_task_type(prompt)
-        if task_type == "research":
-            return "pair", "수동 고정 모드 (👥 3중 에이전트 심층 리서치 협업)"
-        return "pair", "수동 고정 모드 (👥 3중 에이전트 사용자 주도 협업 · !mode 2)"
-    elif mode_normalized in ("single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트") or mode_normalized.replace(" ", "") in ("single+", "1+", "single_plus"):
-        consultant_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-        return "single_plus", f"수동 고정 모드 (👤 단일 컨설턴트 에이전트 · {consultant_model})"
-    elif mode_normalized in ("single", "solo", "단일", "싱글", "1"):
-        return "single", "수동 고정 모드 (👤 단일 에이전트)"
+    #    🎛️ SSOT: 별칭 해석은 mode_registry.normalize_mode() 가 유일한 기준이다.
+    #    (기존에는 본 함수가 자체 튜플을 하드코딩해 registry 와 어긋날 수 있었고,
+    #     `!mode 2+` 가 `!mode 2` 로 오인되는 드리프트의 원인이었다.)
+    canonical = (
+        mode_registry.normalize_mode(mode_normalized)
+        if mode_registry is not None
+        else mode_normalized
+    )
+    known = (
+        mode_registry.is_known_mode(mode_normalized)
+        if mode_registry is not None
+        else mode_normalized in (
+            "read", "pair", "single", "pair_quad", "mode3", "mode3_plus", "single_qa2",
+        )
+    )
+    if known and canonical != "auto":
+        if canonical == "read":
+            return "read", "수동 고정 모드 (🔍 3중 읽기/기획 전용 아키텍처 자문)"
+        if canonical == "mode3_plus":
+            return "mode3_plus", f"수동 고정 모드 (🤖 {multi_label} 에이전트 무인 자율 순환 · !mode 3+)"
+        if canonical == "mode3":
+            return "mode3", "수동 고정 모드 (🤖 3중 에이전트 무인 자율 순환 · !mode 3)"
+        if canonical == "pair_quad":
+            task_type = classify_task_type(prompt)
+            if task_type == "research":
+                return "pair_quad", f"수동 고정 모드 (👥 {multi_label} 에이전트 심층 리서치 협업 · !mode 2+)"
+            return "pair_quad", f"수동 고정 모드 (👥 {multi_label} 에이전트 사용자 주도 협업 · !mode 2+)"
+        if canonical == "single_qa2":
+            return "single_qa2", "수동 고정 모드 (🥷 단일 qa2 에이전트 전용)"
+        if canonical == "pair":
+            task_type = classify_task_type(prompt)
+            if task_type == "research":
+                return "pair", "수동 고정 모드 (👥 3중 에이전트 심층 리서치 협업)"
+            return "pair", "수동 고정 모드 (👥 3중 에이전트 사용자 주도 협업 · !mode 2)"
+        if canonical == "single":
+            return "single", "수동 고정 모드 (👤 단일 에이전트)"
 
     # 2. Auto mode intelligent heuristic classification
     clean_prompt = str(prompt or "").strip()
@@ -621,49 +633,37 @@ def get_mode_description(
     except Exception:
         pass
 
-    if mode_normalized in ("auto", "automatic", "smart", "ai", "자율", "자동", "오토") or first_token in ("auto", "automatic", "smart", "ai", "자율", "자동", "오토"):
-        return "🤖 **스마트 자동 모드 (Auto)** (질문/경량은 Single, 개발/수정/테스트/심층리서치는 👥 3중 협업 자동 분류)"
-    elif mode_normalized in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성") or first_token in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성"):
-        return "🔍 **3중 읽기/기획 전용 모드 (Read)** (코드 수정 없이 3대 두뇌가 코드베이스를 탐색하여 최적 아키텍처 및 방향성 모색)"
-    elif (
-        mode_normalized in ("mode3_plus", "3+", "3plus", "3플러스", "mode3+", "auto_multi", "multi_auto")
-        or mode_compact in ("mode3_plus", "3+", "3plus", "3플러스", "mode3+", "auto_multi", "multi_auto")
-        or first_token in ("mode3_plus", "3+", "3plus", "3플러스", "mode3+", "auto_multi", "multi_auto")
-    ):
-        chain_desc = f"Coder ➔ qa1 ➔ {ext_qa_desc} ➔ Auditor ➔ Commander" if ext_qa_desc != "기본 qa1" else "Coder ➔ qa1 ➔ Auditor ➔ Commander"
-        return f"🤖 **무인 자율 순환 다중 에이전트 협업 모드 (Autonomous Multi-QA · !mode 3+)** (폐루프 무인 자율 순환: User ➔ Commander ➔ {chain_desc} ➔ Commander 차기 마일스톤 자동 순환)"
-    elif (
-        mode_normalized in ("mode3", "3", "자율3", "무인3", "3자율", "3차자율", "auto_trio", "trio_auto")
-        or mode_compact in ("mode3", "3", "auto_trio", "trio_auto")
-        or first_token in ("mode3", "3", "auto_trio", "trio_auto")
-    ):
-        return "🤖 **무인 자율 순환 3중 에이전트 협업 모드 (Autonomous Trio · !mode 3)** (폐루프 무인 자율 순환: User ➔ Commander ➔ Coder ↔ QA ↔ Auditor ➔ Commander 차기 마일스톤 자동 순환)"
-    elif (
-        mode_normalized in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스")
-        or mode_compact in ("pair+", "pair_plus", "pair_quad", "quad_pair", "2+", "2plus", "2플러스")
-        or first_token in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스")
-    ):
-        chain_desc = f"Coder ➔ qa1 ➔ {ext_qa_desc} ➔ Auditor" if ext_qa_desc != "기본 qa1" else "Coder ➔ qa1 ➔ Auditor"
-        return f"👥 **사용자 주도 {multi_label} 에이전트 협업 모드 (Pair+ · !mode 2+)** ({chain_desc} 단일 과제 완결 후 사용자 대기)"
-    elif (
-        mode_normalized in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo")
-        or mode_compact in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo")
-        or first_token in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo")
-    ):
-        return "🥷 **단일 qa2 에이전트 모드 (qa2 Solo)** (1545711652987600937 전용 모드로 동작합니다)"
-    elif mode_normalized in ("pair", "trio", "dual", "collab", "team", "3중", "페어", "협업", "2") or first_token in ("pair", "trio", "dual", "team", "collab", "3중", "페어", "협업", "2"):
-        return "👥 **사용자 주도 3중 에이전트 협업 모드 (Pair · !mode 2)** (개발: Coder ↔ QA ↔ Auditor / 단일 과제 완결 후 사용자 대기)"
-    elif (
-        mode_normalized in ("single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트")
-        or mode_compact in ("single+", "1+", "single_plus")
-        or first_token in ("single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트")
-    ):
-        consultant_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-        return f'👤 단일 에이전트 모드 (Single · !mode 1+ ) (주의 필요 : 컨설턴트 모드로 동작합니다. 동작 모델 "{consultant_model}")'
-    elif mode_normalized in ("single", "solo", "단일", "싱글", "1") or first_token in ("single", "solo", "단일", "싱글", "1"):
-        return "👤 **단일 에이전트 모드 (Single · !mode 1)** (초고속 단일 에이전트 답변)"
-    else:
-        return f"⚙️ **{mode} 모드**"
+    # 🎛️ SSOT: 표시 문자열도 mode_registry 해석을 단일 기준으로 사용한다.
+    canonical = (
+        mode_registry.normalize_mode(mode_normalized)
+        if mode_registry is not None
+        else mode_normalized
+    )
+    known = (
+        mode_registry.is_known_mode(mode_normalized)
+        if mode_registry is not None
+        else False
+    )
+    if known:
+        if canonical == "auto":
+            return "🤖 **스마트 자동 모드 (Auto)** (질문/경량은 Single, 개발/수정/테스트/심층리서치는 👥 3중 협업 자동 분류)"
+        if canonical == "read":
+            return "🔍 **3중 읽기/기획 전용 모드 (Read)** (코드 수정 없이 3대 두뇌가 코드베이스를 탐색하여 최적 아키텍처 및 방향성 모색)"
+        if canonical == "mode3_plus":
+            chain_desc = f"Coder ➔ qa1 ➔ {ext_qa_desc} ➔ Auditor ➔ Commander" if ext_qa_desc != "기본 qa1" else "Coder ➔ qa1 ➔ Auditor ➔ Commander"
+            return f"🤖 **무인 자율 순환 다중 에이전트 협업 모드 (Autonomous Multi-QA · !mode 3+)** (폐루프 무인 자율 순환: User ➔ Commander ➔ {chain_desc} ➔ Commander 차기 마일스톤 자동 순환)"
+        if canonical == "mode3":
+            return "🤖 **무인 자율 순환 3중 에이전트 협업 모드 (Autonomous Trio · !mode 3)** (폐루프 무인 자율 순환: User ➔ Commander ➔ Coder ↔ QA ↔ Auditor ➔ Commander 차기 마일스톤 자동 순환)"
+        if canonical == "pair_quad":
+            chain_desc = f"Coder ➔ qa1 ➔ {ext_qa_desc} ➔ Auditor" if ext_qa_desc != "기본 qa1" else "Coder ➔ qa1 ➔ Auditor"
+            return f"👥 **사용자 주도 {multi_label} 에이전트 협업 모드 (Pair+ · !mode 2+)** ({chain_desc} 단일 과제 완결 후 사용자 대기)"
+        if canonical == "single_qa2":
+            return "🥷 **단일 qa2 에이전트 모드 (qa2 Solo)** (1545711652987600937 전용 모드로 동작합니다)"
+        if canonical == "pair":
+            return "👥 **사용자 주도 3중 에이전트 협업 모드 (Pair · !mode 2)** (개발: Coder ↔ QA ↔ Auditor / 단일 과제 완결 후 사용자 대기)"
+        if canonical == "single":
+            return "👤 **단일 에이전트 모드 (Single · !mode 1)** (초고속 단일 에이전트 답변)"
+    return f"⚙️ **{mode} 모드**"
 
 
 

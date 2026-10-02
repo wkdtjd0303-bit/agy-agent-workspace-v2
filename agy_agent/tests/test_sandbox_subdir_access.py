@@ -95,6 +95,27 @@ class TestSandboxSubdirAccess(unittest.TestCase):
         self.assertIn("parent=BLOCKED", out, msg=result.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.base, "escaped")))
 
+    def test_broken_symlink_ignored_and_bwrap_succeeds(self):
+        """깨진 심볼릭 링크(Dangling symlink)가 있어도 bwrap 바인딩 오류가 발생하지 않는지 검증합니다."""
+        broken_link = os.path.join(self.ws, "broken_socket")
+        os.symlink("/tmp/nonexistent_socket_dir_12345/socket", broken_link)
+        try:
+            roots = OpenCodeAdapter._collect_linked_allowed_roots(self.ws)
+            self.assertNotIn("/tmp/nonexistent_socket_dir_12345/socket", roots)
+
+            if shutil.which("bwrap"):
+                oc = OpenCodeAdapter()
+                cmd = oc._wrap_sandbox(["echo", "OK"], self.ws)
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, cwd=self.ws,
+                    env=oc._build_env(self.ws), timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+                self.assertIn("OK", result.stdout)
+        finally:
+            if os.path.islink(broken_link):
+                os.unlink(broken_link)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -311,5 +311,153 @@ export const Clean = () => (
         self.assertNotIn("00_diff_card.png", names, "합성 diff 카드는 실 프레임이 아니므로 제외")
 
 
+    # ---------- 9. 자동 캡처 파이프라인 무결성 (라운드 8 DOA 회귀 방지) ----------
+    def test_module_references_no_undefined_global_name(self):
+        """`visual_craft_loop.py` 가 로드 시점에 참조하는 전역 이름은 전부 정의되어야 한다.
+
+        라운드 8은 모바일 자동 캡처 분기를 추가하면서 `import shutil`/`import subprocess`
+        를 빠뜨렸다. 첫 문장 `shutil.which("adb")` 가 NameError 로 죽었지만 광범위한
+        `except Exception` 이 조용히 삼켜, "이제 자동으로 캡처된다"는 기능 전체가
+        무동작이었다 — 실패한 코드가 실패했다고 말하지 않는 형태. 이름이 검증이 아니라
+        주장이 되지 않도록, 해석되지 않는 전역 이름이 하나라도 있으면 실패시킨다.
+        """
+        import ast
+        import builtins
+        import visual_craft_loop as v
+
+        with open(v.__file__, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+
+        # 모듈 전역 + 빌트인 + 파이썬이 주입하는 표준 이름
+        defined = set(vars(v).keys()) | set(dir(builtins))
+        defined |= {"__file__", "__name__", "__doc__", "__package__", "__builtins__", "__spec__", "__loader__"}
+
+        # 어떤 스코프에서든 Store/바인딩되는 이름은 미정의 참조로 보지 않는다
+        # (지역 변수·파라미터·comprehension 대상·import 별칭·except 별칭 등)
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    bound.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+
+        undefined = sorted(
+            {
+                n.id
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+            }
+            - defined
+            - bound
+        )
+        self.assertEqual(
+            [], undefined,
+            "visual_craft_loop.py 가 해석 불가능한 전역 이름을 참조한다(런타임 DOA): "
+            f"{undefined}",
+        )
+
+    def test_android_auto_capture_branch_produces_a_frame_without_a_real_device(self):
+        """기기가 연결돼 있으면 `run_round` 가 모바일 자동 캡처 분기를 실제로 수행한다.
+
+        실제 adb/에뮬레이터 없이 분기만 검증한다: adb 탐지와 subprocess 를 스텁으로
+        대체하고, 캡처 산출물(>=500B PNG)이 `shots` 로 채택되어 engine 에
+        `android_framebuffer_capture` 가 기록되는지 확인한다. 코드 존재가 아니라
+        동작을 검증하므로, import 누락/조기 예외로 무동작이 되면 실패한다.
+        """
+        from unittest import mock
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow 미설치")
+
+        import io
+        import visual_craft_loop as v
+
+        png_buf = io.BytesIO()
+        Image.new("RGB", (360, 720), (240, 240, 245)).save(png_buf, format="PNG")
+        png_bytes = png_buf.getvalue()
+
+        def fake_run(cmd, *args, **kwargs):
+            result = mock.Mock()
+            result.returncode = 0
+            result.stdout = "List of devices attached\nemulator-5554\tdevice\n"
+            result.stderr = ""
+            if isinstance(cmd, (list, tuple)) and "exec-out" in cmd:
+                stdout = kwargs.get("stdout")
+                if hasattr(stdout, "write"):
+                    stdout.write(png_bytes)
+            return result
+
+        with mock.patch.object(v.shutil, "which", return_value="/fake/adb"), \
+             mock.patch.object(v.subprocess, "run", side_effect=fake_run):
+            report = asyncio.run(v.VisualCraftLoop.run_round(
+                workspace=self.ws, domain="mobile_app", round_index=1,
+                persist=False, use_vision=False,
+            ))
+
+        self.assertIn(
+            "android_framebuffer_capture", report.engine,
+            "기기가 있음에도 모바일 자동 캡처 분기가 수행되지 않았다(조용한 DOA)",
+        )
+        self.assertTrue(report.screenshots, "자동 캡처가 프레임을 산출하지 못했다")
+
+    def test_android_auto_capture_triggers_autonomous_cold_boot_when_no_devices(self):
+        """연결된 기기가 0대일 때 AndroidEmulatorManager를 호출해 에뮬레이터를 자율 콜드 부팅한다."""
+        from unittest import mock
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow 미설치")
+
+        import io
+        import visual_craft_loop as v
+
+        png_buf = io.BytesIO()
+        Image.new("RGB", (360, 720), (240, 240, 245)).save(png_buf, format="PNG")
+        png_bytes = png_buf.getvalue()
+
+        call_count = {"devices": 0}
+
+        def fake_run(cmd, *args, **kwargs):
+            result = mock.Mock()
+            result.returncode = 0
+            if isinstance(cmd, (list, tuple)) and "devices" in cmd:
+                call_count["devices"] += 1
+                if call_count["devices"] == 1:
+                    result.stdout = "List of devices attached\n\n"
+                else:
+                    result.stdout = "List of devices attached\nemulator-5554\tdevice\n"
+            else:
+                result.stdout = ""
+            result.stderr = ""
+            if isinstance(cmd, (list, tuple)) and "exec-out" in cmd:
+                stdout = kwargs.get("stdout")
+                if hasattr(stdout, "write"):
+                    stdout.write(png_bytes)
+            return result
+
+        mock_mgr = mock.MagicMock()
+        mock_mgr.launch_autonomous_emulator.return_value = True
+
+        with mock.patch.object(v.shutil, "which", return_value="/fake/adb"), \
+             mock.patch.object(v.subprocess, "run", side_effect=fake_run), \
+             mock.patch("android_emulator_manager.AndroidEmulatorManager", return_value=mock_mgr):
+            report = asyncio.run(v.VisualCraftLoop.run_round(
+                workspace=self.ws, domain="mobile_app", round_index=1,
+                persist=False, use_vision=False,
+            ))
+
+        self.assertIn("autonomous_emulator_boot", report.engine, "기기 부재 시 자율 에뮬레이터 콜드 부팅이 트리거되어야 함")
+        self.assertIn("android_framebuffer_capture", report.engine)
+        self.assertTrue(report.screenshots)
+
+
 if __name__ == "__main__":
     unittest.main()

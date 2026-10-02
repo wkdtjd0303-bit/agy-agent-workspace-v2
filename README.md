@@ -39,7 +39,7 @@ flowchart TD
 
 ---
 
-## 🌟 핵심 기능 7선 (쉬운 설명 & 상세 기능)
+## 🌟 핵심 기능 8선 (쉬운 설명 & 상세 기능)
 
 ### 1. 👥 4대 AI 두뇌 협업 시스템 (The Trio + Commander)
 혼자서 코딩하면 누구나 실수나 착각(환각)을 할 수 있습니다. AGY Agent는 실제 개발 회사의 분업 체계처럼 **4개의 전문 AI가 한 팀**이 되어 서로를 교차 검증합니다:
@@ -70,7 +70,7 @@ AGY Agent는 "코드 다 짰습니다"라는 AI의 말만 믿지 않습니다. �
 | **Gate 2** | 설계 & UX 표준 | 아키텍처 다이어그램, 반응형 토큰, 48dp 모바일 터치 타겟 준수 |
 | **Gate 3** | 무결점 조립 구현 | Core ➔ Data ➔ UI ➔ OS Integration 단계적 조립 완료 |
 | **Gate 4** | 기능 E2E 물리 검증 | Pytest, Vitest, Playwright, Android MCP 실제 실행 결과 (`reports/gate4/e2e_test.json`) |
-| **Gate 5** | 시각적 Visual QA | 실제 디스플레이 프레임버퍼 캡처 스크린샷 6종 이상 및 레이아웃 검증 (`reports/gate5/visual_qa.json`) |
+| **Gate 5** | 시각적 Visual QA | 실제 디스플레이 프레임버퍼 캡처 스크린샷 6종 이상 및 레이아웃 검증 (`reports/gate5/visual_qa.json`) + 무인 자율 모드 시각 완성도 계약 (`reports/gate5/visual_craft_review.json`, verdict=PASS) |
 | **Gate 6** | 실기기 & 회귀 방지 | 기존 기능 손상 여부 자동 재검증 (**Regression Lock**) |
 | **Gate 7** | 릴리즈 승인 | 바이너리 SHA256 해시 검증, Critical 결함 0건, Major 결함 0건 보장 |
 
@@ -119,7 +119,16 @@ AGY Agent는 "코드 다 짰습니다"라는 AI의 말만 믿지 않습니다. �
 
 ---
 
-### 7. 📊 Surface Pro 7 실시간 텔레메트리 관제탑 (Control Tower)
+### 7. 🎨 무인 자율 시각 완성도 폐루프 (Visual Craft Loop · `!mode 3/3+` 전용)
+> **"기능은 되는데 왜 스토어 앱처럼 안 보이는가?" — 아무도 렌더링된 화면을 보지 않았기 때문입니다.**
+
+사용자 없이 봇끼리 개발하는 `!mode 3/3+`에서만 작동하며, `!mode 1/2`(사용자 주도)는 건드리지 않습니다:
+
+* **4단계 실측 감사**: 디자인 토큰 계약(4/8pt 그리드·타이포 3단계·Primary+Neutral) → 소스 정적 감사(마케팅 히어로/터치 타깃/카드 중첩) → Android UI 계층 기하 감사(실 dp·썸존) → 실 스크린샷 멀티모달 Vision 비평(`[VISUAL_VERDICT]/[VISUAL_DEFECTS]` 구조화 판정).
+* **기계적 강제**: QA가 기능만 보고 승인해도 MAJOR 이상 시각 결함이 남아 있으면 Coder에게 구조 재작업을 강제 지시하고, `reports/gate5/visual_craft_review.json`(verdict=PASS)이 Gate 5 통과 조건이 됩니다. (동일 결함 반복 시 무한 핑퐁 방지 후 에스컬레이션)
+* 상세 설계: [`docs/VISUAL_CRAFT_LOOP.md`](docs/VISUAL_CRAFT_LOOP.md)
+
+### 8. 📊 Surface Pro 7 실시간 텔레메트리 관제탑 (Control Tower)
 로컬 하드웨어 장비와 전체 디스코드 채널의 AI 세션을 24시간 실시간으로 감시합니다:
 
 * **하드웨어 텔레메트리 (1분 주기 실시간 갱신)**:
@@ -184,6 +193,7 @@ AGY Agent의 코드베이스에는 엄격한 개발 헌법(`PROJECT_CONSTITUTION
 | `!export` / `!대화백업` | 📜 채널 대화 기록을 Markdown(.md) 파일로 즉시 다운로드 |
 | `!zip` | 📦 현재 채널 작업 디렉토리 전체 압축 다운로드 |
 | `!status` / `!uptime` | 🖥️ 시스템 Uptime, PID, Surface Pro 7 하드웨어 리소스 확인 |
+| `!stall` | 🛡️ 채널 정지(교착) 감시 현황 · 무응답 경보/심층관찰/강제회수 임계값 · 최근 교착 이력 (StallGuard) |
 | `!help` | 🤖 카테고리별 원터치 버튼 & 드롭다운 대화형 종합 안내판 열기 |
 
 ---
@@ -197,6 +207,7 @@ agy_agent/
 ├── trio_agent_runner.py          # 👥 3-Agent 파이프라인 (Coder ↔ QA ↔ Auditor)
 ├── mode_classifier.py            # 🧠 딥러닝/LLM 기반 질문/개발 모드 자동 분류기
 ├── evidence_validator.py         # 🏛️ Gate 0~7 물리적 검증기 & 안티 모킹/트레이싱 감사
+├── visual_craft_loop.py          # 🎨 !mode 3/3+ 시각 완성도 폐루프 (디자인 계약·정적/기하 감사·Vision 비평)
 ├── auto_pilot.py                 # 🔄 자율 E2E 피드백 & 연속 진화 엔진
 ├── android_emulator_manager.py   # 📱 안드로이드 에뮬레이터 생명주기 관리자
 ├── android_mcp_server.py         # 🔌 Android Model Context Protocol (MCP) 서버

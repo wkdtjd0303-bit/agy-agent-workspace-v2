@@ -43,3 +43,7 @@ tmp/
 # --- 도구 캐시 ---
 .aider*
 .cache/
+
+# Removed backups
+.figma_removed_*/
+

@@ -1,5 +1,5 @@
 {
-  "timestamp": 1790242213,
+  "timestamp": 1790866169,
   "test_suite": "PRD Feature & E2E Requirements Traceability Matrix",
   "total_tests": 7,
   "passed_tests": 7,
@@ -87,10 +87,10 @@
   ],
   "next_target": {
     "type": "OPTIMIZATION",
-    "target_id": "OPT-01",
-    "title": "다크 모드 색상 대비 및 WCAG 4.5:1 가독성 최적화",
-    "description": "다크 모드와 라이트 모드 간 텍스트와 배경 간 WCAG 4.5:1 이상 대비율을 확보하고 디자인 토큰을 정교화합니다.",
-    "coder_action_plan": "테마 전환 시 텍스트 딤(Dim) 현상과 배경색 번짐을 방지하고 시인성을 극대화하십시오.",
+    "target_id": "OPT-03",
+    "title": "비정상 네트워크 및 ANR 크래시 방어 예외 처리 강화",
+    "description": "네트워크 지연, 타임아웃, 예기치 못한 입력을 처리할 수 있도록 내구성 방어 로직과 로딩 피드백을 고도화합니다.",
+    "coder_action_plan": "5초 이상 지연 시 작업 취소 및 안전 롤백 메커니즘을 테스트하고 방어하십시오.",
     "qa_acceptance_criteria": "극단적 입력값(Boundary conditions)과 비정상 환경에서의 복원력을 검증하십시오."
   }
 }

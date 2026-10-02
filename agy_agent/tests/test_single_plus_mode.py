@@ -1,23 +1,20 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch, AsyncMock
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if WORKSPACE_ROOT not in sys.path:
     sys.path.insert(0, WORKSPACE_ROOT)
 
 import config
-from session_manager import ChannelSession, SessionManager
+from session_manager import ChannelSession
 from mode_classifier import classify_mode, get_mode_description
-from commander import Commander
-from engine_manager import EngineManager, OpenRouterAdapter
 
 
-class TestSinglePlusMode(unittest.TestCase):
+class TestLegacySinglePlusMode(unittest.TestCase):
     """
-    Unit tests for !mode 1+ / !mode single+ (Consultant Mode with GPT Astra).
-    Strictly uses mocked/static tests with NO real network calls to avoid API charges.
+    레거시 컨설턴트 모드(!mode 1+ / single+ / consultant)는 기능 제거되어
+    단일 에이전트 모드(single)로 통합되었습니다. 본 테스트는 무중단 호환을 검증합니다.
     """
 
     def setUp(self):
@@ -28,131 +25,42 @@ class TestSinglePlusMode(unittest.TestCase):
         from trio_agent_runner import QuotaManager
         QuotaManager.reset_exhaustion()
 
-    def test_session_set_mode_single_plus(self):
+    def test_session_set_mode_legacy_alias_maps_to_single(self):
         sess = ChannelSession(channel_id=123456789, workspace="/tmp/test_ws")
         test_inputs = [
-            "1+",
-            "1 +",
-            "!mode 1+",
-            "single+",
-            "single +",
-            "single_plus",
-            "1plus",
-            "1플러스",
-            "consultant",
-            "컨설턴트"
+            "1+", "1 +", "!mode 1+", "single+", "single +",
+            "single_plus", "1plus", "1플러스", "consultant", "컨설턴트",
         ]
         for mode_input in test_inputs:
-            # Strip command prefix if simulated
             clean_mode = mode_input.replace("!mode", "").strip()
             sess.set_mode(clean_mode)
-            self.assertEqual(sess.mode, "single_plus", f"Failed for mode input: {mode_input}")
+            self.assertEqual(sess.mode, "single", f"Failed for legacy mode input: {mode_input}")
 
-    def test_get_mode_description_single_plus(self):
-        c_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-        expected_substr = f'👤 단일 에이전트 모드 (Single · !mode 1+ ) (주의 필요 : 컨설턴트 모드로 동작합니다. 동작 모델 "{c_model}")'
-
+    def test_get_mode_description_single(self):
+        expected_substr = "👤 **단일 에이전트 모드 (Single · !mode 1)** (초고속 단일 에이전트 답변)"
         for mode_str in ["single_plus", "single+", "1+", "1 +", "single +", "consultant"]:
             desc = get_mode_description(mode_str)
             self.assertEqual(desc, expected_substr, f"Mismatch for mode: {mode_str}")
 
-    def test_classify_mode_single_plus(self):
-        c_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
+    def test_classify_mode_legacy_alias(self):
         for session_mode in ["single_plus", "single+", "1+", "consultant"]:
             mode, desc = classify_mode("아키텍처 확장성에 대해 자문해줘", session_mode=session_mode)
-            self.assertEqual(mode, "single_plus")
-            self.assertIn("단일 컨설턴트 에이전트", desc)
-            self.assertIn(c_model, desc)
+            self.assertEqual(mode, "single")
+            self.assertIn("단일 에이전트", desc)
 
-    def test_resolve_model_alias_astra(self):
-        self.assertEqual(EngineManager.resolve_model_alias("astra"), "openrouter/openai/gpt-6-astra")
-        self.assertEqual(EngineManager.resolve_model_alias("gpt-6-astra"), "openrouter/openai/gpt-6-astra")
-        self.assertEqual(EngineManager.resolve_model_alias("openai/gpt-6-astra"), "openrouter/openai/gpt-6-astra")
+    def test_consultant_role_removed_and_image_role_present(self):
+        from model_manager import DEFAULT_ROLES
+        self.assertNotIn("consultant", DEFAULT_ROLES)
+        self.assertIn("image", DEFAULT_ROLES)
+        image_role = DEFAULT_ROLES["image"]
+        self.assertEqual(image_role["engine"], "agy")
+        self.assertEqual(image_role["model"], "gemini-3.8-flash-high")
 
-    @patch.object(OpenRouterAdapter, "execute_direct_api", new_callable=AsyncMock)
-    def test_openrouter_adapter_consultant_execution(self, mock_direct_api):
-        mock_direct_api.return_value = (0, "컨설턴트 분석 결과입니다.", [])
-        adapter = OpenRouterAdapter()
-        sess = ChannelSession(channel_id=123456789, workspace="/tmp/test_ws")
-        sess.mode = "single_plus"
-        sess.role = "consultant"
-
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            with patch.object(adapter, "_get_clean_key", return_value="sk-or-dummy-key-test"), \
-                 patch.object(adapter, "get_binary_path", return_value=None):
-                code, resp, errors = loop.run_until_complete(
-                    adapter.execute(
-                        session=sess,
-                        prompt="시스템 확장성 자문 요청",
-                        model="openai/gpt-6-astra"
-                    )
-                )
-            self.assertEqual(code, 0)
-            self.assertEqual(resp, "컨설턴트 분석 결과입니다.")
-            self.assertEqual(errors, [])
-            mock_direct_api.assert_called_once()
-        finally:
-            loop.close()
-
-    @patch.object(OpenRouterAdapter, "get_binary_path", return_value="/home/jangsung/.local/bin/hermes")
-    def test_openrouter_adapter_consultant_cli_execution(self, mock_get_bin):
-        """When Hermes CLI is present, consultant mode executes via CLI enabling file inspection and modification."""
-        from engine_manager import BaseEngineAdapter
-        adapter = OpenRouterAdapter()
-        sess = ChannelSession(channel_id=123456789, workspace="/tmp/test_ws")
-        sess.mode = "single_plus"
-        sess.role = "consultant"
-
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            with patch.object(adapter, "_get_clean_key", return_value="sk-or-dummy-key-test"), \
-                 patch.object(adapter.__class__.__bases__[0], "execute", new_callable=AsyncMock) as mock_super_exec:
-                mock_super_exec.return_value = (0, "Hermes file inspection & edit completed", [])
-                code, resp, errors = loop.run_until_complete(
-                    adapter.execute(
-                        session=sess,
-                        prompt="hello.py 함수 내용 수정해줘",
-                        model="openai/gpt-6-astra"
-                    )
-                )
-            self.assertEqual(code, 0)
-            self.assertEqual(resp, "Hermes file inspection & edit completed")
-            mock_super_exec.assert_called_once()
-        finally:
-            loop.close()
-
-    @patch.object(OpenRouterAdapter, "execute_direct_api", new_callable=AsyncMock)
-    def test_openrouter_adapter_consultant_error_no_backup_leak(self, mock_direct_api):
-        mock_direct_api.return_value = (1, "", ["Quota exceeded"])
-        adapter = OpenRouterAdapter()
-        sess = ChannelSession(channel_id=123456789, workspace="/tmp/test_ws")
-        sess.mode = "single_plus"
-        sess.role = "consultant"
-
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            with patch.object(adapter, "_get_clean_key", return_value="sk-or-dummy-key-test"), \
-                 patch.object(adapter, "get_binary_path", return_value=None):
-                code, resp, errors = loop.run_until_complete(
-                    adapter.execute(
-                        session=sess,
-                        prompt="시스템 확장성 자문 요청",
-                        model="openai/gpt-6-astra"
-                    )
-                )
-            self.assertEqual(code, 1)
-            self.assertIn("OpenRouter Consultant direct API call failed", errors[0])
-            # Ensure it only called once and did not call backup model
-            self.assertEqual(mock_direct_api.call_count, 1)
-        finally:
-            loop.close()
+    def test_config_has_no_consultant_fields(self):
+        self.assertFalse(hasattr(config, "CONSULTANT_MODEL"))
+        self.assertFalse(hasattr(config, "CONSULTANT_ENGINE"))
+        self.assertTrue(hasattr(config, "IMAGE_MODEL"))
+        self.assertEqual(getattr(config, "IMAGE_ENGINE", ""), "agy")
 
 
 if __name__ == "__main__":

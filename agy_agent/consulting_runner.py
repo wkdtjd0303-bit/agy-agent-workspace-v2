@@ -11,12 +11,14 @@ from config import (
 from session_manager import ChannelSession
 from agent_runner import AgentRunner
 from thermal_guard import ThermalGuard
-from trio_agent_runner import QuotaManager, compact_agent_context
+from trio_agent_runner import QuotaManager, compact_agent_context, TrioAgentRunner
 from discord_utils import (
     async_prepare_message_payload,
     safe_send_discord_message
 )
 from model_manager import GlobalModelManager
+from output_guard import REWRITE_ONLY_NOTE
+import role_authority
 
 logger = logging.getLogger("ConsultingRunner")
 
@@ -119,6 +121,35 @@ class ConsultingRunner:
 
         feedback_for_architect = ""
 
+        # 📸 [Planner Visual Gap] 스크린샷이 존재하면, 자문 시작 전에 실 렌더링 화면 기반
+        #    제품 결손(무엇이 부족한가)을 비전 분석하여 자문 프롬프트의 물리 증거로 주입한다.
+        visual_gap_block = ""
+        visual_gap_digest = ""
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            if PlannerVisualGapAnalyzer.enabled():
+                _vg = await PlannerVisualGapAnalyzer.analyze_for_planning(
+                    workspace=getattr(session, "workspace", "") or "",
+                    root_user_goal=prompt,
+                    domain="",
+                    max_images=2,
+                )
+                if _vg is not None:
+                    visual_gap_block = PlannerVisualGapAnalyzer.format_prompt_block(_vg)
+                    visual_gap_digest = PlannerVisualGapAnalyzer.format_digest(_vg)
+        except Exception as _vg_err:
+            logger.debug(f"Planner visual gap analysis skipped in consulting: {_vg_err}")
+
+        if visual_gap_digest:
+            try:
+                await safe_send_discord_message(
+                    main_channel,
+                    "📸 **[스크린샷 실측 결손 사전 진단 — 기획 자문 근거]**\n"
+                    f"{visual_gap_digest}",
+                )
+            except Exception as _vg_send_err:
+                logger.debug(f"visual gap digest send skipped: {_vg_send_err}")
+
         try:
             for round_num in range(1, max_rounds + 1):
                 await ThermalGuard.check_round_transition_cooldown(main_channel)
@@ -139,13 +170,14 @@ class ConsultingRunner:
                         f"[역할: 수석 소프트웨어 아키텍트 (Lead Software Architect / {architect_display})]\n\n"
                         f"사용자가 코드 수정을 원하지 않고, 현재 프로젝트 구조를 바탕으로 최적의 기술 방향성과 설계를 모색해달라고 요청했습니다:\n"
                         f"{prompt}\n\n"
-                        f"🚨 **[임무 지침 - 읽기 전용 다각도 아키텍처 탐색]**:\n"
+                        + (f"{visual_gap_block}\n\n" if visual_gap_block else "")
+                        + f"🚨 **[임무 지침 - 읽기 전용 다각도 아키텍처 탐색]**:\n"
+                        f"0. **📸 스크린샷 실측 결손 최우선**: 위 [실 렌더링 E2E 스크린샷 기반 제품 결손]이 제공된 경우, 사용자의 '무엇이 부족한가' 질문에 대한 직접 답변의 1순위 근거로 삼으십시오. 실제 화면에 없는 기능/패널/워크플로를 구체적으로 짚고, '전체 테스트 통과' 같은 일반론으로 대체하지 마십시오.\n"
                         f"1. **🎯 사용자 질문에 대한 직접 답변 최우선**: 사용자의 질문에 대한 구체적이고 전문적인 분석을 최상단에 제공하십시오.\n"
                         f"2. **코드베이스 정밀 탐색**: `find_by_name`, `list_dir`, `grep_search`, `view_file` 도구를 적극 사용하여 현재 워크스페이스(`{session.workspace}`)의 구조, 주요 컴포넌트, 상태 관리를 파악하십시오.\n"
                         f"3. **다각도 접근 방식 비교**: 최소 2~3가지 기술적 대안(Option A vs Option B)을 제시하고 장단점을 비교하십시오.\n"
                         f"4. **권장 아키텍처 청사진**: 가장 추천하는 최적의 설계안을 명확히 기술하십시오.\n"
-                        f"5. **[📉 케이브맨 토큰 다이어트]**: 인사말/수다 배제, 500~800자 이내의 명사형 종결 개조식으로 압축 작성하십시오.\n"
-                        f"6. **절대 파일 수정 금지**: `write_to_file`이나 `replace_file_content`를 절대 실행하지 마십시오."
+                        f"5. **절대 파일 수정 금지**: `write_to_file`이나 `replace_file_content`를 절대 실행하지 마십시오."
                     )
                 else:
                     architect_prompt = (
@@ -173,6 +205,23 @@ class ConsultingRunner:
 
                 if cls.is_system_error(latest_architect_output):
                     return latest_architect_output
+
+                # 🛡️ [출력 가드] Architect 보고가 비한국어 문장이면 한국어 재작성 1회 (판정 태그 강제 없음).
+                latest_architect_output = await TrioAgentRunner.guard_output(
+                    latest_architect_output,
+                    approved=None,
+                    kind=None,
+                    repair_note=REWRITE_ONLY_NOTE,
+                    rerun=(lambda _p: AgentRunner.run_prompt(
+                        session=session, prompt=_p, model=CODER_MODEL)),
+                )
+
+                # 🛡️ [역할 권한 물리 강제] Architect(Coder 계열)가 QA 판정 태그를 선언하면 제거한다.
+                latest_architect_output, _removed_architect_verdicts = role_authority.strip_coder_verdict_tags(latest_architect_output)
+                if _removed_architect_verdicts:
+                    logger.warning(
+                        f"ConsultingRunner: Architect 출력에서 QA 전용 판정 태그 {_removed_architect_verdicts} 제거(역할 전도 차단)."
+                    )
 
                 # Post Architect response to main channel
                 architect_chunks, architect_file_attachments = await async_prepare_message_payload(
@@ -228,7 +277,7 @@ class ConsultingRunner:
                     f"1. 필요 시 `view_file` 등을 실행하여 실제 소스코드와 일치하는지 정밀 확인하십시오.\n"
                     f"2. Lead Architect의 설계에서 간과된 **잠재적 성능 병목, 보안 취약점, 모듈 간 강결합, 마이그레이션 난이도, 미래의 기술 부채**를 가차 없이 지적하십시오.\n"
                     f"3. '단순 칭찬'은 지양하고, 실제 운영 환경에서 발생할 수 있는 엣지 케이스와 구체적 보완책을 제시하십시오.\n"
-                    f"4. **[📉 케이브맨 토큰 다이어트]**: 인사말/수다 배제, 3~5줄 내외의 명사형 종결 개조식으로 간결하게 작성하십시오.\n"
+                    f"4. **[🗣️ 충분한 비판 의견 개진]**: 인사말/수다는 배제하되 분량 제한 없이, 지적한 기술 부채·엣지 케이스와 구체적 보완책을 심층적으로 서술하십시오.\n"
                     f"5. (절대 파일 수정/생성 금지)"
                 )
 
@@ -250,6 +299,14 @@ class ConsultingRunner:
                 if cls.is_system_error(latest_qa_output):
                     return latest_qa_output
 
+                # 🛡️ [출력 가드] 비한국어 응답 한국어 재작성 (자문 모드는 판정 태그 강제 안 함).
+                latest_qa_output = await TrioAgentRunner.guard_output(
+                    latest_qa_output,
+                    approved=None,
+                    kind=None,
+                    rerun=(lambda _p: TrioAgentRunner.run_qa_turn(session=session, prompt=_p)),
+                )
+
                 qa_chunks, qa_file_attachments = await async_prepare_message_payload(
                     latest_qa_output,
                     workspace_root=session.workspace,
@@ -266,17 +323,18 @@ class ConsultingRunner:
                 await ThermalGuard.check_round_transition_cooldown(main_channel)
 
                 # -------------------------------------------------------------
-                # Step 3: Chief Strategist / PO Turn (Gemini 3.1 Pro High)
+                # Step 3: Chief Strategist / PO Turn (config.AUDITOR_MODEL)
                 # -------------------------------------------------------------
+                auditor_display = GlobalModelManager.get_role_model_display("auditor")
                 session.set_busy(True, f"⚖️ Chief Strategist 최종 방향성 및 로드맵 수립 중 ({round_num}/{max_rounds}R)")
                 if on_status_update:
                     await on_status_update(
-                        f"⚖️ **[라운드 {round_num}/{max_rounds}] Chief Strategist(Gemini 3.1 Pro High)가 기술 제안과 비판 검토를 종합하여 최종 로드맵을 확정합니다...**"
+                        f"⚖️ **[라운드 {round_num}/{max_rounds}] Chief Strategist({auditor_display})가 기술 제안과 비판 검토를 종합하여 최종 로드맵을 확정합니다...**"
                     )
 
                 auditor_target_channel = auditor_channel or main_channel
                 auditor_status_msg = await auditor_target_channel.send(
-                    f"⚖️ **[라운드 {round_num}/{max_rounds}] Chief Strategist(Gemini 3.1 Pro High) 종합 심사 로그...**"
+                    f"⚖️ **[라운드 {round_num}/{max_rounds}] Chief Strategist({auditor_display}) 종합 심사 로그...**"
                 )
 
                 async def on_auditor_tool(tool_status: str):
@@ -292,15 +350,16 @@ class ConsultingRunner:
                     f"[역할: 최고 기술 전략가 & 제품 총괄 (Chief Technology Strategist & PO / {AUDITOR_MODEL})]\n\n"
                     f"사용자의 방향성 모색 요청:\n"
                     f"{prompt}\n\n"
-                    f"Lead Architect의 아키텍처 제안 요약:\n"
+                    + (f"{visual_gap_block}\n\n" if visual_gap_block else "")
+                    + f"Lead Architect의 아키텍처 제안 요약:\n"
                     f"{compact_agent_context(latest_architect_output, max_chars=2000)}\n\n"
                     f"Tech Reviewer의 비판적 검토 및 리스크 분석 요약:\n"
                     f"{compact_agent_context(latest_qa_output, max_chars=2000)}\n\n"
                     f"🚨 **[임무 지침 - 최종 방향성 권고안 및 단계별 실행 로드맵 확정]**:\n"
-                    f"1. **🎯 사용자 질문에 대한 직접 답변 최우선**: 최상단에 사용자 질문에 대한 명쾌한 답변을 1:1로 직접 작성하십시오.\n"
-                    f"2. Architect의 제안과 Reviewer의 비판을 종합하여, **최종 결론 및 가장 추천하는 최적의 경로(Recommended Path)**를 명확히 작성하십시오.\n"
-                    f"3. 실제 구현에 착수할 때 참고할 수 있도록 **구체적인 3단계 마일스톤 실행 로드맵(Phase 1: 기반 설계 ➔ Phase 2: 핵심 모듈 구현 ➔ Phase 3: 검증/배포)**을 체계적으로 정의하십시오.\n"
-                    f"4. **[📉 케이브맨 토큰 다이어트 & 가독성]**: 인사말/수다 배제, 500~800자 이내의 명사형 종결 개조식으로 압축 작성하십시오.\n"
+                    f"1. **📸 스크린샷 실측 결손 최우선 반영**: 위 [실 렌더링 E2E 스크린샷 기반 제품 결손]이 제공된 경우, 최종 로드맵의 Phase 1~3에 그 결손 해소를 실제로 배치하십시오. 추상적 '안정화' 나열 금지.\n"
+                    f"2. **🎯 사용자 질문에 대한 직접 답변 최우선**: 최상단에 사용자 질문에 대한 명쾌한 답변을 1:1로 직접 작성하십시오.\n"
+                    f"3. Architect의 제안과 Reviewer의 비판을 종합하여, **최종 결론 및 가장 추천하는 최적의 경로(Recommended Path)**를 명확히 작성하십시오.\n"
+                    f"4. 실제 구현에 착수할 때 참고할 수 있도록 **구체적인 3단계 마일스톤 실행 로드맵(Phase 1: 기반 설계 ➔ Phase 2: 핵심 모듈 구현 ➔ Phase 3: 검증/배포)**을 체계적으로 정의하십시오.\n"
                     f"5. 하단에 `[STATUS: CONSULTING_COMPLETE]`를 표기하십시오.\n"
                     f"6. (절대 파일 수정/생성 금지)"
                 )
@@ -319,6 +378,19 @@ class ConsultingRunner:
                         await auditor_status_msg.delete()
                     except Exception:
                         pass
+
+                # 🛡️ [출력 가드] 비한국어 응답 한국어 재작성 (자문 모드 — 판정 태그 강제 안 함).
+                latest_auditor_output = await TrioAgentRunner.guard_output(
+                    latest_auditor_output,
+                    approved=None,
+                    kind=None,
+                    rerun=(lambda _p: AgentRunner.run_prompt(
+                        session=session,
+                        prompt=_p,
+                        model=AUDITOR_MODEL,
+                        conversation_id_attr="auditor_conversation_id",
+                    )),
+                )
 
                 auditor_chunks, auditor_file_attachments = await async_prepare_message_payload(
                     latest_auditor_output,

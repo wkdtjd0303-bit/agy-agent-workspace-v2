@@ -286,11 +286,10 @@ class AndroidEmulatorManager:
                 if code == 0 and "1" in out.strip():
                     logger.info(f"Android guest OS fully booted and ready ({time.time() - t_start:.1f}s)")
                     return True
-            # Try connecting TCP port
             self.connect_device("127.0.0.1:5555")
             time.sleep(interval)
             interval = min(2.0, interval * 1.3)
-        return self.is_adb_connected()
+        return False
 
     def start_xvfb_display(self, display: str = ":98", screen_res: str = "720x1280x24") -> Optional[subprocess.Popen]:
         """Starts an isolated headless Xvfb server for mobile display emulation."""
@@ -344,28 +343,74 @@ class AndroidEmulatorManager:
                         self.start_xvfb_display(display=self.display_num, screen_res="720x1280x24")
                     env = os.environ.copy()
                     env["DISPLAY"] = self.display_num
+
+                    # Clean stale locks for this AVD before launch to avoid FATAL pending snapshot lock
+                    import glob
+                    avd_dir = os.path.expanduser(f"~/.android/avd/{avd_name}.avd")
+                    if os.path.isdir(avd_dir):
+                        for lock_pat in ["*.lock", "snapshot.lock*", "snapshot.trace"]:
+                            for lf in glob.glob(os.path.join(avd_dir, lock_pat)):
+                                try:
+                                    os.remove(lf)
+                                    logger.info(f"Cleaned stale AVD lock: {lf}")
+                                except Exception:
+                                    pass
+
+                    emu_log_dir = os.path.join(self.workspace, "reports", "gate5")
+                    os.makedirs(emu_log_dir, exist_ok=True)
+                    emu_log_path = os.path.join(emu_log_dir, "emulator_boot.log")
+                    self.emulator_log_file = open(emu_log_path, "w", encoding="utf-8", errors="replace")
+
                     emu_cmd = [
                         sdk_emulator,
                         "-avd", avd_name,
+                        "-no-snapshot",
+                        "-no-snapshot-load",
+                        "-no-snapshot-save",
                         "-no-audio",
                         "-no-boot-anim",
                         "-gpu", "swiftshader_indirect"
                     ]
                     if not self.headed:
                         emu_cmd.append("-no-window")
-                    self.emulator_proc = subprocess.Popen(emu_cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    self.emulator_proc = subprocess.Popen(
+                        emu_cmd, env=env, stdout=self.emulator_log_file, stderr=subprocess.STDOUT
+                    )
                     t_start = time.time()
+                    connected = False
                     while time.time() - t_start < 30.0:
+                        if self.emulator_proc.poll() is not None:
+                            logger.error(
+                                f"Emulator process exited prematurely (code {self.emulator_proc.returncode}). See {emu_log_path}"
+                            )
+                            break
                         devs = self.list_devices()
                         if devs:
                             self.target_device = devs[0]
                             logger.info(f"Connected to launched emulator device: {self.target_device}")
+                            connected = True
                             break
                         self.connect_device("127.0.0.1:5555")
                         time.sleep(1.5)
-                    return True
+
+                    if connected:
+                        booted = self.wait_for_runtime_readiness(timeout_sec=35.0)
+                        if booted:
+                            return True
+                        logger.warning(
+                            f"Emulator connected but did not complete sys.boot_completed within timeout. Log: {emu_log_path}"
+                        )
+                        self.cleanup()
+                        return False
+                    else:
+                        logger.warning(f"Emulator failed to connect within 30s. Log: {emu_log_path}")
+                        self.cleanup()
+                        return False
             except Exception as e:
                 logger.debug(f"Android SDK emulator launch notice: {e}")
+                self.cleanup()
+                return False
 
         # 2. Check for standalone Android QEMU system image (e.g. android-x86.img / system.qcow2)
         qemu_img = None
@@ -1186,15 +1231,27 @@ class AndroidEmulatorManager:
             except Exception:
                 pass
 
-        # Clean any stale AVD multiinstance locks
+        if hasattr(self, "emulator_log_file") and self.emulator_log_file and not self.emulator_log_file.closed:
+            try:
+                self.emulator_log_file.close()
+            except Exception:
+                pass
+
+        # Clean any stale AVD multiinstance and snapshot locks
         import glob
-        for lk in glob.glob(os.path.expanduser("~/.android/avd/*.avd/*.lock")):
+        for lk in glob.glob(os.path.expanduser("~/.android/avd/*.avd/*.lock*")):
             try:
                 os.remove(lk)
             except Exception:
                 pass
+        for st in glob.glob(os.path.expanduser("~/.android/avd/*.avd/snapshot.*")):
+            try:
+                os.remove(st)
+            except Exception:
+                pass
 
     cleanup_processes = cleanup
+    shutdown = cleanup
 
     def run_full_test_suite(
         self,

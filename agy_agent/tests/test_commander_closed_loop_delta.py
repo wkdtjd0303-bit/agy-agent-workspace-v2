@@ -191,14 +191,20 @@ class TestCommanderClosedLoopDelta(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(plan5.title, "실시간 스코어 HUD, 최고 기록 영속화 및 1초 재시작 루프")
 
-        # Step 6: Score exists -> Production Hardening
+        # Step 6: Score exists -> next USER-FACING capability (hardening-only milestone must NOT be issued)
         with open(os.path.join(self.test_dir, "score.js"), "w") as f:
             f.write("// score hud")
         reality6 = Commander.inspect_codebase_reality(self.test_dir)
         plan6 = Commander._build_heuristic_adaptive_plan(
             root_user_goal=goal, reality=reality6, domain="game", target_version="v1.5", workspace=self.test_dir
         )
-        self.assertEqual(plan6.title, "상용 배포 품질 하드닝 및 E2E 회귀 검증")
+
+        # [기획자 역할 강제] 코어 루프 완성 후에는 '상용 배포 품질 하드닝'이 아니라
+        # 아직 없는 사용자 체감 신규 기능(일시정지/옵션 등)을 다음 마일스톤으로 발주해야 한다.
+        self.assertEqual(plan6.source, "product_value")
+        self.assertFalse(Commander.is_generic_validation_plan(plan6.title, plan6.what))
+        self.assertNotIn("하드닝", plan6.title)
+        self.assertTrue(plan6.product_value_analysis)
 
 
 if __name__ == "__main__":

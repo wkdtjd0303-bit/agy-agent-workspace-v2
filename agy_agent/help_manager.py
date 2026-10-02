@@ -1,7 +1,43 @@
 import discord
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import config
 from model_manager import GlobalModelManager
+
+# 브랜드 배너 바인더 (생성 에셋 → Discord UI 연결). 미설치/오류 시 조용히 비활성.
+try:
+    import brand_ui as _brand_ui
+except Exception:  # pragma: no cover - 방어적 폴백
+    _brand_ui = None
+
+
+def get_brand_files() -> List[Any]:
+    """`!help` 발송 시 첨부할 브랜드 배너 파일 목록 (없으면 빈 리스트)."""
+    if _brand_ui is None:
+        return []
+    try:
+        return _brand_ui.banner_files()
+    except Exception:
+        return []
+
+
+def _bind_brand_banner(embed: discord.Embed) -> bool:
+    """overview 임베드에 브랜드 배너를 실제로 바인딩한다 (에셋 없으면 no-op)."""
+    if _brand_ui is None:
+        return False
+    try:
+        return _brand_ui.apply_brand_banner(embed, mode="image")
+    except Exception:
+        return False
+
+
+def _image_backend_desc() -> str:
+    """현재 구성된 '실제' 이미지 생성 백엔드 설명 (안내 문구를 실제 동작과 일치시킴)."""
+    try:
+        from image_generation_backend import ImageGenerationBackend
+        return ImageGenerationBackend.describe_backends() or "미구성 (OPENROUTER_API_KEY 또는 GEMINI_API_KEY 필요)"
+    except Exception:
+        return "미구성 (OPENROUTER_API_KEY 또는 GEMINI_API_KEY 필요)"
+
 
 class HelpManager:
     """
@@ -9,7 +45,7 @@ class HelpManager:
     Provides rich, interactive, category-based guides with buttons and select menu.
     Fully reflects all latest commands:
     - Daily Core / Golden 5 (!help, !plan, !mode, !reset, !stop, @Antigravity)
-    - Orchestration & Planning (!plan, !setup, !mode 1/1+/2/2+/auto/read/all, !single, !pair, !read)
+    - Orchestration & Planning (!plan, !setup, !mode 1/2/2+/auto/read/all, !single, !pair, !read, !image)
     - QA Squad & E2E Testing (!qa, !qa select, !qasetup, !e2e, !sim, !apk, !colab, !android_test, !win_test)
     - Commander & Cloud Backup (!commander, !export, !drive, !zip, !git)
     - System & Safety Guardrails (!status, !quota, !temp, !watchdog, !selfhealing, !model, !identity, !engine, !bots, !queue, !clear-queue, !pwd, !cd)
@@ -72,17 +108,15 @@ class HelpManager:
         # Build comprehensive multi-agent role fields with explicit model identifiers
         ext_cfgs = config.get_extended_qa_configs()
         qa_count = 1 + len(ext_cfgs) if ext_cfgs else 1
-        consultant_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
 
         core_role_lines = [
             f"• 👑 **Commander (의도 분석 및 관제 사령관)** — 구동: `{GlobalModelManager.get_role_model_display('commander')}` (`{config.COMMANDER_MODEL}`)\n  └ 실시간 의도 분석 & Single/Pair/Quad 스마트 배차 관제",
             f"• 👨‍💻 **Coder (초고속 개발 및 기능 구현)** — 구동: `{GlobalModelManager.get_role_model_display('coder')}` (`{config.CODER_MODEL}`)\n  └ 다중 파일 생성, 반응형 UI 조립, 컴파일/빌드/배포 완결",
             f"• ⚖️ **Client Auditor (대리 기획자 최종 감사)** — 구동: `{GlobalModelManager.get_role_model_display('auditor')}` (`{config.AUDITOR_MODEL}`)\n  └ PO 관점 PRD/헌법 100% 전수 대조, 최종 수락 및 차기 로드맵 기획",
+            f"• 🎨 **Image generator (실제 AI 이미지 생성 도구)** — 구동: `{GlobalModelManager.get_role_model_display('image')}` (`{getattr(config, 'IMAGE_MODEL', 'gemini-3.8-flash-high')}`)\n"
+            f"  └ Coder/QA가 `[IMAGE_REQUEST: ...]`(생성) / `[IMAGE_EDIT: ...]`(수정) 또는 `!image` 로 호출하는 이미지 생성·수정 전용 도구 봇\n"
+            f"  └ 실제 이미지 백엔드(OpenRouter Nano Banana 계열 Gemini image): {_image_backend_desc()}",
         ]
-        if consultant_model:
-            core_role_lines.append(
-                f"• 🧙‍♂️ **Senior Consultant (수석 자문관)** — 구동: `{GlobalModelManager.get_role_model_display('consultant')}` (`{consultant_model}`)\n  └ 대규모 시스템 아키텍처, 전략 수립 및 심층 컨설팅"
-            )
 
         qa_role_lines = [
             f"• 🕵️‍♂️ **qa1 (기본 검증관)** — 구동: `{GlobalModelManager.get_role_model_display('qa1')}` (`{config.QA_MODEL}`)\n  └ Playwright 웹 4대 뷰포트 & Android MCP 12개 도구 물리 단언"
@@ -107,6 +141,8 @@ class HelpManager:
         )
 
         embed.set_footer(text="AGY Collaborative System · 도움말 메뉴 버튼을 눌러 상세 정보를 확인하세요.")
+        # 생성된 브랜드 배너 에셋을 overview UI에 실제 바인딩 (에셋 없으면 no-op)
+        _bind_brand_banner(embed)
         return embed
 
     @staticmethod
@@ -210,8 +246,10 @@ class HelpManager:
                 f"  💡 **실전 예시**: `{p}pair 반응형 대시보드 화면에 일일 통계 차트와 다크모드 추가해줘`\n"
                 f"• `{p}single <요청>` : 초고속 단일 Coder(`{config.CODER_MODEL}`) 모드로 즉시 코딩 및 답변\n"
                 f"  💡 **실전 예시**: `{p}single 폴더 내 이미지들을 일괄 리사이징하는 파이썬 스크립트 작성해줘`\n"
-                f"• `{p}single+ <요청>` : 🧙‍♂️ **수석 컨설턴트 단일 자문** (`{getattr(config, 'CONSULTANT_MODEL', 'GPT-6 Astra')}`)\n"
-                f"  💡 **실전 예시**: `{p}single+ 대규모 분산 아키텍처 및 동시성 락 설계 자문해줘`\n"
+                f"• `{p}image <요청>` : 🎨 **Image generator 실제 AI 이미지 생성** (Nano Banana 계열 · 백엔드: {_image_backend_desc()})\n"
+                f"  💡 **실전 예시**: `{p}image 우주 테마 앱 로고 (asset_name=app_logo ratio=1:1)`\n"
+                f"• `{p}image edit <원본경로> <수정요청>` : ✏️ **기존 이미지 AI 편집(수정)** — 원본 입력 후 부분 수정\n"
+                f"  💡 **실전 예시**: `{p}image edit app/src/main/res/drawable/hero.png 배경을 더 어둡게`\n"
                 f"• `{p}pair+ <요청>` : 👥 **{quad_label} 협업 개발** (Coder ↔ qa1 ↔ {qa_names} ↔ Auditor)\n"
                 f"• `{p}single_qa2 <요청>` : 🥷 **단일 qa2 검증관 전용 실행**\n"
                 f"• `{p}read <질문>` / `{p}기획 <질문>` : 100% 무수정 읽기/기획 전용 자문\n"
@@ -249,10 +287,9 @@ class HelpManager:
                 f"  - 💡 **특정 QA만 지정**: `{p}mode 2+ qa2` (qa2만), `{p}mode 2+ 2,3` (복수 지정), `{p}mode 2+ all` (전체 복원)\n"
                 f"• `{p}mode 2` (`{p}mode pair`) : 👥 **3중 협업 모드 고정** (Coder ↔ QA ↔ Auditor 완결 후 사용자 대기)\n"
                 f"• `{p}mode single_qa2` (`{p}mode qa2`) : 🥷 **단일 qa2 전용 모드**\n"
-                f"• `{p}mode 1+` / `{p}mode single+` : 👤 **단일 컨설턴트 모드 고정**\n"
                 f"• `{p}mode 1` / `{p}mode single` : 👤 **단일 에이전트 모드 고정** (초고속 단일 답변)\n"
                 f"• `{p}mode read` : 🔍 **3중 읽기/기획 전용 모드 고정** (코드 무수정 아키텍처 자문)\n"
-                f"• `{p}mode all [auto|3+|3|2+|2|1+|1|read]` : 🌐 **모든 채널 일괄 모드 변경**\n"
+                f"• `{p}mode all [auto|3+|3|2+|2|1|read]` : 🌐 **모든 채널 일괄 모드 변경**\n"
                 f"• `{p}role qa` / `{p}role coder` : 🎭 **채널 역할 전환** (개발자 ↔ 시니어 QA 전담)"
             ),
             inline=False
@@ -613,6 +650,10 @@ class HelpInteractiveView(discord.ui.View):
         self.user_id = user_id
         self.message: Optional[discord.Message] = None
         self.update_components()
+
+    def get_files(self) -> List[Any]:
+        """현재 뷰 발송 시 함께 첨부할 파일 목록 (브랜드 배너)."""
+        return get_brand_files()
 
     def get_current_embed(self) -> discord.Embed:
         page = self.current_page

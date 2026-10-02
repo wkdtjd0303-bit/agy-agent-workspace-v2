@@ -1,0 +1,12 @@
+{
+  "channel_id": 999999999,
+  "observations": 0,
+  "marker_emission_rate": null,
+  "contract_active": false,
+  "warnings": [
+    "관측 데이터 없음 — 수렴 계약이 한 번도 실행되지 않음"
+  ],
+  "milestone": "",
+  "generated_at": "2026-10-01T13:56:31",
+  "schema": "convergence_telemetry/v1"
+}

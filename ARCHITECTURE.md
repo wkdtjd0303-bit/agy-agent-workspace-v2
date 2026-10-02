@@ -104,4 +104,60 @@
 * **A10 (협업 수렴 실패 차단)**: Coder와 QA가 동일 결함을 두고 2회 연속 평행선을 달리는 핑퐁 트랩 발생 시 즉시 서킷 브레이커 작동(`Ping-Pong Trap Breaker`).
 * **C1/C2 (요구사항 누락 방어)**: Coder가 명시적 필수 요구사항(`[REQ-xx]`)을 누락하고 컴파일만 맞췄을 때 QA가 즉시 `[STATUS: REJECTED]` 선언 및 결함 통보.
 
+## 5. 🎨 Visual Craft Loop (무인 자율 `!mode 3/3+` 전용 시각 완성도 폐루프)
+
+> 상세: [`docs/VISUAL_CRAFT_LOOP.md`](docs/VISUAL_CRAFT_LOOP.md)
+
+"기능은 통과하지만 상용 앱처럼 보이지 않는" 문제를 코드 작성 → 프레임버퍼 실측 → 시각 비평 → 코드 수정 사이클로 해결합니다.
+사용자 주도 `!mode 1/2`에는 개입하지 않습니다.
+
+| 단계 | 모듈 | 산출물 |
+| :--- | :--- | :--- |
+| 1. 디자인 계약 (4/8pt 그리드·타이포 3단계·팔레트·터치 규격) | `visual_craft_loop.py` | `reports/gate2/design_contract.json` |
+| 2. 정적 감사 (마케팅 히어로/터치 타깃/카드 중첩/그리드 이탈) | `visual_craft_loop.py` | 감사 findings |
+| 3. 기하 감사 (Android UI Hierarchy 실 dp·썸존) | `visual_craft_loop.py` | 감사 findings |
+| 4. Vision 비평 (실 스크린샷 + PIL 계측) | `visual_craft_loop.py` + `vision_attachment_analyzer.py(role=design_critique)` | `[VISUAL_VERDICT]/[VISUAL_DEFECTS]` |
+| 강제 집행 | `trio_agent_runner.py` | QA APPROVED → `[STATUS: REJECTED]` 기계 반려 (상한 `VISUAL_CRAFT_MAX_ROUNDS`) |
+| 물리 검증 | `evidence_validator.py` (Gate 5) | `reports/gate5/visual_craft_review.json` (verdict=PASS 필수) |
+
+동일 결함 반복(stalled) 시 자동 수정을 중단하고 Auditor/인간 에스컬레이션으로 전환합니다. `VISUAL_CRAFT_LOOP_ENABLED=0` 으로 즉시 비활성화할 수 있습니다.
+
+## 6. 🛡️ StallGuard — 오케스트레이션 교착(정지) 자동 감시·해제 (AGY 5.x)
+
+> 상세: [`docs/STALL_GUARD.md`](docs/STALL_GUARD.md) · 명령: `!stall`
+
+프로세스 단위 와치독(`agent_runner`)만으로는 **채널이 점유된 채로 영구 정지**하는 사고를 막을 수 없어,
+오케스트레이션(큐·락·busy) 층에 독립 감시 계층을 추가했습니다.
+
+```text
+[사용자 요청] ─► enqueue ─► dispatch_next_in_queue ──(락 취득: 20초 타임아웃 + 강제 교체)──► execute_channel_prompt
+                     ▲                                                                      │
+                     │                                     ┌────────────────────────────────┘
+                     │                                     ▼
+                     └────── 재가동(10초 주기) ── StallGuard ◄── 하트비트(last_progress_at)
+                                                  │  · 대기열 정체 60초 → 디스패치 재호동
+                                                  │  · 좀비 busy 30초 → 즉시 회수
+                                                  │  · 무응답 3000초 → 채널 경보 1회
+                                                  │  · 무응답 4000초 → (태스크 생존 시) 심층 작업 관찰, 회수 보류
+                                                  │  · 무응답 5000초(절대 상한) → 프로세스 kill + 태스크 cancel
+                                                  │                  + busy 해제 + 락 교체 + 채널 알림
+                                                  └─► reports/watchdog/stalls.json (물리 증거)
+```
+
+| 방어선 | 대상 | 기준 | 조치 |
+| :-- | :-- | --: | :-- |
+| **L0 락 타임아웃** | `dispatch_next_in_queue` 대기열 락 | 20초 (열 쿨다운 중 320초 여유) | 락 강제 교체 → 채널 영구 블락 차단 |
+| **L1 대기열 정체** | 작업 없음 + 큐 요청 방치 | 60초 | 디스패치 재호동 |
+| **L2 좀비 busy** | `is_busy` 인데 태스크 없음/종료 | 30초 | 즉시 회수 |
+| **L3 무응답 경보** | 실제 진행(하트비트) 끊김 | 3000초 | 채널 1회 경보 |
+| **L4 심층 작업 관찰** | 태스크 생존 + 진행 끊김 | 4000초 | 즉시 회수 보류 + 1회 알림 (Thinking 모델 긴 추론 보호) |
+| **L5 무응답 회수** | 진행 끊김 | 5000초(절대 상한, 추적 프로세스 사망 시 4000초) | 프로세스·태스크·busy·락 동시 해제 + 채널 알림 + 대기열 재가동 |
+
+**하트비트 원칙**: `last_progress_at` 은 CLI stdout 출력·도구 상태 전이(ACTIVE/DONE)·상태 전이에서만 갱신됩니다.
+디스코드 8초 주기 "⏳ 진행 중" 임베드는 **가짜 하트비트**로 간주해 연결하지 않습니다.
+
+**오판 방지(Liveness-aware)**: stdout 침묵만으로 곧바로 회수하지 않습니다. 태스크가 살아있으면
+L4에서 관찰하고, L5(절대 상한)에서만 회수합니다.
+(실제 장애: qa1 코드 리뷰가 정상 동작 중이었는데 906초에 회수됨 → `reports/watchdog/stalls.json`)
+
 

@@ -40,6 +40,11 @@ _SANDBOX_ENV = Path(_SANDBOX_DIR) / ".env"
 os.environ["AGY_MODEL_CONFIG_FILE"] = str(_SANDBOX_CONFIG)
 os.environ["AGY_ENV_FILE"] = str(_SANDBOX_ENV)
 
+# [출력 가드 격리] 한국어 강제 재작성은 외부 LLM을 1회 추가 호출하므로 단위 테스트에서는
+# 비활성화하여 결정성/속도를 보장한다. (판정 태그 첫 줄 강제 등 결정론적 가드는 그대로 동작)
+# 한국어 재작성 경로 자체는 tests/test_output_guard.py 에서 명시적으로 opt-in 하여 검증한다.
+os.environ["AGY_OUTPUT_KOREAN_REPAIR"] = "0"
+
 
 def _seed_sandbox_from_defaults():
     """샌드박스 기준선을 DEFAULT_ROLES 로 고정해 라이브 .env/state 와 무관한 결정적 테스트를 보장한다."""
@@ -100,7 +105,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 _CONFIG_ATTRS = (
     "CODER_MODEL", "CODER_FALLBACK_MODEL", "DEFAULT_AI_ENGINE", "DEFAULT_ENGINE",
-    "QA_MODEL", "AUDITOR_MODEL", "COMMANDER_MODEL", "CONSULTANT_MODEL", "CONSULTANT_ENGINE",
+    "QA_MODEL", "AUDITOR_MODEL", "COMMANDER_MODEL", "IMAGE_MODEL", "IMAGE_ENGINE",
     "QA2_MODEL", "QA2_ENGINE", "EXTENDED_QA_CONFIGS",
 )
 

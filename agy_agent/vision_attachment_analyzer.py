@@ -126,6 +126,33 @@ class VisionAttachmentAnalyzer:
                 "[VISUAL_DEFECTS]:\n"
                 "- MAJOR | MARKETING_HERO | 상단 40% 히어로 카드 | 감성 카피가 첫 화면을 점유 | 히어로 제거 후 목록 상단 배치\n"
             )
+        elif role == "planner_gap":
+            # 👑 Commander 기획 전용: 디자인 QA가 아니라 '제품 기획 결손'을 진단한다.
+            # user_prompt 안에 루브릭(원 목표/도메인 포함)이 이미 완성되어 전달된다.
+            vision_system_prompt = (
+                "[역할: 최고 제품 책임자 (Chief Product Officer) & 수석 프로덕트 디자이너]\n"
+                "첨부된 것은 실제로 빌드/렌더링된 제품의 실기기/E2E 스크린샷입니다. "
+                "디자인 깨짐 지적(QA)이 아니라, 상용 최고 수준의 동종 앱과 비교했을 때 "
+                "'사용자가 당연히 기대하지만 아직 없는 기능·패널·작업 단계'를 찾아내는 것이 임무입니다.\n\n"
+                "🚨 [집중 색출 대상]:\n"
+                "1. CORE_FEATURE: 화면 텍스트/상태는 언급하지만 실제 UI/패널/도구가 없는 핵심 기능\n"
+                "2. UX_WORKFLOW: 작업 흐름이 끊기는 누락 단계 (다단계 내역/선택/크롭/내보내기 등)\n"
+                "3. LAYOUT_PANEL: 패널 구조가 단일 기능만 담아 확장 불가 (탭/아코디언/속성 패널 부재)\n"
+                "4. ACCESSIBILITY: 48dp 미만 터치 타깃, 상단 조작 과밀, 텍스트 잘림/겹침\n"
+                "5. PERFORMANCE / POLISH: 미니맵(내비게이터) 부재, 빈 화면(Empty State) 부재 등\n\n"
+                "⚠️ 실제 스크린샷에 보이는 증거만 근거로 삼으십시오. 없는 기능을 지어내거나, "
+                "이미 존재하는 기능을 '없다'고 주장하지 마십시오.\n\n"
+                "JSON/설명 없이 아래 형식만 정확히 출력하십시오 (결손은 가치 순 최대 6개):\n"
+                "[PLAN_GAP_SUMMARY]: 40자 이내 한 줄 총평\n"
+                "[PLAN_NEXT_MILESTONE]: 다음에 원자적으로 기획할 단 하나의 기능명 (명사형)\n"
+                "[PLAN_GAPS]:\n"
+                "- MAJOR | CORE_FEATURE | 레이어 패널 | 상단에 '1개 레이어' 텍스트만 존재 | 레이어 추가/삭제/숨김/투명도/블렌드 패널 기획\n"
+                "- MINOR | LAYOUT_PANEL | 우측 패널 모듈화 | 우측 패널을 브러시 옵션이 단독 점유 | 탭/아코디언 구조 재설계\n"
+            )
+            # 루브릭이 함께 전달되면 원 목표/도메인 맥락을 앞에 부착한다.
+            if user_prompt:
+                vision_system_prompt = f"{user_prompt}\n\n{vision_system_prompt}"
+
         elif role == "qa_review":
             vision_system_prompt = (
                 "[역할: 수석 Visual QA & 시각적 결함 감사관 (Chief Visual Inspector)]\n"

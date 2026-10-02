@@ -37,6 +37,33 @@ class TestDynamicModelSynchronization(unittest.IsolatedAsyncioTestCase):
         GlobalModelManager.set_role_model("coder", self.original_coder_model)
         GlobalModelManager.set_role_engine("auditor", self.original_auditor_engine)
         GlobalModelManager.set_role_model("auditor", self.original_auditor_model)
+        self._restore_bot_model_globals()
+
+    def _restore_bot_model_globals(self):
+        """
+        [🧪 테스트 격리] 이 테스트는 모델을 실제로 바꿔가며 검증하므로, 그 과정에서
+        `bot` 모듈의 모듈 레벨 CODER_MODEL/QA_MODEL/... 글로럴이 바뀐다.
+        (reload_helper_modules 가 config 값을 복사해 넣기 때문이다.)
+        그대로 두면 같은 프로세스에서 뒤이어 도는 테스트
+        (예: test_bot_presence_models 의 'bot.CODER_MODEL == config.CODER_MODEL'
+        정합성 검사)가 이 테스트의 잔여 상태에 실패한다.
+        → 원래 config 값으로 bot 글로럴을 되돌려 테스트 간 누수를 막는다.
+        """
+        import os as _os
+        import sys as _sys
+
+        cfg = _sys.modules.get("config")
+        bot_mod = _sys.modules.get("bot")
+        if cfg is None or bot_mod is None:
+            return
+        for attr in ("CODER_MODEL", "QA_MODEL", "AUDITOR_MODEL", "COMMANDER_MODEL"):
+            orig = getattr(cfg, attr, None)
+            if orig is None:
+                continue
+            # os.environ 에 테스트가 주입했을 수 있으므로 config 원본으로 되돌린다.
+            _os.environ[attr] = orig
+            if hasattr(bot_mod, attr):
+                setattr(bot_mod, attr, orig)
 
     def test_format_model_name_friendly_displays(self):
         """format_model_name must transform raw model IDs into human-readable labels."""
@@ -143,6 +170,12 @@ class TestDynamicModelSynchronization(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(GlobalModelManager.resolve_model_id("agy", "gemini 3.1 pro"), "gemini-3.1-pro-high")
         self.assertEqual(GlobalModelManager.resolve_model_id("agy", "sonnet"), "claude-sonnet-4-6")
         self.assertEqual(GlobalModelManager.resolve_model_id("agy", "opus"), "claude-opus-4-6-thinking")
+
+        # [🚫 Deprecated AGY Guard] Gemini 2.5 Flash 는 Antigravity CLI 미지원 → 3.8 Flash 자동 승격
+        self.assertEqual(GlobalModelManager.resolve_model_id("agy", "gemini 2.5 flash"), "gemini-3.8-flash-high")
+        self.assertEqual(GlobalModelManager.resolve_model_id("agy", "gemini-2.5-flash"), "gemini-3.8-flash-high")
+        self.assertEqual(GlobalModelManager.resolve_model_id("agy", "gemini-2.5-flash-lite"), "gemini-3-flash")
+        self.assertEqual(GlobalModelManager.resolve_model_id("agy", "gemini 2.5 pro"), "gemini-3.1-pro-high")
 
         # Hermes / OpenRouter engine resolution
         self.assertEqual(GlobalModelManager.resolve_model_id("hermes", "solar"), "upstage/solar-pro4")

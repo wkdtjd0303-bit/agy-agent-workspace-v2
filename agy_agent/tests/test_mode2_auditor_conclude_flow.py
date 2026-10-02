@@ -116,9 +116,9 @@ class TestMode2AuditorConcludeFlow(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(should_send_final, f"Coder must NOT repost final_response in mode '{effective_mode}' when Auditor concluded")
 
     def test_single_agent_modes_do_send_final(self):
-        """Validates that single agent modes (1, 1+, single_qa2) still send final response."""
+        """Validates that single agent modes (1, single_qa2) still send final response."""
         response = "안녕하세요! 질문에 대한 답변입니다."
-        for mode in ("single", "single_plus", "single_qa2"):
+        for mode in ("single", "single_qa2"):
             is_multi_agent = mode in (
                 "pair", "pair_quad", "read",
                 "2", "2+", "pair+", "pair_plus"

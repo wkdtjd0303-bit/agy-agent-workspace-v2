@@ -29,8 +29,10 @@ logger = logging.getLogger("ModelManager")
 # Root directory of agy_agent
 BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / "state"
-CONFIG_FILE = STATE_DIR / "global_model_config.json"
-ENV_FILE = BASE_DIR / ".env"
+# [🧪 테스트 격리] 테스트 스위트가 실제 state/.env 를 덮어쓰지 못하도록 환경변수로 경로를 재지정할 수 있다.
+# (운영 기본값은 기존과 100% 동일: 미설정 시 state/global_model_config.json 및 .env)
+CONFIG_FILE = Path(os.getenv("AGY_MODEL_CONFIG_FILE", str(STATE_DIR / "global_model_config.json")))
+ENV_FILE = Path(os.getenv("AGY_ENV_FILE", str(BASE_DIR / ".env")))
 
 # Supported Routers / Engines and their curated presets
 ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -40,11 +42,14 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
         "description": "Google Antigravity 네이티브 통합 개발/검증 엔진",
         "models": [
             ("gemini-3.8-flash-high", "Gemini 3.8 Flash High (초고속 개발/비전)"),
-            ("gemini-3.8-flash-tiered", "Gemini 3.8 Flash Tiered (동적 부하분산)"),
             ("gemini-3.7-flash-high", "Gemini 3.7 Flash High (균형잡힌 코딩)"),
+            ("gemini-3.1-pro-high", "Gemini 3.1 Pro High (심층 추론/검증)"),
+            ("gpt-oss-120b-medium", "GPT-OSS 120B Medium (오픈소스 거대 추론)"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6 Thinking (고난도 추론)"),
+            ("claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking (최상위 추론)"),
+            ("gemini-3.8-flash-tiered", "Gemini 3.8 Flash Tiered (동적 부하분산)"),
             ("gemini-3.7-flash-tiered", "Gemini 3.7 Flash Tiered"),
             ("gemini-3.7-flash-medium", "Gemini 3.7 Flash Middle (경량 관제)"),
-            ("gemini-3.1-pro-high", "Gemini 3.1 Pro High (심층 추론/검증)"),
             ("gemini-3.1-pro-low", "Gemini 3.1 Pro Low (경량 추론)"),
             ("gemini-3.6-flash-high", "Gemini 3.6 Flash High"),
             ("gemini-3.6-flash-tiered", "Gemini 3.6 Flash Tiered"),
@@ -52,9 +57,6 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
             ("gemini-3.6-flash-low", "Gemini 3.6 Flash Low"),
             ("gemini-3.5-flash-agent", "Gemini 3.5 Flash High"),
             ("gemini-3-flash", "Gemini 3 Flash (경량/고속)"),
-            ("gpt-oss-120b-medium", "GPT-OSS 120B Medium (오픈소스 거대 추론)"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6 Thinking (고난도 추론)"),
-            ("claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking (최상위 추론)"),
         ]
     },
     "hermes": {
@@ -153,18 +155,155 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
             ("opencode-go/muse-spark-1.2-contributor", "Muse Spark 1.2"),
             ("opencode-go/deepseek-flash", "DeepSeek Flash"),
         ]
+    },
+    "cmdc": {
+        "name": "Command Code CLI",
+        "icon": "💻",
+        "description": "Command Code 자율 코딩 에이전트 CLI (cmdc)",
+        "models": [
+            ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (V4.1 hybrid-attention reasoning)"),
+            ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro (hybrid-attention long-context reasoning)"),
+            ("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash (fast hybrid-attention reasoning)"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5 (best combo of speed & intelligence)"),
+            ("claude-opus-5-5", "Claude Opus 5.5 (most intelligent Opus for agents and coding)"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6 (older Sonnet, still fast & capable)"),
+            ("gpt-6-astra", "GPT-6 Astra (most capable OpenAI model for demanding reasoning & agents)"),
+            ("gpt-6-sol", "GPT-6 Sol (built for complex coding & agentic workflows)"),
+            ("gpt-6-luna", "GPT-6 Luna (most efficient OpenAI model for focused, high-volume tasks)"),
+            ("gpt-5.6-luna", "GPT-5.6 Luna (optimized for cost-sensitive workloads)"),
+            ("google/gemini-3.8-flash", "Gemini 3.8 Flash (newest Gemini Flash, improved core reasoning)"),
+            ("google/gemini-3.7-flash", "Gemini 3.7 Flash (higher-quality coding & agentic workflows)"),
+            ("moonshotai/kimi-k3", "Kimi K3 (long-horizon coding & knowledge work with 1M context)"),
+            ("moonshotai/kimi-k2.7-code", "Kimi K2.7 Code (improved long-horizon coding with vision)"),
+            ("zai-org/glm-5.3", "GLM 5.3 (frontier coding with emergent cyber capabilities)"),
+            ("z-ai/glm-5.3-flash", "GLM 5.3 Flash (fast, affordable GLM coding with 1M context)"),
+            ("xiaomi/mimo-v2.6-pro", "MiMo V2.6 Pro (flagship multimodal agentic coding with 1M context)"),
+            ("xiaomi/mimo-v2.6-flash", "MiMo V2.6 Flash (efficient multimodal agentic coding with 1M context)"),
+            ("qwen/qwen3.8-max", "Qwen 3.8 Max (autonomous long-horizon coding & professional work)"),
+            ("qwen/qwen3.8-flash", "Qwen 3.8 Flash (fast low-cost agentic coding & reasoning)"),
+            ("minimaxai/minimax-m3", "MiniMax M3 (frontier coding, agents & native multimodality)"),
+            ("xai/grok-4.7", "Grok 4.7 (coding and knowledge work, built for multi-hour tasks)"),
+            ("xai/grok-4.5", "Grok 4.5 (smartest model for coding, agentic tasks)"),
+            ("meta/muse-spark-1.3", "Muse Spark 1.3 (multimodal reasoning for long-horizon agentic)"),
+            ("poolside/laguna-s-2.1-free", "Laguna S 2.1 Free (FREE open-weight agentic coding)"),
+        ]
     }
 }
 # OpenRouter is executed by Hermes Agent: 100% synonymous alias
 ENGINE_PRESETS["openrouter"] = ENGINE_PRESETS["hermes"]
+ENGINE_PRESETS["commandcode"] = ENGINE_PRESETS["cmdc"]
+
+# 🎨 Image generator 전용 모델 프리셋 (실제 이미지 바이트를 반환하는 모델만 노출).
+#   이미지 역할은 일반 채팅 모델(agy 프리셋)이 아니라 '이미지 생성 모델'을 골라야 하므로,
+#   `!model` 에서 Image generator 선택 시 이 목록을 보여준다.
+#   (agy 라벨 `gemini-3.8-flash-high` 은 AGY CLI 기본값으로 유지하되, 실제 생성은
+#    Nano Banana 계열 ID 로 해석된다 — image_creator_hub.resolve_backend_model_hint)
+IMAGE_MODEL_PRESETS: List[Tuple[str, str]] = [
+    ("google/gemini-2.5-flash-image", "🍌 Nano Banana (OpenRouter 이미지 전용 · 실모델 google/gemini-2.5-flash-image) · 기본 이미지 생성"),
+    ("google/gemini-3.1-flash-image", "⚡ Gemini 3.1 Flash Image · 초고속 이미지 생성"),
+    ("google/gemini-3-pro-image", "✨ Gemini 3 Pro Image · 최고 품질 (Nano Banana Pro)"),
+    ("gemini-3.8-flash-high", "🏔️ Antigravity Gemini 3.8 Flash High · AGY CLI 기본(→나노바나나 해석)"),
+]
+
+
+def _sort_agy_models(models: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """Sorts AGY models prioritizing Flagships > GPT-OSS > Claude > others."""
+    def _agy_model_sort_key(item: Tuple[str, str]) -> Tuple[int, int, str]:
+        m_id = item[0].lower()
+        if "gpt-oss" in m_id or "gpt_oss" in m_id:
+            cat = "gpt-oss"
+        elif any(k in m_id for k in ("claude", "sonnet", "opus")):
+            cat = "claude"
+        elif "gemini" in m_id:
+            cat = "gemini"
+        else:
+            cat = "external"
+
+        # Tier 0: Flagships and High-priority Category Locks
+        if m_id == "gemini-3.8-flash-high":
+            return (0, 0, m_id)
+        if m_id == "gemini-3.7-flash-high":
+            return (0, 1, m_id)
+        if m_id == "gemini-3.1-pro-high":
+            return (0, 2, m_id)
+        if cat == "gpt-oss":
+            return (0, 3, m_id)
+        if cat == "claude":
+            sub_order = 0 if "sonnet" in m_id else (1 if "opus" in m_id else 2)
+            return (0, 4 + sub_order, m_id)
+
+        # Tier 1: Gemini Standard & Tiered High-Capacity models
+        if cat == "gemini":
+            if m_id == "gemini-3-flash":
+                return (1, 0, m_id)
+            if "flash-tiered" in m_id:
+                return (1, 1, m_id)
+            if "flash-high" in m_id:
+                return (1, 2, m_id)
+            if "pro-high" in m_id:
+                return (1, 3, m_id)
+            if "flash-middle" in m_id:
+                return (1, 4, m_id)
+            # Tier 2: Gemini Medium / Low tiers
+            if "flash-medium" in m_id:
+                return (2, 0, m_id)
+            if "flash-low" in m_id:
+                return (2, 1, m_id)
+            if "pro-low" in m_id:
+                return (2, 2, m_id)
+            return (2, 3, m_id)
+
+        # Tier 3: External or uncategorized models
+        return (3, 0, m_id)
+
+    return sorted(models, key=_agy_model_sort_key)
 
 
 def get_engine_models(engine: str) -> List[Tuple[str, str]]:
     """
     Returns the list of available model (id, label) presets for the given engine.
-    For 'agy', the live /model catalog fetched directly from Antigravity CLI ('agy models')
-    is prioritized as the authoritative primary source, with static presets acting only
-    as fallback/supplementary.
+
+    [🔄 자동화] 모든 엔진의 모델 목록을 `live_model_catalog.LiveModelCatalog` 로부터
+    실시간으로 가져옵니다. (CLI/API 카탈로그를 자동으로 조회·병합·캐시하고, 간헐적으로
+    백그라운드에서 자동 갱신합니다.)
+
+    - OpenCode : `opencode models` CLI + Zen Go API 결과를 **합집합**으로 병합
+    - Hermes   : OpenRouter `/api/v1/models` 실시간 조회
+    - Codex    : `codex debug models` JSON 카탈로그
+    - AGY      : AntigravityModelRegistry (기존 실시간 경로) 위임
+    - Claude/Copilot : 실시간 카탈로그 미제공 → curated 프리셋 유지
+
+    조회 실패/미登录 시에는 `ENGINE_PRESETS` 의 curated 목록이 그대로 폴백으로
+    동작하므로, 목록이 비거나 깨지는 일이 없습니다.
+
+    이 함수는 절대 I/O 를 블로킹하지 않습니다(캐시 즉시 반환 + 백그라운드 갱신).
+    """
+    canonical_eng = "hermes" if (engine or "").lower().strip() in ("hermes", "openrouter") else (engine or "agy").lower().strip()
+
+    res: List[Tuple[str, str]] = []
+    # ── [🔄 자동화] 실시간 카탈로그 우선 조회 (non-blocking + 자동 갱신) ──
+    try:
+        from live_model_catalog import LiveModelCatalog
+        live = LiveModelCatalog.get_models(canonical_eng)
+        if live:
+            res = list(live)
+    except Exception as e:
+        logger.debug(f"[AutoCatalog] {canonical_eng} live catalog unavailable: {e}")
+
+    # ── 폴백: curated 정적 프리셋 ──
+    if not res:
+        res = list(ENGINE_PRESETS.get(canonical_eng, {}).get("models", []))
+
+    if canonical_eng == "agy":
+        res = _sort_agy_models(res)
+    return res
+
+
+def _get_engine_models_legacy(engine: str) -> List[Tuple[str, str]]:
+    """
+    [Deprecated] 자동화 도입 이전의 정적 프리셋/부분 실시간 조회 로직.
+    `get_engine_models` 가 `live_model_catalog` 로 위임한 이후에는 호출되지 않으며,
+    기존 동작을 비교/디버깅할 때를 위해 보존해 둡니다.
     """
     canonical_eng = "hermes" if (engine or "").lower().strip() in ("hermes", "openrouter") else (engine or "agy").lower().strip()
 
@@ -272,6 +411,23 @@ def get_engine_models(engine: str) -> List[Tuple[str, str]]:
             sorted_live = sorted(live_models, key=lambda m: (order_map.get(m, 999), m))
             return [(m, label_map.get(m, m.replace("opencode-go/", "").title())) for m in sorted_live]
 
+    if canonical_eng in ("cmdc", "commandcode"):
+        # [🔄 AGY 패턴 준수] Command Code 실시간 모델 카탈로그를 우선 사용하고,
+        # 조회 실패 시 정적 프리셋으로 폴백합니다.
+        try:
+            from engine_manager import EngineManager
+            adapter = EngineManager.get_adapter("cmdc")
+            live_models = list(adapter.supported_models) if adapter else []
+        except Exception as e:
+            logger.debug(f"Could not load dynamic Command Code models: {e}")
+            live_models = []
+        if live_models:
+            preset_list = ENGINE_PRESETS.get("cmdc", {}).get("models", [])
+            label_map = {mid: lbl for mid, lbl in preset_list}
+            order_map = {mid: idx for idx, (mid, _) in enumerate(preset_list)}
+            sorted_live = sorted(live_models, key=lambda m: (order_map.get(m, 999), m))
+            return [(m, label_map.get(m, m)) for m in sorted_live]
+
     return list(ENGINE_PRESETS.get(canonical_eng, {}).get("models", []))
 
 
@@ -374,7 +530,7 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "icon": "👨‍💻",
         "enabled": True,
         "engine": "opencode",
-        "model": "opencode-go/deepseek-v4.1-flash",
+        "model": "opencode-go/space-bunny-free",
         "env_model_key": "CODER_MODEL",
         "env_engine_key": "DEFAULT_AI_ENGINE",
         "persona": "general",
@@ -386,7 +542,7 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "icon": "🕵️",
         "enabled": True,
         "engine": "opencode",
-        "model": "opencode-go/deepseek-v4.1-flash",
+        "model": "opencode-go/mimo-v2.6-flash",
         "env_model_key": "QA_MODEL",
         "env_engine_key": None,
         "persona": "general",
@@ -397,8 +553,8 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "role_key": "qa2",
         "icon": "🕵️‍♂️",
         "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.8-flash-high",
+        "engine": "opencode",
+        "model": "opencode-go/deepseek-v4.1-flash",
         "env_model_key": "QA2_MODEL",
         "env_engine_key": "QA2_ENGINE",
         "index": 2,
@@ -422,9 +578,9 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "name": "qa4",
         "role_key": "qa4",
         "icon": "🕵️‍♂️",
-        "enabled": True,
-        "engine": "agy",
-        "model": "gpt-oss-120b-medium",
+        "enabled": False,
+        "engine": "opencode",
+        "model": "opencode-go/deepseek-v4-flash",
         "env_model_key": "QA4_MODEL",
         "env_engine_key": "QA4_ENGINE",
         "index": 4,
@@ -435,9 +591,9 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "name": "qa5",
         "role_key": "qa5",
         "icon": "🕵️‍♂️",
-        "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.1-pro-high",
+        "enabled": False,
+        "engine": "opencode",
+        "model": "opencode-go/qwen3.8-flash",
         "env_model_key": "QA5_MODEL",
         "env_engine_key": "QA5_ENGINE",
         "index": 5,
@@ -448,9 +604,9 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "name": "qa6",
         "role_key": "qa6",
         "icon": "🕵️‍♂️",
-        "enabled": True,
-        "engine": "agy",
-        "model": "gemini-3.8-flash-high",
+        "enabled": False,
+        "engine": "opencode",
+        "model": "opencode-go/glm-5.3-flash",
         "env_model_key": "QA6_MODEL",
         "env_engine_key": "QA6_ENGINE",
         "index": 6,
@@ -463,23 +619,23 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "icon": "⚖️",
         "enabled": True,
         "engine": "opencode",
-        "model": "opencode-go/deepseek-v4.1-flash",
+        "model": "opencode-go/space-bunny-free",
         "env_model_key": "AUDITOR_MODEL",
         "env_engine_key": None,
         "persona": "architect",
         "description": "PO 관점 PRD/헌법 100% 전수 대조, 최종 승인 및 차기 로드맵 기획"
     },
-    "consultant": {
-        "name": "Senior Consultant (수석 자문)",
-        "role_key": "consultant",
-        "icon": "🧙‍♂️",
-        "enabled": False,
-        "engine": "opencode",
-        "model": "opencode-go/glm-5.3",
-        "env_model_key": "CONSULTANT_MODEL",
-        "env_engine_key": "CONSULTANT_ENGINE",
-        "persona": "general",
-        "description": "대규모 분산 아키텍처, 전략 수립 및 심층 컨설팅 자문"
+    "image": {
+        "name": "Image generator (이미지 생성)",
+        "role_key": "image",
+        "icon": "🎨",
+        "enabled": True,
+        "engine": "agy",
+        "model": "gemini-3.8-flash-high",
+        "env_model_key": "IMAGE_MODEL",
+        "env_engine_key": "IMAGE_ENGINE",
+        "persona": "designer",
+        "description": "실제 AI 이미지 생성·수정 전용 도구 봇 (Nano Banana 계열 Gemini image 백엔드 · Coder/QA 호출)"
     },
     "commander": {
         "name": "Commander (관제 사령관)",
@@ -654,8 +810,8 @@ class GlobalModelManager:
                     model_id = getattr(config, "AUDITOR_MODEL", "gemini-3.1-pro-high")
                 elif role == "commander":
                     model_id = getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-medium")
-                elif role == "consultant":
-                    model_id = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
+                elif role == "image":
+                    model_id = getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
                 elif role == "qa2":
                     model_id = getattr(config, "QA2_MODEL", "upstage/solar-pro4")
             except Exception:
@@ -721,6 +877,18 @@ class GlobalModelManager:
             cls.save()
         cls.sync_to_runtime_config()
 
+        # [🔄 자동화] 봇 기동 시 실시간 모델 카탈로그 예열(warmup) + 주기적 자동 갱신 시작.
+        #   • manual_catalog_warmup: 백그라운드 스레드로 최초 1회 조회 (기동-blocking 없음)
+        #   • start_auto_refresh  : 이후 TTL 마다 데몬 스레드가 알아서 갱신
+        #   → 사용자가 더 이상 "모델 목록을 손으로 갱신"할 필요가 없습니다.
+        try:
+            from live_model_catalog import LiveModelCatalog
+            LiveModelCatalog.start_auto_refresh()
+            LiveModelCatalog.warmup()
+            logger.info("[AutoCatalog] Live model catalog warmup+auto-refresh started.")
+        except Exception as e:
+            logger.debug(f"[AutoCatalog] warmup skipped: {e}")
+
     @classmethod
     def _seed_from_env(cls):
         """Seeds default configuration from environment variables."""
@@ -737,11 +905,11 @@ class GlobalModelManager:
         # Commander
         if getattr(config, "COMMANDER_MODEL", None):
             cls._roles["commander"]["model"] = config.COMMANDER_MODEL
-        # Consultant
-        if getattr(config, "CONSULTANT_MODEL", None):
-            cls._roles["consultant"]["model"] = config.CONSULTANT_MODEL
-        if getattr(config, "CONSULTANT_ENGINE", None):
-            cls._roles["consultant"]["engine"] = config.CONSULTANT_ENGINE
+        # Image generator (Nano Banana 이미지 생성 도구)
+        if getattr(config, "IMAGE_MODEL", None) and "image" in cls._roles:
+            cls._roles["image"]["model"] = config.IMAGE_MODEL
+        if getattr(config, "IMAGE_ENGINE", None) and "image" in cls._roles:
+            cls._roles["image"]["engine"] = config.IMAGE_ENGINE
 
         # Extended QAs (QA2..QA6)
         for i in range(2, 7):
@@ -898,8 +1066,12 @@ class GlobalModelManager:
         owner = cls.model_owner_engine(m)
 
         if eng == "opencode":
-            # OpenCode CLI 는 'provider/model' 형식만 허용하며 Gemini 네이티브 ID는 지원하지 않는다.
-            return ("/" in m) and (owner != "agy")
+            # [FIX] OpenCode CLI 는 'opencode-go/*' · 'opencode/*' 모델만 실행 가능하다.
+            # 기존에는 '/' 포함 여부만 검사해서 upstage/solar-pro4, deepseek/deepseek-chat,
+            # openai/gpt-oss-120b 같은 Hermes(OpenRouter) 전용 slug 까지 'OpenCode 호환'으로
+            # 오인했다. 그 결과 사용자가 `!model` 에서 OpenCode 를 골라도 모델은 그대로 남고,
+            # 런타임에서 OpenRouter(Hermes) 분기로 새어 '설정한 봇 ≠ 실제 동작 봇'이 되었다.
+            return owner == "opencode"
         if eng == "agy":
             # AGY CLI 는 네이티브 모델(Gemini/Claude/GPT-OSS)만 지원한다.
             return owner == "agy" or m_low in ("gpt-oss", "opus", "sonnet")
@@ -907,6 +1079,12 @@ class GlobalModelManager:
             if m_low.startswith(("opencode-go/", "opencode/")):
                 return False
             return "/" in m or owner in ("hermes",)
+        if eng in ("cmdc", "commandcode"):
+            if m_low.startswith(("opencode-go/", "opencode/")):
+                return False
+            if owner == "agy":
+                return False
+            return True
         # codex/copilot/claude 등은 각 어댑터가 자체 필터링하므로 강제하지 않는다.
         return True
 
@@ -916,6 +1094,8 @@ class GlobalModelManager:
         eng = (engine or "agy").lower().strip()
         if eng in ("openrouter", "nous"):
             eng = "hermes"
+        elif eng in ("cmdc", "commandcode", "command-code", "command_code", "command"):
+            eng = "cmdc"
         try:
             presets = get_engine_models(eng)
         except Exception:
@@ -937,6 +1117,8 @@ class GlobalModelManager:
         engine = engine.lower().strip()
         if engine in ("openrouter", "hermes", "nous", "hermes-agent", "hermes_agent"):
             engine = "hermes"
+        elif engine in ("cmdc", "commandcode", "command-code", "command_code", "command"):
+            engine = "cmdc"
         if role in cls._roles:
             cls._roles[role]["engine"] = engine
             curr_model = cls._roles[role].get("model", "")
@@ -965,6 +1147,21 @@ class GlobalModelManager:
         eng = (engine or "agy").lower().strip()
         if eng in ("openrouter", "nous"):
             eng = "hermes"
+
+        # 0. [🚫 Deprecated AGY Guard] Gemini 2.5/2.0/1.5 는 Antigravity CLI 미지원 모델이다.
+        #    어떤 프리셋 조회보다 먼저 지원 3.x 모델로 승격하여, 'gemini 2.5 flash' 가
+        #    저장/디스패치되는 경로를 원천 차단한다. (이미지 모델·외부 slug 는 제외)
+        try:
+            from model_registry import AntigravityModelRegistry
+            upgraded = AntigravityModelRegistry.migrate_if_deprecated(inp)
+            if upgraded:
+                logger.info(
+                    f"[DeprecatedModel] '{inp}' → '{upgraded}' "
+                    f"(Antigravity CLI 미지원 모델 자동 승격)"
+                )
+                return upgraded
+        except Exception as e:
+            logger.debug(f"[DeprecatedModel] migration skipped: {e}")
 
         # 1. Exact preset lookup across all engines first
         for check_eng in ("agy", "hermes", "codex", "copilot", "claude", "opencode"):
@@ -995,6 +1192,13 @@ class GlobalModelManager:
     def _resolve_alias_for_engine(cls, eng: str, inp_lower: str) -> Optional[str]:
         """엔진별 퍼지 별칭 해석 규칙 (순수 함수)."""
         if eng == "agy":
+            try:
+                from model_registry import migrate_deprecated_model
+                _migrated = migrate_deprecated_model(inp_lower)
+                if _migrated:
+                    return _migrated
+            except Exception:
+                pass
             if any(k in inp_lower for k in ("gpt-oss", "gpt oss", "oss-120b", "oss 120b", "gptoss")):
                 return "gpt-oss-120b-medium"
             if "3.8" in inp_lower and "tiered" in inp_lower:
@@ -1259,11 +1463,11 @@ class GlobalModelManager:
             cmd_cfg = cls._roles.get("commander", {})
             config.COMMANDER_MODEL = cmd_cfg.get("model", getattr(config, "COMMANDER_MODEL", "gemini-3.7-flash-medium"))
 
-            # Consultant
-            cons_cfg = cls._roles.get("consultant", {})
-            config.CONSULTANT_MODEL = cons_cfg.get("model", getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra"))
-            cons_eng = cons_cfg.get("engine", "hermes")
-            config.CONSULTANT_ENGINE = "hermes" if cons_eng in ("openrouter", "hermes") else cons_eng
+            # Image generator (Nano Banana 이미지 생성 도구)
+            image_cfg = cls._roles.get("image", {})
+            config.IMAGE_MODEL = image_cfg.get("model", getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high"))
+            image_eng = image_cfg.get("engine", "agy")
+            config.IMAGE_ENGINE = "agy" if image_eng in ("agy", "antigravity") else image_eng
 
             # Extended QAs
             qa2_cfg = cls._roles.get("qa2", {})
@@ -1314,7 +1518,7 @@ class GlobalModelManager:
             logger.error(f"Failed to sync .env file: {e}")
 
     @classmethod
-    def build_dashboard_embed(cls, selected_role: str = "qa2") -> discord.Embed:
+    def build_dashboard_embed(cls, selected_role: str = "auditor") -> discord.Embed:
         """Builds a rich, visual overview Embed of all roles and active model statuses."""
         if not cls._initialized:
             cls.initialize()
@@ -1333,7 +1537,7 @@ class GlobalModelManager:
 
         # 1. Core Agents - compact single-line format
         core_lines = []
-        for rk in ("coder", "auditor", "consultant", "commander"):
+        for rk in ("coder", "auditor", "image", "commander"):
             cfg = cls._roles.get(rk, {})
             icon = cfg.get("icon", "🤖")
             name = cfg.get("name", rk)
@@ -1385,11 +1589,36 @@ class GlobalModelManager:
         curr_mod = curr.get("model", "unknown")
         curr_p_info = cls.get_role_persona_info(selected_role)
 
+        # 🎨 Image generator 역할이면 '실제로 어떤 이미지 모델/백엔드로 생성되는지'를 표시한다.
+        #    (agy 라벨 → 실제 Nano Banana ID 해석 결과를 사용자가 바로 볼 수 있게 함)
+        img_note = ""
+        if (selected_role or "").lower().strip() == "image":
+            try:
+                from image_creator_hub import ImageCreatorHub
+                _hint = ImageCreatorHub.resolve_backend_model_hint(raw_curr_eng, curr_mod)
+                if _hint:
+                    img_note = f"\n**실제 생성 모델** `{_hint}` (Nano Banana 계열)"
+                try:
+                    from image_generation_backend import ImageGenerationBackend
+                    _bdesc = ImageGenerationBackend.describe_backends()
+                    if _bdesc:
+                        img_note += f"\n**가용 백엔드** {_bdesc}"
+                except Exception:
+                    pass
+            except Exception:
+                img_note = ""
+
+        # [🔄 자동화] 현재 선택된 엔진의 실시간 카탈로그 상태 표시.
+        #   (메뉴얼 없이 자동 갱신되는지/얼마나 최신인지 사용자가 즉시 확인 가능)
+        cat_note = cls._build_catalog_status_note(raw_curr_eng)
+
         embed.add_field(
             name=f"🎯 선택: {curr_icon} {curr_name}",
             value=(
                 f"**상태** {curr_status} · **엔진** `{curr_eng}` · **모델** `{curr_mod}`\n"
-                f"**역할** {curr_p_info.get('icon', '💼')} {curr_p_info.get('name', '기본값')}\n\n"
+                f"**역할** {curr_p_info.get('icon', '💼')} {curr_p_info.get('name', '기본값')}\n"
+                f"{cat_note}\n"
+                f"{img_note}\n"
                 f"💡 아래 드롭다운과 버튼으로 변경하세요."
             ),
             inline=False
@@ -1397,6 +1626,34 @@ class GlobalModelManager:
 
         embed.set_footer(text="Global Model Manager · 변경 즉시 반영")
         return embed
+
+    @classmethod
+    def _build_catalog_status_note(cls, engine: str) -> str:
+        """실시간 모델 카탈로그 상태 한 줄 요약 (대시보드 표시용)."""
+        try:
+            from live_model_catalog import LiveModelCatalog
+            st = LiveModelCatalog.get_status(engine)
+        except Exception:
+            return ""
+        if st.get("live"):
+            icon = "🟢"
+        elif st.get("refreshing"):
+            icon = "🔄"
+        else:
+            icon = "🟡"
+        count = st.get("count", 0)
+        age = st.get("age_sec")
+        if age is None:
+            age_txt = "조회 중" if st.get("refreshing") else "-"
+        elif age < 60:
+            age_txt = "방금"
+        else:
+            age_txt = f"{age // 60}분 전"
+        new_badge = f" · 🆕신규 {st['new_count']}" if st.get("new_count") else ""
+        return (
+            f"{icon} **모델 카탈로그** {count}개{new_badge} · {st.get('source')} · "
+            f"{age_txt} · 자동갱신"
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -1471,6 +1728,216 @@ class CustomModelModal(Modal):
                 pass
 
 
+class ModelSearchModal(Modal):
+    """
+    [🔄 자동화] 실시간 카탈로그에서 모델을 검색해 고르는 모달.
+
+    자동화 이후 OpenRouter(OpenCode Zen) 카탈로그는 수백 개로 늘어났고,
+    Discord Select 는 옵션을 최대 25개까지만 담을 수 있어 드롭다운으로는
+    '전체 목록'을 다 담을 수 없습니다. 이 모달이 그 나머지를 커버합니다.
+    """
+
+    def __init__(self, selected_role: str, parent_view: 'ModelDashboardView'):
+        super().__init__(title="🔍 모델 검색 (전체 실시간 카탈로그)")
+        self.selected_role = selected_role
+        self.parent_view = parent_view
+        self.query = TextInput(
+            label="검색어 (비우면 전체 목록)",
+            placeholder="예: claude, deepseek, kimi, :free, gpt-5",
+            required=False,
+            max_length=80,
+        )
+        self.add_item(self.query)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # [🔄 자동화] 검색어를 비우면 "전체 카탈로그 브라우징" 으로 동작한다.
+        #   (자동화 이후 OpenRouter 는 수백 개가 되어 '뭘 치지 않아도 목록을 보고 싶다'
+        #    는 요구가 자연스럽다. 빈 문자열은 전체 일치로 처리한다.)
+        q = (self.query.value or "").strip().lower()
+        role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+        eng = role_cfg.get("engine", "agy")
+        if eng in ("openrouter", "nous"):
+            eng = "hermes"
+
+        is_image = (self.selected_role or "").lower().strip() == "image"
+        if is_image:
+            catalog = list(IMAGE_MODEL_PRESETS)
+        else:
+            catalog = get_engine_models(eng)
+
+        # 점수 기반 매칭: 전체(빈 검색어) > 정확히 일치 > 접두사 > 부분일치 > 라벨일치
+        scored = []
+        for idx, (mid, label) in enumerate(catalog):
+            m_l, l_l = mid.lower(), (label or "").lower()
+            if not q:
+                score = -1  # 전체 브라우징 모드: curated 순서를 그대로 유지
+            elif m_l == q or l_l == q:
+                score = 0
+            elif m_l.startswith(q):
+                score = 1
+            elif q in m_l:
+                score = 2
+            elif q in l_l:
+                score = 3
+            else:
+                continue
+            scored.append((score, idx, mid, label))
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        scored = [(s, m, l) for s, _, m, l in scored]
+
+        if not scored:
+            msg = f"🔍 `{q}` 에 해당하는 모델이 없습니다. (카탈로그 {len(catalog)}개 중)"
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(msg, ephemeral=True)
+                else:
+                    await interaction.followup.send(msg, ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        ordered = [(m, l) for _, m, l in scored]
+        view = ModelSearchResultView(self.selected_role, eng, q, ordered, len(scored))
+        msg = (
+            f"🔍 `{q}` 검색 결과 **{len(scored)}개** / 카탈로그 {len(catalog)}개"
+            + (f" — `{eng.upper()}` 실시간 목록" if not is_image else " — 이미지 모델")
+        )
+        sent = None
+        try:
+            if not interaction.response.is_done():
+                sent = await interaction.response.send_message(msg, view=view, ephemeral=True)
+            else:
+                sent = await interaction.followup.send(msg, view=view, ephemeral=True)
+        except Exception as e:
+            logger.debug(f"ModelSearchModal send failed: {e}")
+        if sent is not None:
+            view.message = sent
+
+
+class ModelSearchResultSelect(Select):
+    """검색 결과 중 실제 모델을 고르는 Select."""
+
+    def __init__(self, selected_role: str, engine: str, results: List[Tuple[str, str]]):
+        options = [
+            discord.SelectOption(label=mid[:100], value=mid, description=(label or "")[:100])
+            for mid, label in results[:25]
+        ]
+        super().__init__(
+            placeholder="✅ 검색 결과에서 모델 선택...",
+            min_values=1, max_values=1, options=options, row=0
+        )
+        self.selected_role = selected_role
+        self.engine = engine
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        new_model = self.values[0]
+        GlobalModelManager.set_role_model(self.selected_role, new_model)
+        try:
+            await interaction.followup.send(
+                f"✅ **[{self.selected_role.upper()}]** 모델이 `{new_model}`(으)로 변경되었습니다!",
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+
+
+class ModelSearchResultView(View):
+    """
+    검색 결과 Select 를 담는 ephemeral 뷰.
+
+    [🔄 자동화] 결과가 25개를 넘으면 페이지를 넘겨볼 수 있게 한다.
+    (Discord Select 옵션 하드캡이 25개라, OpenRouter 카탈로그처럼 수백 개가 있는
+     엔진은 한 화면에 담을 수 없다.)
+    """
+
+    PAGE_SIZE = 25
+
+    def __init__(
+        self,
+        selected_role: str,
+        engine: str,
+        query: str,
+        results: List[Tuple[str, str]],
+        total: int,
+    ):
+        super().__init__(timeout=180)
+        self.selected_role = selected_role
+        self.engine = engine
+        self.query = query
+        self.total = total
+        self.results = list(results)
+        self.page = 0
+        self.message = None
+        self._render()
+
+    # -- paging ----------------------------------------------------------
+    @property
+    def page_count(self) -> int:
+        return max(1, (len(self.results) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+
+    def _render(self) -> None:
+        self.clear_items()
+        if self.results:
+            start = self.page * self.PAGE_SIZE
+            self.add_item(
+                ModelSearchResultSelect(
+                    self.selected_role, self.engine, self.results[start:start + self.PAGE_SIZE]
+                )
+            )
+        if self.page_count > 1:
+            prev_btn = Button(
+                label="⬅️ 이전", style=discord.ButtonStyle.secondary, row=1,
+                disabled=(self.page <= 0), custom_id="model_page_prev",
+            )
+            prev_btn.callback = self._page_callback
+            self.add_item(prev_btn)
+
+            page_btn = Button(
+                label=f"{self.page + 1}/{self.page_count}", style=discord.ButtonStyle.primary, row=1,
+                disabled=True, custom_id="model_page_indicator",
+            )
+            self.add_item(page_btn)
+
+            next_btn = Button(
+                label="다음 ➡️", style=discord.ButtonStyle.secondary, row=1,
+                disabled=(self.page >= self.page_count - 1), custom_id="model_page_next",
+            )
+            next_btn.callback = self._page_callback
+            self.add_item(next_btn)
+
+    async def _page_callback(self, interaction: discord.Interaction):
+        data = getattr(interaction, "data", None) or {}
+        custom_id = data.get("custom_id", "")
+        if getattr(interaction, "message", None) is not None:
+            self.message = interaction.message
+        if custom_id.startswith("model_page_next"):
+            self.page = min(self.page + 1, self.page_count - 1)
+        elif custom_id.startswith("model_page_prev"):
+            self.page = max(self.page - 1, 0)
+        else:
+            return
+        self._render()
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            pass
+
+    async def on_timeout(self):
+        try:
+            for child in self.children:
+                if hasattr(child, "disable"):
+                    child.disable()
+            if self.message:
+                await self.message.edit(view=None)
+        except Exception:
+            pass
+
+
 class RoleSelectDropdown(Select):
     """Dropdown for choosing which agent/role to configure."""
     def __init__(self, selected_role: str):
@@ -1521,6 +1988,8 @@ class EngineSelectDropdown(Select):
         curr_engine = role_cfg.get("engine", "agy").lower()
         if curr_engine in ("openrouter", "hermes"):
             curr_engine = "hermes"
+        elif curr_engine in ("cmdc", "commandcode", "command-code", "command_code", "command"):
+            curr_engine = "cmdc"
 
         options = []
         canonical_engines = [
@@ -1530,6 +1999,7 @@ class EngineSelectDropdown(Select):
             ("copilot", ENGINE_PRESETS["copilot"]),
             ("claude", ENGINE_PRESETS["claude"]),
             ("opencode", ENGINE_PRESETS["opencode"]),
+            ("cmdc", ENGINE_PRESETS["cmdc"]),
         ]
         for eng_id, info in canonical_engines:
             desc = "OpenRouter API = Hermes Agent (통합 라우터)" if eng_id == "hermes" else f"라우터: {eng_id.upper()}"
@@ -1568,6 +2038,44 @@ class EngineSelectDropdown(Select):
         
         GlobalModelManager.set_role_engine(view.selected_role, new_engine)
 
+        # [🔄 자동화] 방금 고른 엔진의 실시간 카탈로그를 **지금** 불러온다.
+        #   (예: OpenCode 선택 → `opencode models` CLI + Zen Go API 결과를 자동으로 가져와
+        #    바로 아래 모델 드롭다운에 최신 목록이 채워진다. 수동 갱신 불필요)
+        #   백그라운드 예열만 두면 드롭다운이 curated 목록으로 렌더링된 채 굳어
+        #   "자동으로 안 바뀌네"가 되므로, 이 한 번의 명시적 선택은 동기 대기를 허용한다.
+        status_line = ""
+        try:
+            import asyncio
+            from live_model_catalog import LiveModelCatalog
+            loaded_models = await asyncio.wait_for(
+                asyncio.to_thread(LiveModelCatalog.get_models_blocking, new_engine, True),
+                timeout=30.0,
+            )
+            st = LiveModelCatalog.get_status(new_engine)
+            icon = "🟢" if st.get("live") else ("🔄" if st.get("refreshing") else "🟡")
+            status_line = (
+                f"{icon} **{new_engine.upper()}** 실시간 카탈로그 **{len(loaded_models)}개** 자동 로드"
+                f" (출처: {st.get('source')})"
+            )
+            if st.get("new_count"):
+                newest = [m for m, _ in st.get("newest", [])[:5]]
+                status_line += (
+                    f"\n🆕 **신규 {st['new_count']}개** 자동 반영: "
+                    + ", ".join(f"`{m}`" for m in newest)
+                )
+        except Exception as e:
+            name = type(e).__name__
+            if name == "TimeoutError":
+                status_line = f"⏳ **{new_engine.upper()}** 카탈로그 조회가 30초를 넘어 백그라운드에서 계속합니다."
+                try:
+                    from live_model_catalog import LiveModelCatalog
+                    LiveModelCatalog.warmup([new_engine])
+                except Exception:
+                    pass
+            else:
+                logger.debug(f"[AutoCatalog] live fetch on engine switch failed: {e}")
+                status_line = f"⚠️ **{new_engine.upper()}** 카탈로그 조회 실패: {e}"
+
         # Set default model of new engine if current model doesn't belong to it
         presets = get_engine_models(new_engine)
         if presets:
@@ -1579,45 +2087,118 @@ class EngineSelectDropdown(Select):
         view.update_components()
         embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
         await _safe_edit_view(interaction, embed, view)
+        if status_line:
+            try:
+                await interaction.followup.send(status_line, ephemeral=True)
+            except Exception:
+                pass
 
 
 class ModelPresetDropdown(Select):
-    """Dropdown for choosing preset models for the selected engine."""
+    """
+    Dropdown for choosing a model for the selected engine.
+
+    [🔄 자동화] The visible window is deliberately **not** "the first N of the
+    catalog". Discord hard-caps a Select at 25 options and a live catalog is
+    ordered `curated → newly discovered`, so a naive `[:24]` slice made every
+    brand-new upstream model permanently invisible — the precise regression this
+    automation removes (OpenCode reports 38 live models against 35 curated ones,
+    so all 9 new ones used to fall off the end of the list).
+
+    Window assembly:
+        1. newly-discovered live models (🆕)  ← what the user was missing
+        2. curated models in their hand-tuned order
+        3. the active model is always pinned in, never scrolled out of reach
+    Anything past the cap stays reachable through the `🔍 검색` button / the
+    in-list `🔍 전체 …개 모델 검색` entry.
+    """
+
+    MAX_OPTIONS = 25  # Discord Select hard limit
+
     def __init__(self, selected_role: str):
         role_cfg = GlobalModelManager.get_role_config(selected_role)
         curr_engine = role_cfg.get("engine", "agy").lower()
         if curr_engine in ("openrouter", "hermes"):
             curr_engine = "hermes"
         curr_model = role_cfg.get("model", "")
+        is_image_role = (selected_role or "").lower().strip() == "image"
 
-        preset_data = get_engine_models(curr_engine)
-        options = []
-        found_current = False
-        for mid, label in preset_data[:24]:
-            is_def = (mid == curr_model)
-            if is_def:
-                found_current = True
+        # 🎨 Image generator 역할은 일반 채팅 모델이 아니라 실제 이미지 생성 모델을 고른다.
+        if is_image_role:
+            preset_data = list(IMAGE_MODEL_PRESETS)
+            new_ids: set = set()
+        else:
+            preset_data = get_engine_models(curr_engine)
+            try:
+                from live_model_catalog import LiveModelCatalog
+                new_ids = {mid for mid, _ in LiveModelCatalog.get_new_models(curr_engine)}
+            except Exception as e:
+                logger.debug(f"[AutoCatalog] new-model lookup failed: {e}")
+                new_ids = set()
+
+        # ---- 1. 노출 순서 결정 (신규 우선 → curated 순 → 현재 모델 고정) ----
+        label_map = {mid: lbl for mid, lbl in preset_data}
+        # (a) 자동 발견된 신규 모델을 최우선 노출
+        ordered: List[Tuple[str, str]] = [(m, l) for m, l in preset_data if m in new_ids]
+        # (b) 나머지는 curated(수동 튜닝) 순서를 그대로 유지
+        ordered += [(m, l) for m, l in preset_data if m not in new_ids]
+        # (c) 현재 사용 중인 모델은 신규 모델이 많아 밀려나도 **반드시** 맨 앞에 고정한다.
+        #     사용자가 지금 무엇을 돌리고 있는지 드롭다운에서 즉시 확인·유지할 수 있어야 하고,
+        #     카탈로그에 아직 없는 커스텀 모델이면 '직접 입력' 으로 표기한다.
+        if curr_model:
+            pinned_label = label_map.get(curr_model, "직접 입력된 커스텀 모델")
+            ordered = [(curr_model, pinned_label)] + [(m, l) for m, l in ordered if m != curr_model]
+
+        # ---- 2. 검색 진입점 포함 여부를 먼저 결정해 슬롯을 정확히 확보한다 ----
+        #  카탈로그가 25개를 넘으면 나머지 모델은 '검색' 으로만 도달할 수 있으므로
+        #  마지막 1칸은 반드시 검색 항목으로 예약한다 (그림처럼 넘기면 접근 불가).
+        need_search = len(ordered) > self.MAX_OPTIONS - 1
+        model_slots = self.MAX_OPTIONS - 1 if need_search else self.MAX_OPTIONS
+
+        options: List[discord.SelectOption] = []
+        seen: set = set()
+        for mid, label in ordered:
+            if mid in seen:
+                continue
+            if len(options) >= model_slots:
+                break
+            seen.add(mid)
+            marker = "🆕 신규 · " if mid in new_ids else ""
+            is_default = (mid == curr_model)
+            if is_default and mid not in label_map:
+                opt_label = f"{mid[:75]} (현재 사용자 지정)"
+            else:
+                opt_label = mid[:100]
             options.append(
                 discord.SelectOption(
-                    label=f"{mid[:100]}",
+                    label=opt_label,
                     value=mid,
-                    description=label[:100],
-                    default=is_def
+                    description=f"{marker}{label}"[:100],
+                    default=is_default,
                 )
             )
 
-        # If current model is custom and not in presets, add it at the top
-        if curr_model and not found_current:
-            options.insert(0, discord.SelectOption(
-                label=f"{curr_model[:75]} (현재 사용자 지정)",
-                value=curr_model,
-                description="직접 입력된 커스텀 모델",
-                default=True
-            ))
+        # ---- 3. 검색 진입점 ----
+        if need_search:
+            options.append(
+                discord.SelectOption(
+                    label=f"🔍 전체 {len(preset_data)}개 모델 검색...",
+                    value="__search__",
+                    description="키워드로 전체 실시간 카탈로그 검색 모달 열기",
+                    emoji="🔍",
+                )
+            )
 
         disp_eng = "HERMES (OpenRouter)" if curr_engine == "hermes" else curr_engine.upper()
+        new_badge = f" · 🆕신규 {len(new_ids)}" if new_ids else ""
+        if not options:
+            options = [discord.SelectOption(
+                label="🔄 카탈로그 조회 중…",
+                value="__none__",
+                description="잠시 후 🔄 새로고침 을 눌러주세요",
+            )]
         super().__init__(
-            placeholder=f"📦 [{disp_eng}] 모델 프리셋 선택 (클릭)...",
+            placeholder=f"📦 [{disp_eng}] 전체 {len(preset_data)}개{new_badge} · {len(options)}개 표시",
             min_values=1,
             max_values=1,
             options=options[:25],
@@ -1625,14 +2206,24 @@ class ModelPresetDropdown(Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        view: ModelDashboardView = self.view
+        chosen = self.values[0]
+        if chosen == "__search__":
+            try:
+                await interaction.response.send_modal(
+                    ModelSearchModal(view.selected_role, view)
+                )
+            except Exception as e:
+                logger.debug(f"Search modal from preset dropdown failed: {e}")
+            return
+
         try:
             if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
                 if not interaction.response.is_done():
                     await interaction.response.defer()
         except Exception:
             pass
-        view: ModelDashboardView = self.view
-        new_model = self.values[0]
+        new_model = chosen
         GlobalModelManager.set_role_model(view.selected_role, new_model)
         view.update_components()
         embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
@@ -1681,7 +2272,7 @@ class ModelDashboardView(View):
     """
     Main Interactive View for the !model command.
     """
-    def __init__(self, selected_role: str = "qa2", user_id: Optional[int] = None):
+    def __init__(self, selected_role: str = "auditor", user_id: Optional[int] = None):
         super().__init__(timeout=600)
         self.selected_role = selected_role
         self.user_id = user_id
@@ -1697,7 +2288,7 @@ class ModelDashboardView(View):
         # Row 0: Role Select Dropdown (에이전트 선택)
         self.add_item(RoleSelectDropdown(self.selected_role))
 
-        # Row 1: Action Buttons (최대 5개 버튼)
+        # Row 1: Action Buttons (최대 5개 버튼 - 총 width 5 엄수)
         # Button 1: Toggle ON/OFF
         btn_toggle = Button(
             label="🔴 비활성화" if is_enabled else "🟢 활성화",
@@ -1708,26 +2299,35 @@ class ModelDashboardView(View):
         btn_toggle.callback = self._toggle_callback
         self.add_item(btn_toggle)
 
-        # Button 2: Direct Model Input Modal
-        btn_modal = Button(
-            label="✏️ 모델 직접 입력",
+        # Button 2: Search Modal Button
+        total_models = 0
+        try:
+            role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+            eng_for_count = role_cfg.get("engine", "agy")
+            if (self.selected_role or "").lower().strip() == "image":
+                total_models = len(IMAGE_MODEL_PRESETS)
+            else:
+                total_models = len(get_engine_models(eng_for_count))
+        except Exception:
+            total_models = 0
+        btn_search = Button(
+            label=f"🔍 검색({total_models})" if total_models else "🔍 모델 검색",
             style=discord.ButtonStyle.primary,
+            row=1,
+            custom_id="btn_model_search"
+        )
+        btn_search.callback = self._search_callback
+        self.add_item(btn_search)
+
+        # Button 3: Direct Model Input Modal
+        btn_modal = Button(
+            label="✏️ 직접 입력",
+            style=discord.ButtonStyle.secondary,
             row=1,
             custom_id="btn_model_modal"
         )
         btn_modal.callback = self._modal_callback
         self.add_item(btn_modal)
-
-        # Button 3: QA Mode Toggle (⚡ qa 전체 ON <-> 🛡️ qa1만 ON)
-        all_qa_active = all(GlobalModelManager.is_qa_enabled(i) for i in range(1, 7))
-        btn_qa_mode = Button(
-            label="🛡️ qa1만 ON" if all_qa_active else "⚡ qa 전체 ON",
-            style=discord.ButtonStyle.secondary,
-            row=1,
-            custom_id="btn_model_all_qa"
-        )
-        btn_qa_mode.callback = self._fast_qa_callback if all_qa_active else self._all_qa_callback
-        self.add_item(btn_qa_mode)
 
         # Button 4: Refresh Button
         btn_refresh = Button(
@@ -1739,17 +2339,30 @@ class ModelDashboardView(View):
         btn_refresh.callback = self._refresh_callback
         self.add_item(btn_refresh)
 
-        # Button 5: Close Button
-        btn_close = Button(
-            label="❌ 닫기",
-            style=discord.ButtonStyle.secondary,
-            row=1,
-            custom_id="btn_model_close"
-        )
-        btn_close.callback = self._close_callback
-        self.add_item(btn_close)
+        # Button 5: Role-dependent button (최대 5개 제한 맞춤)
+        # QA 역할 선택 시: QA 파이프라인 일괄 토글 (⚡ qa 전체 ON <-> 🛡️ qa1만 ON)
+        # 그 외 역할(auditor, coder, commander, image) 선택 시: 창 닫기 버튼
+        if (self.selected_role or "").lower().strip().startswith("qa"):
+            all_qa_active = all(GlobalModelManager.is_qa_enabled(i) for i in range(1, 7))
+            btn_qa_mode = Button(
+                label="🛡️ qa1만 ON" if all_qa_active else "⚡ qa 전체 ON",
+                style=discord.ButtonStyle.secondary,
+                row=1,
+                custom_id="btn_model_all_qa"
+            )
+            btn_qa_mode.callback = self._fast_qa_callback if all_qa_active else self._all_qa_callback
+            self.add_item(btn_qa_mode)
+        else:
+            btn_close = Button(
+                label="❌ 닫기",
+                style=discord.ButtonStyle.secondary,
+                row=1,
+                custom_id="btn_model_close"
+            )
+            btn_close.callback = self._close_callback
+            self.add_item(btn_close)
 
-        # Row 2: Engine Select Dropdown (엔진/라우터 선택)
+        # Row 2: Engine Select Dropdown (엔진/라우터 선택) -> width 5 전용 Row
         self.add_item(EngineSelectDropdown(self.selected_role))
 
         # Row 3: Model Preset Dropdown (모델 프리셋 선택)
@@ -1758,6 +2371,15 @@ class ModelDashboardView(View):
         # Row 4: Persona Select Dropdown (직업/전문 역할 선택)
         self.add_item(PersonaSelectDropdown(self.selected_role))
 
+    async def _search_callback(self, interaction: discord.Interaction):
+        """[🔄 자동화] 전체 실시간 카탈로그에서 모델 검색 모달을 연다."""
+        try:
+            await interaction.response.send_modal(
+                ModelSearchModal(self.selected_role, self), ephemeral=True
+            )
+        except Exception as e:
+            logger.debug(f"_search_callback failed: {e}")
+
     async def _refresh_callback(self, interaction: discord.Interaction):
         try:
             if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
@@ -1765,12 +2387,35 @@ class ModelDashboardView(View):
                     await interaction.response.defer()
         except Exception:
             pass
+        # [🔄 자동화] 실시간 모델 카탈로그를 강제 재조회한 뒤 런타임 설정을 동기화한다.
+        #   (이전에는 config 만 동기화해서 '새로고침' 버튼이 모델 목록을 갱신하지 못했다)
+        status_line = ""
+        try:
+            import asyncio
+            from live_model_catalog import LiveModelCatalog
+            role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+            eng = role_cfg.get("engine", "agy")
+            # 사용자가 결과를 기다리는 명시적 조화이므로 동기 조회를 허용한다.
+            models = await asyncio.to_thread(LiveModelCatalog.get_models_blocking, eng, True)
+            st = LiveModelCatalog.get_status(eng)
+            icon = "🟢" if st.get("live") else "🟡"
+            status_line = (
+                f"{icon} **{eng.upper()}** 카탈로그 갱신: **{st.get('count')}개** "
+                f"(출처: {st.get('source')})"
+            )
+        except Exception as e:
+            logger.debug(f"Catalog refresh failed: {e}")
+            status_line = f"⚠️ 카탈로그 갱신 실패: {e}"
         GlobalModelManager.sync_to_runtime_config()
         self.update_components()
         embed = GlobalModelManager.build_dashboard_embed(self.selected_role)
         await _safe_edit_view(interaction, embed, self)
         try:
-            await interaction.followup.send("🔄 **최신 모델 및 환경 설정이 새로고침되었습니다.**", ephemeral=True)
+            await interaction.followup.send(
+                f"🔄 **최신 모델 및 환경 설정이 새로고침되었습니다.**\n{status_line}" if status_line
+                else "🔄 **최신 모델 및 환경 설정이 새로고침되었습니다.**",
+                ephemeral=True,
+            )
         except Exception:
             pass
 
@@ -1787,7 +2432,7 @@ class ModelDashboardView(View):
             f"**QA_MODEL**=`{roles.get('qa1', {}).get('model')}` (Enabled: `{roles.get('qa1', {}).get('enabled')}`)",
             f"**AUDITOR_MODEL**=`{roles.get('auditor', {}).get('model')}`",
             f"**COMMANDER_MODEL**=`{roles.get('commander', {}).get('model')}`",
-            f"**CONSULTANT_MODEL**=`{roles.get('consultant', {}).get('model')}` (Engine: `{roles.get('consultant', {}).get('engine')}`)"
+            f"**IMAGE_MODEL**=`{roles.get('image', {}).get('model')}` (Engine: `{roles.get('image', {}).get('engine')}`)"
         ]
         for i in range(2, 7):
             q_cfg = roles.get(f"qa{i}", {})

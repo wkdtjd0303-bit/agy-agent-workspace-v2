@@ -536,14 +536,22 @@ ALLOWED_ATTACHMENT_EXTENSIONS = (
 
 EXCLUDED_DIR_NAMES = {
     ".git", ".venv", "node_modules", "__pycache__",
-    ".cache", ".local", ".npm", ".config", ".references",
-    "tests", "test"
+    ".cache", ".local", ".npm", ".config", ".references"
 }
 
 
 DELIVERABLE_PATTERNS = [
     "output/**/*.*", "build/**/*.*", "dist/**/*.*", "*.apk", "*.aab", "*.zip", "*.xlsx", "*.pdf",
-    "reports/gate5/screenshots/*.png", "assets/**/*.*", "res/drawable*/**/*.*", "images/**/*.*"
+    "reports/gate5/screenshots/*.png", "reports/gate5/screenshots/**/*.png",
+    "reports/screenshots/*.png", "reports/screenshots/**/*.png",
+    "reports/qa_screenshots/*.png", "reports/**/*.png",
+    "screenshots/*.png", "screenshots/**/*.png",
+    "tests/screenshots/*.png", "tests/screenshots/**/*.png", "tests/**/screenshots/*.png",
+    "test/screenshots/*.png", "test/screenshots/**/*.png", "test/**/screenshots/*.png",
+    "test-results/**/*.png", "playwright-report/**/*.png", ".playwright/**/*.png",
+    "app/build/reports/**/*.png", "app/build/outputs/roborazzi/*.png",
+    "assets/**/*.*", "res/drawable*/**/*.*", "images/**/*.*",
+    "*.png", "*.jpg", "*.jpeg", "*.webp"
 ]
 
 _GDRIVE_UPLOAD_CACHE: Dict[str, Tuple[float, float, Dict[str, Any]]] = {}
@@ -660,8 +668,19 @@ def extract_local_attachments(
     excluded_dhash_set = {dh for dh in excluded_dhashes if dh} if excluded_dhashes else set()
     for path_str in candidates:
         abs_p = os.path.abspath(os.path.expanduser(path_str))
-        path_segments = set(os.path.normpath(abs_p).split(os.sep))
-        if path_segments.intersection(EXCLUDED_DIR_NAMES) or path_segments.intersection({".references", "agy_user_references"}) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
+        if workspace_root and abs_p.startswith(os.path.abspath(workspace_root)):
+            rel_check_p = os.path.relpath(abs_p, workspace_root)
+            path_segments = set(os.path.normpath(rel_check_p).split(os.sep))
+        else:
+            path_segments = set(os.path.normpath(abs_p).split(os.sep))
+
+        is_image_deliverable = abs_p.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        is_screenshot_dir = any(seg.lower() == "screenshots" for seg in path_segments)
+
+        if not (is_image_deliverable or is_screenshot_dir):
+            if path_segments.intersection(EXCLUDED_DIR_NAMES):
+                continue
+        if path_segments.intersection({".references", "agy_user_references"}) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
             continue
         if os.path.isfile(abs_p):
             if session_start_time is not None:
@@ -737,8 +756,19 @@ def extract_oversized_attachments(
     excluded_dhash_set = {dh for dh in excluded_dhashes if dh} if excluded_dhashes else set()
     for path_str in candidates:
         abs_p = os.path.abspath(os.path.expanduser(path_str))
-        path_segments = set(os.path.normpath(abs_p).split(os.sep))
-        if path_segments.intersection(EXCLUDED_DIR_NAMES) or path_segments.intersection({".references", "agy_user_references"}) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
+        if workspace_root and abs_p.startswith(os.path.abspath(workspace_root)):
+            rel_check_p = os.path.relpath(abs_p, workspace_root)
+            path_segments = set(os.path.normpath(rel_check_p).split(os.sep))
+        else:
+            path_segments = set(os.path.normpath(abs_p).split(os.sep))
+
+        is_image_deliverable = abs_p.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        is_screenshot_dir = any(seg.lower() == "screenshots" for seg in path_segments)
+
+        if not (is_image_deliverable or is_screenshot_dir):
+            if path_segments.intersection(EXCLUDED_DIR_NAMES):
+                continue
+        if path_segments.intersection({".references", "agy_user_references"}) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
             continue
         if os.path.isfile(abs_p):
             try:
@@ -1133,6 +1163,50 @@ async def attach_reaction_toolbar(
         except Exception:
             break
 
+def _resolve_target_channel_id(target) -> Optional[int]:
+    """전송 대상(Context/Message/Channel 등)에서 채널 ID를 최대한 안전하게 추출한다."""
+    try:
+        ch_id = getattr(getattr(target, "channel", None), "id", None)
+        if isinstance(ch_id, int):
+            return ch_id
+    except Exception:
+        pass
+    try:
+        cid = getattr(target, "id", None)
+        if isinstance(cid, int):
+            return cid
+    except Exception:
+        pass
+    return None
+
+
+def _register_delivered_images(target, files) -> None:
+    """[🚫 이미지 재활용 원천 차단] 실제 전송한 이미지 파일 지문을 해당 채널 세션에 누적 등록한다.
+
+    등록된 이미지는 동일 세션에서 다시 첨부·전송될 수 없다(sha256 또는 지각적 dHash<=3).
+    어떤 예외도 전송 흐름을 방해하지 않는다.
+    """
+    if not files:
+        return
+    try:
+        paths = []
+        for f in files:
+            name = getattr(getattr(f, "fp", None), "name", None)
+            if name:
+                paths.append(name)
+        if not paths:
+            return
+        cid = _resolve_target_channel_id(target)
+        if cid is None:
+            return
+        from session_manager import get_existing_session
+        sess = get_existing_session(cid)
+        if sess is not None and hasattr(sess, "register_delivered_images"):
+            sess.register_delivered_images(paths)
+    except Exception:
+        pass
+
+
 async def safe_send_discord_message(
     target,
     content: str = "",
@@ -1176,6 +1250,9 @@ async def safe_send_discord_message(
                     logger.warning(f"File {f.filename} exceeds single file upload limit ({f_size/(1024*1024):.1f}MB > {DISCORD_MAX_FILE_BYTES/(1024*1024):.1f}MB). Omitting from direct attachment.")
             except Exception:
                 pass
+
+    # [🚫 이미지 재활용 원천 차단] 실제 전송되는 이미지의 지문을 세션에 등록하여 재전송을 차단한다.
+    _register_delivered_images(target, safe_files)
 
     # CRITICAL: If content exceeds 1900 chars (e.g. quote bar pushed it over limit or long text),
     # safely split into sequential chunks to guarantee NO 2000-char Discord 400 Bad Request

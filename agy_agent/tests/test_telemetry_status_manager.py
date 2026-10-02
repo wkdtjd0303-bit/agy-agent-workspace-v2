@@ -38,8 +38,16 @@ class TestTelemetryStatusManager(unittest.TestCase):
         self.sm = SessionManager(state_file=self.temp_file, clear_on_startup=False)
         self.patcher = patch("telemetry_status_manager._TELEMETRY_STATE_FILE", f"{self.temp_dir}/telemetry_state.json")
         self.patcher.start()
+        import telemetry_status_manager
+        self._orig_msg_id = telemetry_status_manager.STATUS_MESSAGE_ID
+        self._orig_hash = telemetry_status_manager._get_last_embed_hash()
+        telemetry_status_manager.STATUS_MESSAGE_ID = 12345
+        telemetry_status_manager._set_last_embed_hash("")
 
     def tearDown(self):
+        import telemetry_status_manager
+        telemetry_status_manager.STATUS_MESSAGE_ID = self._orig_msg_id
+        telemetry_status_manager._set_last_embed_hash(self._orig_hash)
         self.patcher.stop()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -54,14 +62,13 @@ class TestTelemetryStatusManager(unittest.TestCase):
         embed = build_telemetry_embed(self.sm)
         self.assertIsNotNone(embed)
         self.assertIn("Control Tower", embed.title)
-        self.assertIn(len(embed.fields), (4, 5, 6, 7))
+        # New simplified embed has 3 fields: 시스템, AI 쿼터 현황, 작업 현황
+        self.assertGreaterEqual(len(embed.fields), 3)
 
         field_names = [f.name for f in embed.fields]
-        self.assertTrue(any("채팅방별 AI 실시간 작업 관제" in name for name in field_names))
-        self.assertTrue(any("시스템 리소스" in name for name in field_names))
-        self.assertTrue(any("저장공간" in name for name in field_names))
-        self.assertTrue(any("Antigravity" in name for name in field_names))
-        self.assertTrue(any("OpenRouter" in name for name in field_names))
+        self.assertTrue(any("시스템" in name for name in field_names))
+        self.assertTrue(any("AI 쿼터 현황" in name for name in field_names))
+        self.assertTrue(any("작업 현황" in name for name in field_names))
 
     def test_build_telemetry_embed_with_busy_channel(self):
         # Mark a channel as busy
@@ -70,10 +77,9 @@ class TestTelemetryStatusManager(unittest.TestCase):
         
         embed = build_telemetry_embed(self.sm)
         self.assertIsNotNone(embed)
-        # Verify busy list reflection
-        channels_field = [f for f in embed.fields if "채팅방별 AI 실시간 작업 관제" in f.name][0]
-        self.assertIn("작업 중:", channels_field.value)
-        self.assertIn("!5_agy_agent", channels_field.value)
+        # Verify compact task summary reflects busy count
+        task_field = [f for f in embed.fields if "작업 현황" in f.name][0]
+        self.assertIn("작업 중", task_field.value)
 
     def test_update_status_message_closed_client(self):
         mock_client = MagicMock()
@@ -281,6 +287,36 @@ class TestTelemetryStatusManager(unittest.TestCase):
             self.assertEqual(telemetry_status_manager.STATUS_MESSAGE_ID, 99887766)
 
         asyncio.run(run_test())
+
+    def test_telemetry_status_view_structure(self):
+        """Verifies that TelemetryStatusView has correct button, persistent timeout, and custom_id."""
+        import telemetry_status_manager
+        view = telemetry_status_manager.TelemetryStatusView(self.sm)
+        self.assertIsNone(view.timeout)
+        self.assertEqual(len(view.children), 1)
+        btn = view.children[0]
+        self.assertEqual(btn.label, "새로고침")
+        self.assertEqual(btn.custom_id, "telemetry_status_refresh")
+        comps = view.to_components()
+        self.assertEqual(len(comps), 1)
+        self.assertEqual(comps[0]["components"][0]["custom_id"], "telemetry_status_refresh")
+
+    def test_telemetry_status_view_refresh_callback(self):
+        """Verifies that clicking the refresh button defers and updates the status message."""
+        import telemetry_status_manager
+        view = telemetry_status_manager.TelemetryStatusView(self.sm)
+        mock_interaction = AsyncMock()
+        mock_interaction.response.is_done.return_value = False
+        mock_interaction.client = MagicMock()
+
+        with patch("telemetry_status_manager.update_status_message", return_value=True) as mock_update:
+            async def run_callback():
+                await view.refresh_button.callback(mock_interaction)
+                mock_interaction.response.defer.assert_awaited_once_with()
+                mock_update.assert_awaited_once()
+                mock_interaction.followup.send.assert_not_called()
+
+            asyncio.run(run_callback())
 
 
 if __name__ == "__main__":

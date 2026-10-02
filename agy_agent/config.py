@@ -21,9 +21,10 @@ DISCORD_AGY_QA2_BOT_TOKEN = (
     or ""
 ).strip()
 DISCORD_AUDITOR_BOT_TOKEN = os.getenv("DISCORD_AUDITOR_BOT_TOKEN", "").strip()
-DISCORD_AGY_CONSULTANT_BOT_TOKEN = (
-    os.getenv("DISCORD_AGY_CONSULTANT_BOT_TOKEN")
-    or os.getenv("DISCORD_CONSULTANT_BOT_TOKEN")
+# 🎨 Image generator Bot (실제 AI 이미지 생성 도구 봇 — Nano Banana 계열 Gemini image 백엔드)
+DISCORD_AGY_IMAGE_BOT_TOKEN = (
+    os.getenv("DISCORD_AGY_IMAGE_BOT_TOKEN")
+    or os.getenv("DISCORD_IMAGE_BOT_TOKEN")
     or ""
 ).strip()
 DISCORD_SERVER_MANAGER_BOT_TOKEN = (
@@ -31,8 +32,14 @@ DISCORD_SERVER_MANAGER_BOT_TOKEN = (
     or os.getenv("DISCORD_SERVER_MANAGER_BOT_Token")
     or ""
 ).strip()
-CONSULTANT_MODEL = os.getenv("CONSULTANT_MODEL", "opencode-go/glm-5.3").strip()
-CONSULTANT_ENGINE = os.getenv("CONSULTANT_ENGINE", "opencode").strip()
+# 이미지 생성 도구 기본값.
+#  - IMAGE_MODEL: 이미지 봇의 표시/배정 모델명 (대시보드 표기용)
+#  - IMAGE_ENGINE: 'agy' = AGY CLI 보조 경로(실제 이미지 산출물 SAVED_IMAGE 보고 시에만 채택),
+#    그 외 값은 AGY 경로를 건너뛰고 실제 AI 백엔드(OpenRouter 등)만 사용.
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-3.8-flash-high").strip() or "gemini-3.8-flash-high"
+IMAGE_ENGINE = os.getenv("IMAGE_ENGINE", "agy").strip() or "agy"
+# 실제 AI 이미지 생성 백엔드 (Nano Banana = Gemini 이미지 모델 계열). OPENROUTER_API_KEY 사용.
+IMAGE_OPENROUTER_MODEL = os.getenv("IMAGE_OPENROUTER_MODEL", "google/gemini-2.5-flash-image").strip() or "google/gemini-2.5-flash-image"
 DEFAULT_WORKSPACE = os.getenv("DEFAULT_WORKSPACE", str(Path.home() / "Desktop" / "autocoding"))
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 COMMAND_PREFIXES = tuple(p.strip() for p in os.getenv("COMMAND_PREFIXES", f"{COMMAND_PREFIX},~").split(",") if p.strip())
@@ -49,6 +56,8 @@ CODEX_PATH = os.getenv("CODEX_PATH", "/home/jangsung/.npm-global/bin/codex")
 COPILOT_PATH = os.getenv("COPILOT_PATH", "/home/jangsung/.npm-global/bin/copilot")
 CLAUDE_PATH = os.getenv("CLAUDE_PATH", "claude")
 OPENCODE_PATH = os.getenv("OPENCODE_PATH", "opencode")
+CMDC_PATH = os.getenv("CMDC_PATH", os.getenv("COMMAND_CODE_PATH", "/home/jangsung/.npm-global/bin/cmdc"))
+COMMAND_CODE_API_KEY = os.getenv("COMMAND_CODE_API_KEY", "")
 # OpenCode Go 다중 API 키 (쉼표 구분, 1번 키 한도 소진 시 자동 Failover)
 OPENCODE_API_KEYS: List[str] = [
     k.strip() for k in os.getenv("OPENCODE_API_KEYS", "").split(",") if k.strip()
@@ -232,9 +241,17 @@ QA_AUTO_FALLBACK_MODEL = os.getenv("QA_AUTO_FALLBACK_MODEL", "gemini-3.7-flash-h
 AUDITOR_MODEL = os.getenv("AUDITOR_MODEL", "opencode-go/space-bunny-free")
 VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.8-flash-high")
 CLAUDE_QUOTA_THRESHOLD = float(os.getenv("CLAUDE_QUOTA_THRESHOLD", "0.05"))
-PAIR_MAX_ROUNDS = int(os.getenv("PAIR_MAX_ROUNDS", "7"))   # 과거 20 → 7: 무한 핑퐁 루프 방지 (환경변수로 조절 가능)
-QA_MAX_ROUNDS = int(os.getenv("QA_MAX_ROUNDS", "7"))      # 과거 20 → 7: QA 수렴 상한 (환경변수로 조절 가능)
-HOTFIX_MAX_ROUNDS = int(os.getenv("HOTFIX_MAX_ROUNDS", "4"))  # 핫픽스 수렴 상한 (무한 패치 루프 방지)
+# [🔁 라운드 상한 (Round Cap)] 기본 20회까지 반복 교차 검증한다.
+#  · 상한 도달 시 곧바로 스탑하지 않고 Discord 예/아니요로 "이어서 진행하시겠습니까?"를 확인한다.
+#  · 무한 핑퐁은 convergence_policy(진척 기반 조기 에스컬레이션) + 상한 도달 확인 프롬프트로 방어한다.
+PAIR_MAX_ROUNDS = int(os.getenv("PAIR_MAX_ROUNDS", "20"))       # 3중/다중 협업(!mode 2/2+/3) 라운드 상한
+QA_MAX_ROUNDS = int(os.getenv("QA_MAX_ROUNDS", "20"))           # QA 수렴 상한
+RESEARCH_MAX_ROUNDS = int(os.getenv("RESEARCH_MAX_ROUNDS", "20"))  # 3중 심층 리서치 라운드 상한
+HOTFIX_MAX_ROUNDS = int(os.getenv("HOTFIX_MAX_ROUNDS", "4"))    # 핫픽스 수렴 상한 (무한 패치 루프 방지)
+
+# [❓ 라운드 상한 도달 확인 프롬프트] "N회가 끝났습니다. 이어서 진행하시겠습니까?" (예/아니요)
+ROUND_CONTINUE_ENABLED = os.getenv("ROUND_CONTINUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+ROUND_CONTINUE_TIMEOUT_SEC = float(os.getenv("ROUND_CONTINUE_TIMEOUT_SEC", "300"))  # 무응답 시 자동 종료 대기(초)
 
 # ==============================================================================
 # [🔋 토큰 절약] 인플라이트 재시도/폴백 예산 (In-flight Retry & Fallback Budget)
@@ -268,10 +285,19 @@ QA_HUB_CHANNEL_ID = int(os.getenv("QA_HUB_CHANNEL_ID", "1539993680788586496"))
 NANO_BANANA_IMAGE_CHANNEL_ID = int(os.getenv("NANO_BANANA_IMAGE_CHANNEL_ID", "1549422783803691058"))
 FINISH_PROJECTS_CATEGORY_ID = int(os.getenv("FINISH_PROJECTS_CATEGORY_ID", "1538712322711752825"))
 AUDITOR_MENTION_USER_ID = os.getenv("AUDITOR_MENTION_USER_ID", "1257525029609017367").strip()
+# 👑 Commander(사령관) Discord ID — 봇 재생성/서버 이전 시 이 한 곳만 수정 (SSOT)
+COMMANDER_USER_ID = os.getenv("COMMANDER_USER_ID", "1539448922643234876").strip()
+COMMANDER_BOT_ID = int(os.getenv("COMMANDER_BOT_ID", "1540273467453345812"))
+COMMANDER_USER_MENTION = f"<@{COMMANDER_USER_ID}>"
+COMMANDER_BOT_MENTION = f"<@{COMMANDER_BOT_ID}>"
 AGY_HEADED = os.getenv("AGY_HEADED", "0").lower() in ("1", "true", "yes")
 WATCHDOG_TOOL_TIMEOUT = int(os.getenv("WATCHDOG_TOOL_TIMEOUT", "900"))       # 900s (15 min) for deep builds, subagents & thinking tool runs
 WATCHDOG_SILENCE_TIMEOUT = int(os.getenv("WATCHDOG_SILENCE_TIMEOUT", "1800")) # 1800s (30 min) for deep thinking models
-EXTENDED_QA_TIMEOUT = float(os.getenv("EXTENDED_QA_TIMEOUT", "600.0"))        # 600s (10 min) for extended QA reviewer models
+EXTENDED_QA_TIMEOUT = float(os.getenv("EXTENDED_QA_TIMEOUT", "4000.0"))       # 4000s (~66분, 1시간 6분 40초) 확장 QA(qa2..qa10) 응답 대기 상한 — 느린 모델의 정상 생성도 끝까지 대기
+# [🛡️ 프리징 차단] 비-AGY 엔진(opencode/hermes/codex 등) 어댑터의 '하드 상한'.
+# 어댑터 내부 타임아웃을 넘겨도 프로세스가 reap 되지 않아 채널이 영구 정지(3603초 프리징)하는 것을
+# agent_runner 가 이 값 + 90초의 asyncio.wait_for 로 강제 회수하여 원천 차단한다.
+NON_AGY_ENGINE_TIMEOUT = float(os.getenv("NON_AGY_ENGINE_TIMEOUT", "3600.0"))
 STATE_FILE_PATH = os.getenv(
     "STATE_FILE_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "channel_sessions.json")

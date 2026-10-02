@@ -172,6 +172,51 @@ class TestModeClassifierComprehensive(unittest.TestCase):
         self.assertEqual(mode, "single")
         self.assertIn("마케팅 전략", desc)
 
+    def test_classify_task_type_business_money_nouns_are_not_research(self):
+        """[회귀] 명세서·결제·정산 문맥의 '금액' 단독 명사가 리서치로 오분류되어
+        코딩 요청이 ResearchRunner(Fact Checker)로 잘못 라우팅되던 버그 방지."""
+        coding_prompts = [
+            "거래명세서 최종 합산 금액 표기 및 선불/착불 토글 기능을 추가해줘",
+            "거래처 관리 탭에 법인번호 등록 란을 만들어주면 좋겠어",
+            "결제 금액 계산 로직을 점검하고 인터페이스도 개선해줄래",
+            "명세서 합산 금액에서 상대방이 지급할 금액만 나오게 수정해봐줘",
+        ]
+        for p in coding_prompts:
+            self.assertNotEqual(classify_task_type(p), "research", f"Misclassified as research: {p}")
+
+        # 정당한 시세/가격 리서치는 여전히 research 로 판정되어야 한다 (recall 보존).
+        research_prompts = [
+            "가격만 알려줘",
+            "시세 확인해줘",
+            "다나와 최저가 비교해줘",
+        ]
+        for p in research_prompts:
+            self.assertEqual(classify_task_type(p), "research", f"Research recall lost: {p}")
+
+    def test_descriptive_recommendation_complaint_is_not_research(self):
+        """[회귀] '추천해주는 알고리즘적 오류'처럼 '추천'이 불만 서술로 쓰인 코딩 요청이
+        리서치로 오분류되어 ResearchRunner(Fact Checker)로 잘못 라우팅되던 버그 방지.
+
+        실제 사용자 로그(거래명세서·차량번호·법인번호·글씨 잘림·최적화 요청)를 축약한 프롬프트.
+        """
+        p = (
+            "거래명세서 탭에서 발행할 때 선불/착불 표기가 되도록 옵션으로 켜고 끌 수 있게 해줘 "
+            "그리고 착불 금액 옆에 표기해줘 최종 합산 금액은 상대방이 지급할 금액만 나오게 해줘 "
+            "차량번호 검색 그리고 추천값 적용하는 알고리즘이 좀 정확하지 않아. "
+            "1234라고 검색했는데 1235나 2345를 선택하도록 추천해주는 알고리즘적 오류가 있는 것 같아. "
+            "거래처 관리 탭에 법인번호 등록 란을 만들어주면 좋겠어. "
+            "중간중간 글씨가 잘리는 구간들이 있어 인터페이스도 개선해줄래? "
+            "사이트가 전반적으로 최적화가 아쉬워. 전체적으로 체크해봐줄래?"
+        )
+        self.assertNotEqual(classify_task_type(p), "research")
+        mode, desc = classify_mode(p, session_mode="pair")
+        self.assertEqual(mode, "pair")
+        self.assertNotIn("리서치", desc, "코딩 요청이 수동 고정 mode 2 에서 리서치 파이프라인으로 라우팅됨")
+
+        # 정당한 추천/리서치 요청은 여전히 research 로 판정되어야 한다 (recall 보존).
+        for rp in ["미니 PC 가성비 추천해줘", "노트북 추천 리스트 만들어줘", "카메라 추천 모델 알려줘"]:
+            self.assertEqual(classify_task_type(rp), "research", f"Research recall lost: {rp}")
+
     def test_legacy_evolve_quad_modes_eliminated(self):
         """Verify that legacy evolve and quad modes are nonexistent in classification."""
         for m in ["evolve", "quad"]:

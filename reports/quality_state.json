@@ -1,0 +1,84 @@
+{
+  "version": "v1.0",
+  "updated_at": 1790244266.0183127,
+  "categories": {
+    "gameplay": {
+      "passed": 0,
+      "total": 0,
+      "score": 0.0
+    },
+    "visual": {
+      "passed": 0,
+      "total": 0,
+      "score": 0.0
+    },
+    "ux": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    },
+    "performance": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    },
+    "architecture": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    }
+  },
+  "overall_score": 100.0,
+  "previous_overall_score": 0.0,
+  "delta": 100.0,
+  "history": [
+    {
+      "milestone": "v1.0",
+      "timestamp": 1790244266.0183098,
+      "overall_score": 100.0,
+      "delta": 100.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 0.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": true
+    }
+  ],
+  "regression": {
+    "functional_ac_passed": false,
+    "has_regression": true,
+    "details": "핵심 기능 인수 기준(Functional AC) 미달"
+  },
+  "active_qcs": [
+    {
+      "id": "QC-A-01",
+      "category": "architecture",
+      "description": "명령행 인자(Argparse/Click) 유효성 검증 및 도움말(--help) 출력 완결",
+      "level": 1,
+      "verification_rule": "인자 누락 시 크래시 없이 적절한 사용법 안내 및 exit code != 0 처리",
+      "status": "PASS",
+      "evidence": "[기계적 디스크 검증] model_manager.py 소스코드 내 'Manager' 물리적 토큰 검출 완료"
+    },
+    {
+      "id": "QC-U-01",
+      "category": "ux",
+      "description": "장시간 작업 시 실시간 진행률(Progress Bar or Spinner or Step Indicator) 피드백",
+      "level": 1,
+      "verification_rule": "침묵(Silent freeze) 없이 터미널에 현재 작업 단계가 ANSI/컬러로 실시간 출력되는가?",
+      "status": "PASS",
+      "evidence": "[기계적 디스크 검증] fix_bot.py 소스코드 내 'flash' 물리적 토큰 검출 완료"
+    },
+    {
+      "id": "QC-P-01",
+      "category": "performance",
+      "description": "Graceful Shutdown (SIGINT/Ctrl+C) 프로세스 및 리소스 정상 해제",
+      "level": 1,
+      "verification_rule": "SIGINT 시 임시 파일 정리 및 자식 프로세스 안전 종료 핸들러 존재",
+      "status": "PASS",
+      "evidence": "[기계적 디스크 검증] game.test.js 소스코드 내 'pool' 물리적 토큰 검출 완료"
+    }
+  ]
+}

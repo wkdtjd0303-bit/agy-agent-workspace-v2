@@ -31,9 +31,9 @@ class TestHermesReadOnlyQA(unittest.IsolatedAsyncioTestCase):
         except Exception:
             pass
 
-    def test_default_extended_qa_engine_is_hermes(self):
-        """Verify all OpenRouter extended QA bots default to 'hermes' without requiring user !commands."""
-        self.assertEqual(config.QA2_ENGINE, "hermes")
+    def test_default_extended_qa_engine_is_external_non_agy(self):
+        """확장 QA는 사용자 !command 없이도 비(非)-agy 외부 엔진(hermes/openrouter/opencode)으로 기본 구성되어야 한다."""
+        self.assertIn(config.QA2_ENGINE, ("hermes", "openrouter", "opencode"))
         configs = config.get_extended_qa_configs()
         self.assertTrue(len(configs) >= 5, "Should have QA2..QA6 configured")
         for cfg in configs:

@@ -629,6 +629,8 @@ class CollaborationIntelligence:
         content_lines = []
         skip_keywords = [
             "[status: rejected]", "[status: approved]", "품질 게이트 강제 반려",
+            "시스템 게이트 자동 반려", "시스템 게이트 감사 거부", "판정 주체",
+            "시스템 무결성 가디언",
             "협업 수렴 실패", "시니어 qa", "검증 결과", "안티 모킹", "quality gate",
             "필수 요구사항 누락", "ping-pong trap", "결함 보강 재작업"
         ]

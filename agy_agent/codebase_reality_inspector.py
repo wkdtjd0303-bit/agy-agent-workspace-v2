@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 👑 CodebaseRealityInspector (AGY Mode 3 / Mode 3+ Adaptive Codebase Grounding Engine)
-Designated Bot: 1540273467453345812 (Commander Bot)
+Designated Bot: Commander Bot
 
 Physically scans and inspects the project workspace on disk to ground Commander's planning
 in authentic reality rather than hypothetical waterfall assumptions:

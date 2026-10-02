@@ -353,6 +353,13 @@ class ProductRefinementGovernor:
         evidence = runtime_evidence
         if evidence is None and auto_load_evidence:
             evidence = cls.load_runtime_evidence(workspace)
+
+        # 🎞️ [Motion Smoothness] 실측 프레임 타이밍(FPS/jank)을 interaction_polish 에 병합.
+        #    '상태 전이 존재'만으로는 하드 컷(툭 끊김)을 걸러내지 못하므로, 실제 프레임
+        #    예산(평균 FPS/p95/느린 프레임)으로 '쫀득한 동작'을 증명/반증한다.
+        if evidence is not None and has_ui:
+            cls._overlay_motion_smoothness(evidence, workspace, files)
+
         runtime_verified: List[str] = []
         runtime_failed: List[str] = []
         runtime_partial: List[str] = []
@@ -885,6 +892,41 @@ class ProductRefinementGovernor:
             if area not in existing:
                 revised.append(cls._forced_runtime_gap(area, evidence.failed[area]))
         return revised, applicable, verified, failed, partial
+
+    @classmethod
+    def _overlay_motion_smoothness(
+        cls,
+        evidence: RuntimeEvidence,
+        workspace: Optional[str],
+        files: Dict[str, str],
+    ) -> None:
+        """실측 프레임 타이밍(FPS/jank)을 interaction_polish 런타임 증거로 병합한다.
+
+        '상태 전이 존재'만으로는 하드 컷(툭 끊김)을 걸러낼 수 없으므로, E2E 벤치마크가
+        남긴 프레임 예산(평균 FPS·p95·느린 프레임)으로 '쫀득한 동작'을 증명/반증한다.
+        프레임 예산을 충족하면 interaction_polish 결손을 proven 으로 해제하고, jank 가
+        측정되면 실패로 기록해 심화(DEEPEN)를 강제한다. 리포트가 없거나 표본이 부족하면
+        아무 판정도 하지 않아 기존 동작을 보존한다(fail-closed).
+        """
+        try:
+            import motion_smoothness_gate as motion_gate
+        except Exception as e:  # pragma: no cover - 게이트 모듈 부재 시 기존 동작 보존
+            logger.debug(f"[Governor] 모션 스무스니스 게이트 미적용: {e}")
+            return
+        try:
+            verdict = motion_gate.evaluate(
+                workspace, source_map=files, motion_tokens=_INTERACTION_TOKENS
+            )
+        except Exception as e:
+            logger.warning(f"[Governor] 모션 스무스니스 판정 실패 — 기존 동작 보존: {e}")
+            return
+        if not verdict.measured:
+            return
+        detail = f"실측 프레임 타이밍 {verdict.detail()}"
+        if verdict.smooth:
+            cls._mark_verified(evidence, "interaction_polish", detail, "runtime")
+        else:
+            evidence.failed.setdefault("interaction_polish", detail)
 
     @classmethod
     def _forced_runtime_gap(cls, area: str, reason: str) -> SurfaceGap:

@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, Response, JSONResponse
@@ -15,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="AGY Real-time Mobile Interactive Simulator", version="1.2.0")
 
-WORKSPACE_ROOT = "/home/jangsung/Desktop/autocoding/!1_vibecoding/parking_lot"
+WORKSPACE_ROOT = os.getenv("MOBILE_SIM_WORKSPACE", "").strip() or str(Path.home() / "Desktop" / "autocoding")
 DEV_SERVER_PORT = 5174
 DEV_SERVER_URL = f"http://127.0.0.1:{DEV_SERVER_PORT}"
 APK_PATH = os.path.join(WORKSPACE_ROOT, "ParkMemo.apk")

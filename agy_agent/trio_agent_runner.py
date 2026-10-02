@@ -5,7 +5,7 @@ import json
 import time
 import logging
 import re
-from typing import Optional, Callable, Dict, Any, Tuple
+from typing import Optional, Callable, Dict, Any, Tuple, List
 import math
 import discord
 import subprocess
@@ -21,7 +21,9 @@ from session_manager import ChannelSession
 from agent_runner import AgentRunner
 from thermal_guard import ThermalGuard
 from mode_classifier import classify_task_type, classify_risk_level, is_diagnostic_prompt
+import mode_registry
 from evidence_validator import EvidenceValidator
+from round_control import continual_round_sequence
 from discord_utils import (
     async_prepare_message_payload,
     safe_send_discord_message
@@ -40,6 +42,8 @@ from discord_screenshot_gallery import (
     count_stale_screenshots,
     send_screenshot_gallery,
 )
+from output_guard import guard_output_async, KOREAN_OUTPUT_PROMPT_SUFFIX, CODER_REPAIR_NOTE
+import role_authority
 
 logger = logging.getLogger("TrioAgentRunner")
 
@@ -158,12 +162,12 @@ class QuotaManager:
             ordered += [c for c in fallback_candidates if c not in ordered]
             for candidate in ordered:
                 if candidate and not cls.is_model_exhausted(candidate):
-                    display = preferred_display if candidate == preferred_fallback else f"{candidate} (Backup QA)"
+                    display = preferred_display if candidate == preferred_fallback else f"{GlobalModelManager.format_model_name(candidate)} (Backup QA)"
                     return candidate, display
             logger.warning(
                 f"[QA Fallback] '{base_model}' 소진 → 사용 가능한 백업 QA 후보 없음. 원본 모델을 유지합니다."
             )
-            return base_model, f"{base_model} (원본 유지)"
+            return base_model, f"{GlobalModelManager.format_model_name(base_model)} (원본 유지)"
 
         if fallback_candidates:
             chosen = fallback_candidates[0]
@@ -171,13 +175,13 @@ class QuotaManager:
                 f"[QA Fallback] 비-Gemini QA 모델 '{base_model}' 소진 → 동일 계열 '{chosen}' 로 전환 "
                 f"(Gemini 한도 보호)."
             )
-            return chosen, f"{chosen} (Backup QA)"
+            return chosen, f"{GlobalModelManager.format_model_name(chosen)} (Backup QA)"
 
         logger.warning(
             f"[QA Fallback] 비-Gemini QA 모델 '{base_model}' 소진 → Gemini 우회 없이 원본 모델을 유지합니다. "
             f"(해제: AGY_ALLOW_GEMINI_FALLBACK=1)"
         )
-        return base_model, f"{base_model} (원본 유지)"
+        return base_model, f"{GlobalModelManager.format_model_name(base_model)} (원본 유지)"
 
     @classmethod
     async def resolve_qa_model(
@@ -188,8 +192,9 @@ class QuotaManager:
     ) -> Tuple[str, str, Optional[str]]:
         """
         Dynamically resolves the QA model based on Risk/Impact Classification (Adaptive QA):
-        - Primary QA: Gemini 3.1 Pro High (config.QA_MODEL = "gemini-3.1-pro-high") across all risk levels.
-        - Backup QA: Gemini 3.7 Flash High (config.QA_FALLBACK_MODEL = "gemini-3.7-flash-high") when exhausted.
+        - Primary QA: config.QA_MODEL (또는 is_auto 시 config.QA_AUTO_MODEL) across all risk levels.
+        - Backup QA: config.QA_FALLBACK_MODEL (또는 is_auto 시 config.QA_AUTO_FALLBACK_MODEL) when exhausted.
+        - 표시명(display_label)은 `!model` 과 동일한 GlobalModelManager.format_model_name() 을 사용한다.
         Returns: (effective_model_name, model_display_label, fallback_notice)
         """
         target_is_auto = is_auto or (session_mode == "auto")
@@ -199,14 +204,8 @@ class QuotaManager:
         # Preserve base QA model across all risk levels (LOW, NORMAL, HIGH) without forced downgrade
 
 
-        if "qwen" in fallback_model.lower():
-            fallback_display = "Qwen 2.5 Coder 32B (OpenRouter ZDR Backup QA)"
-        elif "3.1" in fallback_model:
-            fallback_display = "Gemini 3.1 Pro High (Backup QA)"
-        elif "flash" in fallback_model:
-            fallback_display = "Gemini 3.7 Flash High (Backup QA)"
-        else:
-            fallback_display = f"{fallback_model} (Backup QA)"
+        # [표시명 SSOT] `!model`(GlobalModelManager) 과 동일한 포맷터로 배너/공지의 백업 모델명을 표기한다.
+        fallback_display = f"{GlobalModelManager.format_model_name(fallback_model)} (Backup QA)"
 
         if cls.is_model_exhausted(base_model):
             safe_fallback, fallback_display = cls._pick_qa_fallback(base_model, fallback_model, fallback_display)
@@ -230,12 +229,10 @@ class QuotaManager:
                         )
                         return safe_fallback, fallback_display, notice
 
-        if "qwen" in base_model.lower():
-            display_name = "Qwen 2.5 Coder 32B (OpenRouter ZDR QA)"
-        elif target_is_auto:
-            display_name = "Gemini 3.1 Pro High (Auto PO/Audit)" if "3.1" in base_model.lower() else base_model
-        else:
-            display_name = "Gemini 3.1 Pro High (Fixed QA)" if "3.1" in base_model.lower() else ("Gemini 3.7 Flash High" if "flash" in base_model.lower() else base_model)
+        # [표시명 SSOT] `!model`(GlobalModelManager) 과 완전히 동일한 모델 이름을 배너에 노출한다.
+        # (기존에는 모델 문자열에 "flash"가 포함되면 무조건 "Gemini 3.7 Flash High"로 표기되어,
+        #  실제 설정과 다른 봇 이름이 노출되는 버그가 있었다.)
+        display_name = GlobalModelManager.format_model_name(base_model)
 
         return base_model, display_name, None
 
@@ -476,6 +473,8 @@ class TrioAgentRunner:
         Accurately distinguishes explicit declaration lines (e.g. line 1 '[STATUS: APPROVED]'
         or '판정: [STATUS: APPROVED]') from incidental in-text mentions (e.g. discussions of
         '[STATUS: REJECTED]' feedback loops or instruction quotations).
+        Supports fullwidth colons (：), Korean status labels ([상태: 승인], [판정: 승인]),
+        and trailing inline descriptions.
         """
         if not text or not isinstance(text, str):
             return False
@@ -485,12 +484,21 @@ class TrioAgentRunner:
             return False
 
         verdict_prefix_pattern = re.compile(
-            r'^[#*\-•>\s\d.]*(?:\*\*|__)?(?:판정|결론|최종\s*판정|최종\s*결과|감사\s*결과|검증\s*결과|검토\s*결과|Verdict|Result|Conclusion|Final\s*Verdict|Status)(?:\*\*|__)?\s*[:：\-]\s*(?:\*\*|__)?\[?STATUS:\s*(APPROVED(?:\s*\([^)]+\))?|REJECTED|DEFECT_DETECTED)\]?',
+            r'^[#*\-•>\s\d.]*(?:\*\*|__)?(?:판정|결론|최종\s*판정|최종\s*결과|감사\s*결과|검증\s*결과|검토\s*결과|Verdict|Result|Conclusion|Final\s*Verdict|Status)(?:\*\*|__)?\s*[:：\-]\s*(?:\*\*|__)?\[?(?:STATUS\s*[:：]\s*)?(APPROVED(?:\s*\([^)]+\))?|REJECTED|DEFECT_DETECTED|승인(?:\s*\([^)]+\))?|반려|통과|합격)\]?',
             re.IGNORECASE
         )
 
         standalone_tag_pattern = re.compile(
-            r'^[#*\-•>\s\d.]*(?:\*\*|__)?\[?STATUS:\s*(APPROVED(?:\s*\([^)]+\))?|REJECTED|DEFECT_DETECTED)\]?(?:\*\*|__)?(?:\s*[:：\-~.]?\s*(?:\([^)]*\))?\s*)$',
+            r'^[#*\-•>\s\d.]*(?:\*\*|__)?\[?(?:STATUS|상태|판정|결과)\s*[:：]\s*(APPROVED(?:\s*\([^)]+\))?|REJECTED|DEFECT_DETECTED|승인(?:\s*\([^)]+\))?|반려|통과|합격)\]?(?:\*\*|__)?(?:\s*[:：\-~.]?\s*(?:\([^)]*\))?\s*)$',
+            re.IGNORECASE
+        )
+
+        # Only the verdict-first line may carry trailing prose after the tag
+        # (e.g. `[STATUS: REJECTED] 결함 3건`). Body lines that merely *mention* a
+        # tag inside a bullet (e.g. `- [STATUS: REJECTED] 방어 여부: 정상`) must not
+        # be treated as declarations, otherwise they override the real top verdict.
+        leading_tag_with_text_pattern = re.compile(
+            r'^[#*\-•>\s\d.]*(?:\*\*|__)?\[?(?:STATUS|상태|판정|결과)\s*[:：]\s*(APPROVED(?:\s*\([^)]+\))?|REJECTED|DEFECT_DETECTED|승인(?:\s*\([^)]+\))?|반려|통과|합격)\]?(?:\*\*|__)?(?:\s*[:：\-~.]?\s*(?:\([^)]*\))?(?:\s+.*)?)?$',
             re.IGNORECASE
         )
 
@@ -498,11 +506,17 @@ class TrioAgentRunner:
         for idx, line in enumerate(lines):
             m = verdict_prefix_pattern.match(line)
             if m:
-                declarations.append((idx, m.group(1).upper(), line, "verdict"))
+                raw_tag = m.group(1).upper()
+                norm_tag = "APPROVED" if any(p in raw_tag for p in ("APPROVED", "승인", "통과", "합격")) else "REJECTED"
+                declarations.append((idx, norm_tag, line, "verdict"))
                 continue
             m = standalone_tag_pattern.match(line)
+            if not m and idx == 0:
+                m = leading_tag_with_text_pattern.match(line)
             if m:
-                declarations.append((idx, m.group(1).upper(), line, "standalone"))
+                raw_tag = m.group(1).upper()
+                norm_tag = "APPROVED" if any(p in raw_tag for p in ("APPROVED", "승인", "통과", "합격")) else "REJECTED"
+                declarations.append((idx, norm_tag, line, "standalone"))
 
         if declarations:
             first_idx, first_tag, first_line, first_kind = declarations[0]
@@ -510,7 +524,7 @@ class TrioAgentRunner:
 
             # 1. Closing verdict or bottom declaration takes final precedence
             if last_kind == "verdict" or last_idx >= len(lines) - 5:
-                if "REJECTED" in last_tag or "DEFECT_DETECTED" in last_tag:
+                if "REJECTED" in last_tag:
                     return False
                 if "APPROVED" in last_tag:
                     return True
@@ -519,11 +533,11 @@ class TrioAgentRunner:
             if first_idx <= 2:
                 if "APPROVED" in first_tag:
                     return True
-                if "REJECTED" in first_tag or "DEFECT_DETECTED" in first_tag:
+                if "REJECTED" in first_tag:
                     return False
 
             # 3. If any declaration was REJECTED and not overridden by a closing verdict
-            has_any_rejected = any("REJECTED" in d[1] or "DEFECT_DETECTED" in d[1] for d in declarations)
+            has_any_rejected = any("REJECTED" in d[1] for d in declarations)
             if has_any_rejected:
                 return False
 
@@ -532,11 +546,21 @@ class TrioAgentRunner:
                 return True
 
         # 3. Fallback: Natural language approval check (when explicit tags are absent)
+        # Prevent false negative when the reviewer negates defect words, e.g.
+        # "수정 필요 없음", "수정 필요 사항은 없습니다", "반려 사유 없음", "결함/동작 오류 없음".
+        # Negated defect mentions are removed *before* rejection-context matching.
+        text_for_neg = re.sub(
+            r'(?:수정\s*필요|반려(?:\s*사유|\s*할\s*사유)?|결함|버그|동작\s*오류|치명적\s*결함|Major\s*결함)'
+            r'[^\n。.!?]{0,12}?(?:없음|없습니다|없다|없어|미발견|해당\s*없|0\s*건)',
+            '',
+            text,
+        )
         has_rejection_context = any(
-            neg in text for neg in [
+            neg in text_for_neg for neg in [
                 "결함 지적", "수정 필요", "반려 사유", "결함 목록",
                 "[STATUS: REJECTED]", "STATUS: REJECTED",
-                "치명적 결함", "Major 결함", "동작 오류"
+                "[STATUS：REJECTED]", "STATUS：REJECTED",
+                "치명적 결함", "Major 결함", "동작 오류", "반려합니다", "반려 처리"
             ]
         )
         if has_rejection_context:
@@ -549,41 +573,52 @@ class TrioAgentRunner:
             "All requirements have been met",
             "모든 검증을 통과",
             "검증 완료: 승인",
-            "[STATUS: APPROVED]"
+            "[STATUS: APPROVED]",
+            "[STATUS：APPROVED]",
+            "이상 없음을 확인하여 승인",
+            "이상 없음 확인하여 승인",
+            "검증을 완료하여 승인",
+            "검증 완료하여 승인",
+            "승인합니다",
+            "최종 승인",
+            "정상 동작함을 확인하여 승인",
+            # 명백한 자연어 승인 신호(태그 누락 시 폴백)
+            "이상 없",
+            "문제 없",
+            "정상 동작 확인",
+            "정상 동작함을 확인",
+            "정상임을 확인"
         ]
         return any(kw.lower() in text.lower() for kw in nl_approved_keywords)
 
     @staticmethod
     def _validate_qa_inspection_depth(qa_output: str, workspace: str) -> tuple[bool, str]:
         """
-        Mechanically enforces that the QA response has substantive inspection depth.
-        Requires:
-        1. Minimum 250 characters.
-        2. At least 2 specific file references.
-        3. Concrete code inspection evidence (function/class/variable/line references or code blocks).
-        4. Substantive feedback or architectural suggestions (not just blind praise).
+        QA 승인이 '형식적 승인(Rubber-stamp)'인지 최소한으로만 판정한다.
+
+        [완화 배경] 과거에는 파일 확장자 인용 + 코드 토큰(정규식)을 기계적으로
+        요구했다. 그러나 문서/설정 변경 검증이나 총평형 승인처럼 정당한 QA 승인도
+        파일명·코드 토큰이 없다는 이유로 반려되어 Coder↔QA 무한 루프를 유발했다.
+        지금은 '검토 산문이 거의 없는 극단적 단답 승인'만 차단한다.
+
+        - workspace 인자는 호출부 호환을 위해 유지한다(더 이상 기계 검증에 쓰지 않음).
         """
-        if not qa_output or len(qa_output.strip()) < 250:
-            return False, "QA 응답이 너무 짧습니다 (250자 미만). 소스코드에 대한 실질적인 줄 단위 검토 없이 형식적 승인(Rubber-stamp)을 한 것으로 판정되어 반려합니다."
+        if not qa_output:
+            return False, "QA 응답이 비어있습니다."
 
-        # Scan for common file extensions to count unique file references
-        ext_pattern = re.compile(r'\b[a-zA-Z0-9_\-\.]+\.(?:py|js|ts|kt|html|css|json|yaml|yml|xml|gradle|vue|jsx|tsx|swift|dart)\b')
-        matches = ext_pattern.findall(qa_output)
-        unique_files = set(matches)
-        if len(unique_files) < 1:
-            return False, "QA 검수에 구체적인 소스코드 파일명 언급이 누락되었습니다 (최소 1개 이상의 변경/검증 파일 심층 분석 필요)."
-
-        # Verify substantive inspection evidence: code blocks, function/method names, line references, or architectural suggestions
-        has_code_evidence = any([
-            "```" in qa_output,
-            re.search(r'\b(?:def|class|function|val|var|fun|const|import|export|interface)\b', qa_output),
-            re.search(r'(?:line|라인|줄|행)\s*\d+', qa_output, re.IGNORECASE),
-            re.search(r'[`\"][a-zA-Z0-9_\-\.]{3,}[`\"]', qa_output),
-        ])
-        if not has_code_evidence:
-            return False, "QA 응답에 구체적인 함수/클래스/코드 라인 분석 증거가 없습니다. 실제 소스코드를 하나하나 대조한 구체적 검수 내용을 작성해야 합니다."
-
-        # Substantive inspection depth is confirmed by character length, file references, and code evidence.
+        # 판정/결함 태그와 장식(불릿·강조·체크박스)을 제거한 '실제 검토 산문' 길이만 본다.
+        prose = re.sub(
+            r"\[?\s*(?:STATUS|상태|판정|결과|BLOCKING_DEFECTS)\s*[:：][^\]]*\]?",
+            "",
+            qa_output,
+            flags=re.IGNORECASE,
+        )
+        prose = re.sub(r"[#*`>~\-–—•\s]+", "", prose)
+        if len(prose) < 25:
+            return False, (
+                f"QA 응답에 실질적인 검토 내용이 없습니다 (본문 {len(prose)}자). "
+                "검증한 항목과 근거를 간단히라도 서술한 뒤 승인해야 합니다."
+            )
         return True, ""
 
     @staticmethod
@@ -591,6 +626,7 @@ class TrioAgentRunner:
         """
         Determines whether an Auditor review output signifies AUDIT_PASSED or AUDIT_FAILED/AUDIT_STOP.
         Accurately distinguishes explicit declaration lines from incidental in-text mentions.
+        Supports fullwidth colons (：), Korean status labels, and inline remarks.
         """
         if not text or not isinstance(text, str):
             return False
@@ -600,12 +636,19 @@ class TrioAgentRunner:
             return False
 
         verdict_prefix_pattern = re.compile(
-            r'^[#*\-•>\s\d.]*(?:\*\*|__)?(?:(?:최종\s*)?(?:감사|검증|검토)?\s*(?:판정|결과|결론)|최종\s*감사|Verdict|Result|Conclusion|Final\s*Verdict|Status)(?:\*\*|__)?\s*[:：\-]\s*(?:\*\*|__)?\[?STATUS:\s*(AUDIT_PASSED(?:\s*\([^)]+\))?|AUDIT_FAILED|AUDIT_STOP)\]?',
+            r'^[#*\-•>\s\d.]*(?:\*\*|__)?(?:(?:최종\s*)?(?:감사|검증|검토)?\s*(?:판정|결과|결론)|최종\s*감사|Verdict|Result|Conclusion|Final\s*Verdict|Status)(?:\*\*|__)?\s*[:：\-]\s*(?:\*\*|__)?\[?(?:STATUS\s*[:：]\s*)?(AUDIT_PASSED(?:\s*\([^)]+\))?|AUDIT_FAILED|AUDIT_STOP|감사\s*통과|감사\s*승인|감사\s*실패)\]?',
             re.IGNORECASE
         )
 
         standalone_tag_pattern = re.compile(
-            r'^[#*\-•>\s\d.]*(?:\*\*|__)?\[?STATUS:\s*(AUDIT_PASSED(?:\s*\([^)]+\))?|AUDIT_FAILED|AUDIT_STOP)\]?(?:\*\*|__)?(?:\s*(?:\[VALUE:[^\]]*\])?\s*(?:\[ACTION:[^\]]*\])?\s*[:：\-~.]?\s*(?:\([^)]*\))?\s*)$',
+            r'^[#*\-•>\s\d.]*(?:\*\*|__)?\[?(?:STATUS|상태|판정|결과)\s*[:：]\s*(AUDIT_PASSED(?:\s*\([^)]+\))?|AUDIT_FAILED|AUDIT_STOP|감사\s*통과|감사\s*승인|감사\s*실패)\]?(?:\*\*|__)?(?:\s*\[VALUE:[^\]]*\])?\s*(?:\[ACTION:[^\]]*\])?\s*[:：\-~.]?\s*(?:\([^)]*\))?\s*$',
+            re.IGNORECASE
+        )
+
+        # Only the verdict-first line may carry trailing prose after the tag. Body
+        # lines that merely *mention* a tag inside a bullet must not override the verdict.
+        leading_tag_with_text_pattern = re.compile(
+            r'^[#*\-•>\s\d.]*(?:\*\*|__)?\[?(?:STATUS|상태|판정|결과)\s*[:：]\s*(AUDIT_PASSED(?:\s*\([^)]+\))?|AUDIT_FAILED|AUDIT_STOP|감사\s*통과|감사\s*승인|감사\s*실패)\]?(?:\*\*|__)?(?:\s*\[VALUE:[^\]]*\])?\s*(?:\[ACTION:[^\]]*\])?\s*[:：\-~.]?\s*(?:\([^)]*\))?(?:\s+.*)?$',
             re.IGNORECASE
         )
 
@@ -613,11 +656,17 @@ class TrioAgentRunner:
         for idx, line in enumerate(lines):
             m = verdict_prefix_pattern.match(line)
             if m:
-                declarations.append((idx, m.group(1).upper(), line, "verdict"))
+                raw_tag = m.group(1).upper()
+                norm_tag = "AUDIT_PASSED" if any(p in raw_tag for p in ("AUDIT_PASSED", "통과", "승인")) else "AUDIT_FAILED"
+                declarations.append((idx, norm_tag, line, "verdict"))
                 continue
             m = standalone_tag_pattern.match(line)
+            if not m and idx == 0:
+                m = leading_tag_with_text_pattern.match(line)
             if m:
-                declarations.append((idx, m.group(1).upper(), line, "standalone"))
+                raw_tag = m.group(1).upper()
+                norm_tag = "AUDIT_PASSED" if any(p in raw_tag for p in ("AUDIT_PASSED", "통과", "승인")) else "AUDIT_FAILED"
+                declarations.append((idx, norm_tag, line, "standalone"))
 
         if declarations:
             first_idx, first_tag, first_line, first_kind = declarations[0]
@@ -646,6 +695,8 @@ class TrioAgentRunner:
         has_explicit_fail = (
             "[STATUS: AUDIT_FAILED]" in text
             or "STATUS: AUDIT_FAILED" in text
+            or "[STATUS：AUDIT_FAILED]" in text
+            or "STATUS：AUDIT_FAILED" in text
             or "[STATUS: AUDIT_STOP]" in text
             or "STATUS: AUDIT_STOP" in text
             or any(kw in text for kw in ["감사 반려", "배포 반려", "보안 결함", "품질 미달"])
@@ -656,12 +707,56 @@ class TrioAgentRunner:
         has_pass_tag = (
             "[STATUS: AUDIT_PASSED]" in text
             or "STATUS: AUDIT_PASSED" in text
+            or "[STATUS：AUDIT_PASSED]" in text
+            or "STATUS：AUDIT_PASSED" in text
             or "STATUS: AUDIT_PASSED (Auditor Direct Patch)" in text
             or "[STATUS: AUDIT_PASSED (Auditor Direct Patch)]" in text
             or "[ACTION: PROCEED]" in text
             or any(kw in text for kw in ["Audit Passed", "AUDIT PASSED", "감사 통과", "최종 승인", "배포 승인"])
         )
         return has_pass_tag
+
+    @classmethod
+    async def guard_output(
+        cls,
+        text: str,
+        *,
+        approved: Optional[bool],
+        kind: Optional[str],
+        rerun: Optional[Callable[[str], Any]] = None,
+        repair_note: str = "",
+    ) -> str:
+        """
+        [🛡️ 출력 품질 가드] 리뷰어 답변의 판정 태그를 첫 줄로 강제하고,
+        비한국어(영어/중국어/일본어) 문장이면 같은 에이전트에 한국어 재작성을 1회 요청한다.
+
+        - approved: 파이프라인이 계산한 승인(True)/반려(False) 결정
+        - kind: "qa" | "auditor" | None
+        - rerun: 한국어 재작성에 사용할 async callable(prompt) -> response
+        - repair_note: 재작성 시 역할별 추가 지침(예: Coder 파일수정 금지)
+        """
+        try:
+            return await guard_output_async(
+                text, approved=approved, kind=kind, rerun=rerun, repair_note=repair_note
+            )
+        except Exception as exc:  # 가드 실패가 파이프라인을 막지 않도록 방어
+            logger.warning(f"TrioAgentRunner: output guard skipped ({exc})")
+            return text
+
+    @staticmethod
+    def detect_coder_role_inversion(output: str) -> Tuple[bool, str]:
+        """[역할 권한 SSOT 위임] Coder 가 QA/Auditor 판정 태그를 선언했는지 탐지한다."""
+        return role_authority.detect_coder_role_inversion(output)
+
+    @staticmethod
+    def detect_qa_role_inversion(output: str) -> Tuple[bool, str]:
+        """[역할 권한 SSOT 위임] QA 가 판정 태그 없이 Coder 처럼 개발 완료를 선언했는지 탐지한다."""
+        return role_authority.detect_qa_role_inversion(output)
+
+    @staticmethod
+    def strip_coder_verdict_tags(text: str) -> Tuple[str, List[str]]:
+        """[역할 권한 SSOT 위임] Coder 출력에서 QA/Auditor 판정 태그를 물리 제거한다."""
+        return role_authority.strip_coder_verdict_tags(text)
 
     @staticmethod
     async def run_coder_turn(
@@ -677,7 +772,12 @@ class TrioAgentRunner:
             prompt=prompt,
             on_tool_update=on_tool_update,
             model=coder_m,
-            engine=coder_eng
+            engine=coder_eng,
+            role="coder",
+            conversation_id_attr="conversation_id",
+            # trio 는 아래 파이프라인에서 탐지→역할복귀 재지시→물리 정화를 직접 수행하므로
+            # 공용 가드의 결정론 제거를 끄고 정교한 절차를 보존한다(이중 처리/기능 회귀 방지).
+            guard_role_authority=False,
         )
 
     @classmethod
@@ -689,14 +789,23 @@ class TrioAgentRunner:
         model: Optional[str] = None
     ) -> str:
         """Runs the QA Reviewer Agent using configured QA engine (Claude/Codex/Aider/Agy) with fresh evaluation context."""
-        target_engine = getattr(session, "qa_engine", "agy") or "agy"
+        # [FIX] `!model`(GlobalModelManager) 이 엔진/모델의 SSOT 이다.
+        # 채널 세션에 남아 있는 오래된 qa_engine/qa_model 값이 `!model` 선택을 덮어써
+        # '설정한 봇 ≠ 실제 동작 봇'이 되던 문제를 차단한다.
+        # (전역 미설정 시에만 세션/기본값으로 폴백)
+        target_engine = (
+            GlobalModelManager.get_role_engine("qa1")
+            or getattr(session, "qa_engine", "agy")
+            or "agy"
+        )
         session_qa_model = getattr(session, "qa_model", None)
-        if target_engine == "agy":
-            target_model = model or session_qa_model or config.QA_MODEL
-        elif target_engine == "openrouter":
-            target_model = model or session_qa_model or getattr(session, "engine_model", None) or getattr(config, "QA_MODEL", "gemini-3.1-pro-high")
+        global_qa_model = GlobalModelManager.get_role_model("qa1")
+        if target_engine in ("openrouter", "hermes"):
+            target_model = model or global_qa_model or session_qa_model or getattr(session, "engine_model", None) or getattr(config, "QA_MODEL", "gemini-3.1-pro-high")
+        elif target_engine == "agy":
+            target_model = model or global_qa_model or session_qa_model or config.QA_MODEL
         else:
-            target_model = model or session_qa_model or getattr(session, "engine_model", None)
+            target_model = model or global_qa_model or session_qa_model or getattr(session, "engine_model", None)
 
         
         qa_proxy = ChannelSession(
@@ -712,9 +821,11 @@ class TrioAgentRunner:
 
         qa_response = await AgentRunner.run_prompt(
             session=qa_proxy,
-            prompt=prompt,
+            prompt=prompt + KOREAN_OUTPUT_PROMPT_SUFFIX,
             on_tool_update=on_tool_update,
-            model=target_model
+            model=target_model,
+            role="qa",
+            conversation_id_attr="qa_conversation_id"
         )
 
         if qa_proxy.conversation_id:
@@ -732,6 +843,7 @@ class TrioAgentRunner:
         model: Optional[str] = None
     ) -> str:
         """Runs an Extended QA Reviewer Agent (QA2..QA10) using configured engine (OpenRouter) for independent cross-verification."""
+        prompt = prompt + KOREAN_OUTPUT_PROMPT_SUFFIX
         target_engine = qa_config.get("engine") or "agy"
         target_model = model or qa_config.get("model") or config.QA2_MODEL or "upstage/solar-pro4"
         role_str = qa_config.get("role", f"qa{qa_config.get('index', 2)}")
@@ -759,7 +871,9 @@ class TrioAgentRunner:
             session=qa_proxy,
             prompt=prompt,
             on_tool_update=on_tool_update,
-            model=target_model
+            model=target_model,
+            role=role_str,
+            conversation_id_attr=f"{role_str}_conversation_id"
         )
 
         if not qa_response or qa_response.strip().startswith("⚠️"):
@@ -770,7 +884,9 @@ class TrioAgentRunner:
                 session=qa_proxy,
                 prompt=prompt,
                 on_tool_update=on_tool_update,
-                model=fallback_model
+                model=fallback_model,
+                role=role_str,
+                conversation_id_attr=f"{role_str}_conversation_id"
             )
             if fb_response and not fb_response.strip().startswith("⚠️"):
                 qa_response = f"⚠️ **[{role_str.upper()} 엔진 지연 -> AGY({fallback_model}) 고속 대체 검증 완료]**\n\n" + fb_response
@@ -792,12 +908,13 @@ class TrioAgentRunner:
         model: Optional[str] = None
     ) -> str:
         """Runs the qa2 Agent using OpenRouter for independent cross-verification (backward compatibility)."""
+        # [FIX] `!model` 전역 설정(GlobalModelManager)을 최우선으로 사용한다.
         qa2_cfg = {
             "index": 2,
             "role": "qa2",
             "name": "qa2",
-            "model": model or getattr(session, "qa2_model", None) or config.QA2_MODEL or "upstage/solar-pro4",
-            "engine": getattr(session, "qa2_engine", config.QA2_ENGINE) or "agy",
+            "model": model or GlobalModelManager.get_role_model("qa2") or getattr(session, "qa2_model", None) or config.QA2_MODEL or "upstage/solar-pro4",
+            "engine": GlobalModelManager.get_role_engine("qa2") or getattr(session, "qa2_engine", config.QA2_ENGINE) or "agy",
         }
         return await cls.run_extended_qa_turn(
             session=session,
@@ -815,7 +932,9 @@ class TrioAgentRunner:
         model: Optional[str] = None
     ) -> str:
         """Runs the Auditor Agent using configured Auditor engine (Codex/Claude/Agy) with fresh evaluation context."""
-        target_engine = getattr(session, "auditor_engine", None) or GlobalModelManager.get_role_engine("auditor") or "agy"
+        prompt = prompt + KOREAN_OUTPUT_PROMPT_SUFFIX
+        # [FIX] `!model` 전역 설정이 SSOT 이므로 세션의 오래된 auditor_engine 보다 우선한다.
+        target_engine = GlobalModelManager.get_role_engine("auditor") or getattr(session, "auditor_engine", None) or "agy"
         target_model = model or GlobalModelManager.get_role_model("auditor") or config.AUDITOR_MODEL
 
         auditor_proxy = ChannelSession(
@@ -833,7 +952,9 @@ class TrioAgentRunner:
             session=auditor_proxy,
             prompt=prompt,
             on_tool_update=on_tool_update,
-            model=target_model
+            model=target_model,
+            role="auditor",
+            conversation_id_attr="auditor_conversation_id"
         )
 
         if auditor_proxy.conversation_id:
@@ -877,12 +998,12 @@ class TrioAgentRunner:
         except Exception as _conv_reset_err:
             logger.debug(f"Convergence tracker reset skipped: {_conv_reset_err}")
 
-        # Multi-QA pipeline activation is strictly constrained to !mode 2+ (pair_quad).
-        # Standard !mode 1, !mode 2 remain pure Coder-QA1-Auditor 3-role pipelines.
-        is_multi_qa_pipeline = (
-            session.mode in ("pair_quad", "pair+", "pair_plus", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "mode3_plus")
-            or (getattr(session, "auto_enabled", False) and getattr(session, "auto_mode", "") in ("pair_quad", "pair+", "2+", "3+", "mode3_plus"))
-            or (qa2_client is not None and getattr(session, "mode", "") in ("pair_quad", "pair+", "pair_plus", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "mode3_plus"))
+        # Multi-QA pipeline activation is strictly constrained to !mode 2+ (pair_quad) / !mode 3+ (mode3_plus).
+        # Standard !mode 1, !mode 2 (pair), !mode 3 (mode3) remain pure Coder-QA1-Auditor 3-role pipelines.
+        # 🎛️ SSOT: mode_registry 가 유일한 판정 기준이다. (문자열 튜플 하드코딩 제거)
+        is_multi_qa_pipeline = mode_registry.is_multi_qa_mode(session.mode) or (
+            getattr(session, "auto_enabled", False)
+            and mode_registry.is_multi_qa_mode(getattr(session, "auto_mode", ""))
         )
         is_quad_pipeline = is_multi_qa_pipeline
 
@@ -894,6 +1015,24 @@ class TrioAgentRunner:
                 active_extended_qas = config.get_extended_qa_configs()
         else:
             active_extended_qas = []
+
+        # 🚨 [표시-실행 불일치 방지] `+` 모드인데 활성 확장 QA가 0대이면 조용히 3중으로
+        #    붕괴하지 않고 사용자에게 명시적으로 고지한다. (기존엔 무음 강등)
+        if is_multi_qa_pipeline and not active_extended_qas:
+            collapse_notice = (
+                f"⚠️ **[{mode_registry.mode_label(session.mode)} 모드 무결성 경고]** "
+                f"활성 확장 QA가 0대이므로 이 작업은 3중 코어 파이프라인으로 축소 실행됩니다.\n"
+                f"• 원인: `!model` 에서 QA2~QA6 비활성 상태이거나 `!qa` 필터가 모든 QA를 제외했습니다.\n"
+                f"• 해결: `!model` 에서 QA2~QA6 활성화 또는 `!qa all` 로 필터 초기화 후 재시도하세요."
+            )
+            try:
+                logger.warning(
+                    "TrioAgentRunner: %s 모드인데 활성 확장 QA가 0대 → 3중 코어 파이프라인으로 축소됩니다.",
+                    mode_registry.mode_label(session.mode),
+                )
+                await safe_send_discord_message(main_channel, collapse_notice)
+            except Exception as _collapse_err:
+                logger.debug(f"Collapse notice delivery skipped: {_collapse_err}")
 
         resolved_qa_clients: Dict[int, discord.Client] = dict(extended_qa_clients or {})
         if qa2_client and 2 not in resolved_qa_clients:
@@ -941,6 +1080,23 @@ class TrioAgentRunner:
                 except Exception:
                     pass
 
+        async def post_verdict_message(text: str):
+            """판정(QA/Auditor/시스템 무결성 게이트) 메시지를 **판정 채널**에 게시한다.
+
+            Coder 채널(main_channel)에는 판정문을 올리지 않는다 — 사용자가 Coder 가
+            승인/반려를 판정하는 것으로 오인하는 역할 전도(Role Inversion)를 원천 차단한다.
+
+            검증관이 `(QA/Auditor Direct Patch)` 로 직접 구현까지 행사한 경우에는
+            '구현 주체' 라벨을 기계적으로 부착하여, QA 의 구현이 Coder 의 판정/구현으로
+            뒤바뀌어 보이지 않게 한다.
+            """
+            text = role_authority.format_direct_patch_attribution(text)
+            target = qa_target_channel or main_channel
+            if target is main_channel:
+                # QA/Auditor 봇 미기동 폴백: 메인(Coder) 봇이 대신 게시하므로 판정 주체를 반드시 명시한다.
+                text = f"🔀 **[판정 중계 — 작성 주체: QA/Auditor · 메인 봇이 대신 게시]**\n{text}"
+            await safe_send_discord_message(target, text)
+
         qa_channel = None
         if qa_client and channel_id and qa_client.is_ready():
             qa_channel = qa_client.get_channel(channel_id)
@@ -970,8 +1126,11 @@ class TrioAgentRunner:
 
         task_type = classify_task_type(prompt)
         is_research = (task_type == "research")
-        if is_research:
-            logger.info("Task classified as 'research'. Delegating to dedicated ResearchRunner...")
+        # 🎛️ [모드 무결성 가드] `+` 다중 QA 모드(pair_quad/mode3_plus)에서는 리서치성
+        #    프롬프트라도 확장 QA가 없는 ResearchRunner 로 강등하지 않는다.
+        #    (기존 버그: `!mode 2+` + 리서치 프롬프트 → 확장 QA 전부 누락된 3중으로 붕괴)
+        if is_research and not is_multi_qa_pipeline:
+            logger.info("Task classified as 'research' (non-`+` mode). Delegating to dedicated ResearchRunner...")
             from research_runner import ResearchRunner
             return await ResearchRunner.run_pipeline(
                 session=session,
@@ -981,6 +1140,12 @@ class TrioAgentRunner:
                 auditor_client=auditor_client,
                 on_status_update=on_status_update,
                 max_rounds=max_rounds
+            )
+        elif is_research and is_multi_qa_pipeline:
+            logger.info(
+                "Task classified as 'research' but mode '%s' is a multi-QA `+` mode. "
+                "Keeping the multi-QA pipeline (extended QA must not be dropped).",
+                mode_registry.mode_label(session.mode),
             )
 
         feedback_for_coder = ""
@@ -1035,16 +1200,25 @@ class TrioAgentRunner:
             last_arbitration_directive = ""
             squad_plan = None
             squad_qas = []
+            # 🛡️ [역할 권한] 판정(QA/Auditor/시스템 게이트) 메시지 전용 채널. Coder 채널(main_channel)과 분리한다.
+            #    (qa1 비활성화/선승인 skip 경로에서도 폴백이 main_channel로 떨어지지 않도록 QA 채널을 초기값으로 지정)
+            qa_target_channel: Any = qa_channel or main_channel
             # 🎨 Visual Craft Loop (!mode 3/3+ 무인 자율 전용 시각 완성도 폐루프) 상태
             visual_craft_block_count = 0
             visual_craft_escalated = False
             visual_craft_audit_count = 0
-            for round_num in range(1, max_rounds + 1):
+            # 라운드 상한 도달 시 곧바로 종료하지 않고 예/아니요로 계속 여부를 확인한다.
+            async for round_num, max_rounds in continual_round_sequence(
+                1, max_rounds, channel=main_channel, batch_size=PAIR_MAX_ROUNDS
+            ):
                 extended_qa_outputs.clear()
                 qa_vision_block = ""
                 visual_craft_report = None
                 visual_craft_block = ""
                 visual_craft_domain = ""
+                # 🖼️ 시각 증거 갤러리 후보: QA1 스킵 경로(전역 비활성/선행 라운드 승인)에서도
+                # 최종 승인 시 미공유 스크린샷 전송 보증 로직이 참조할 수 있도록 라운드 스코프에서 초기화한다.
+                _gallery_candidates: List[str] = []
                 # 🕒 라운드 경계 시각: REJECTED 후 재작업 라운드에서 "이전 라운드 스크린샷 재사용"을
                 #    막기 위해, 이 시각 이후에 생성된 캡처만 이번 라운드 시각 증거로 인정한다.
                 _round_start_ts = time.time()
@@ -1097,7 +1271,7 @@ class TrioAgentRunner:
                             )
                         else:
                             coder_prompt = (
-                                f"[역할: 수석 기술 자문관 (Consultant / {coder_display})]\n\n"
+                                f"[역할: 수석 기술 자문 엔지니어 (Senior Technical Advisor / {coder_display})]\n\n"
                                 f"사용자가 다음과 같은 기술 자문/방향성 분석을 요청했습니다:\n"
                                 f"────────────────────────────────────────\n"
                                 f"{prompt}\n"
@@ -1115,7 +1289,7 @@ class TrioAgentRunner:
                         visual_craft_contract_block = ""
                         if (
                             _VCL is not None
-                            and getattr(session, "mode", "") in ("mode3", "mode3_plus")
+                            and mode_registry.is_autonomous_mode(getattr(session, "mode", ""))
                             and "시각 완성도 계약" not in (prompt or "")
                         ):
                             try:
@@ -1126,6 +1300,19 @@ class TrioAgentRunner:
                                 )
                             except Exception as _vcc_err:
                                 logger.debug(f"Visual craft contract injection skipped: {_vcc_err}")
+                        # P0-1/P1-5: 레퍼런스 스타일 타깃(+델타)과 디테일 발산 지시를 Coder 눈에 주입한다.
+                        craft_reference_block = ""
+                        craft_divergence_block = ""
+                        if mode_registry.is_autonomous_mode(getattr(session, "mode", "")):
+                            try:
+                                import craft_inputs as _ci
+                                _session_refs = getattr(session, "user_reference_images", []) or []
+                                craft_reference_block = _ci.build_reference_target_block(
+                                    session.workspace or "", extra_images=_session_refs
+                                )
+                                craft_divergence_block = _ci.build_divergence_block()
+                            except Exception as _ci_err:
+                                logger.debug(f"Craft reference/divergence injection skipped: {_ci_err}")
                         coder_prompt = (
                             f"[역할: 초고속 자율 엔지니어 (Coder / {coder_display})]\n\n"
                             f"사용자가 다음과 같은 작업을 요청했습니다:\n"
@@ -1134,6 +1321,8 @@ class TrioAgentRunner:
                             f"────────────────────────────────────────\n\n"
                             f"{codebase_anchor_block}"
                             f"{visual_craft_contract_block}"
+                            f"{craft_reference_block}"
+                            f"{craft_divergence_block}"
                             f"**[핵심 개발 지침]:**\n"
                             f"1. **🎯 사용자 질문 직접 답변 최우선**: 질문(점수/원인/의견 등)이 포함된 경우, 코드 작성 전에 명쾌한 분석과 답변을 본문 최상단에 먼저 제공하십시오.\n"
                             f"2. **가시적 실체 구현 & 꼼수 금지**: 주석/변수명/테스트 파일만 추가하는 눈속임 금지. 사용자가 앱을 켰을 때 즉시 체감하는 UI·로직을 실제 소스코드에 구현하십시오. 서브에이전트(`invoke_subagent`)를 호출하는 경우 서브에이전트가 코드를 파일에 완전히 반영할 때까지 반드시 대기하고 검증한 후 턴을 종료하십시오. 서브에이전트를 백그라운드에 방치한 채 조기 완료하는 행위는 엄격히 금지됩니다. Canvas/PIL 가짜 스크린샷, 레퍼런스 이미지 표절/외곽선 추출(Tracing)도 금지됩니다.\n"
@@ -1141,43 +1330,72 @@ class TrioAgentRunner:
                             f"   - 색상: 브랜드 컬러 + 보조색 + 중립색(gray-50~900)을 CSS 변수로 정의. 무채색 일색 금지.\n"
                             f"   - 타이포: 제목(1.5~2rem, 700), 본문(1rem, 400), 캡션(0.75rem) 3단계 스케일.\n"
                             f"   - 스페이싱: 8px 그리드(8/16/24/32px). 반응형: 모바일 390px(48dp+) ~ 데스크톱 1280px.\n"
-                            f"   - 이미지: `generate_image`로 로고·아이콘·배너 등 최소 1개 에셋 생성 및 배치. 텍스트만의 UI는 상용 미달.\n"
+                            f"   - 이미지: 사용자가 로고·아이콘·배너 등 실제 이미지 에셋을 **요청한 경우에만** 생성·배치하십시오(요청이 없으면 이미지 태그를 출력하지 마십시오).\n"
+                            f"     🎨 **Image generator 도구 호출법**: 이미지 생성/수정이 필요할 때 본문에 `IMAGE_REQUEST`(신규) 또는 `IMAGE_EDIT`(수정, `source_image` 필수) 태그 한 줄을 남기십시오. 형식은 태그 뒤에 JSON 객체로 `prompt`(설명)·`asset_name`(영문_이름)·`aspect_ratio`(예: 1:1) 키를 넣습니다. 이미지 봇이 실제 AI 백엔드로 생성/편집해 프로젝트 리소스에 배치하고, 다음 턴에서 소스코드에 바인딩합니다. 스스로 PIL/Canvas/도형으로 그림을 그려 대체하지 마십시오. (요청이 없는데 태그를 남기면 불필요한 이미지 생성이 트리거됩니다.)\n"
                             f"4. **도구 안전 수칙**: 기존 파일 수정 시 `replace_file_content` 사용. `write_to_file`에 `ArtifactMetadata` 절대 전달 금지.\n"
                             f"5. **빌드·배포·내구성 완결**: 코드 완성 후 빌드/테스트를 실행하여 결과 확인. 견고한 예외 처리(try-except, null check) 내장. `ROADMAP.md`는 임의 편집 금지.\n"
                             f"6. **핵심 보고 및 diff 요약**: 인사말/미사여구 배제, 상대경로 사용. 불필요한 전체 코드 덤프를 지양하고 변경 핵심 diff 및 사용자 질문 답변을 논리적이고 명쾌하게 보고하십시오.\n"
                         )
                 else:
+                    compact_fb = compact_agent_context(feedback_for_coder, max_chars=12000)
                     task_type = classify_task_type(prompt)
                     if task_type in ("ops_marketing", "consulting"):
                         coder_prompt = (
-                            f"[피드백 반영 및 운영/전략 보강 요청]\n\n"
+                            f"[역할: 전략 및 자동화 엔지니어 (Coder / {coder_display}) — 피드백 반영 및 보강 요청 (라운드 {round_num}/{max_rounds})]\n\n"
+                            f"당신은 실제 동작하는 스크립트와 전략을 작성/수정하는 엔지니어(Coder)입니다.\n\n"
+                            f"⛔ **[Coder 역할 전도 절대 금지 (Role Inversion Guard)]**:\n"
+                            f"1. **실제 산출물 수정 필수**: 당신의 임무는 스크립트/문서/설정 파일 직접 수정(Patch)입니다.\n"
+                            f"2. **QA 평가문/판정 흉내 절대 금지**: '검증 완료', '이상 없음' 같은 리뷰어식 텍스트만 작성하거나, `[STATUS: APPROVED]`, `[STATUS: REJECTED]` 같은 QA 판정 태그를 출력하는 행위는 엄격히 금지됩니다.\n"
+                            f"3. **도구 호출 필수**: 반드시 파일 수정 도구(`replace_file_content`, `write_to_file` 등)를 실행하여 실제 산출물을 디스크에 저장하십시오.\n\n"
                             f"**[🎯 사용자 원본 요청 (절대 준수 — 이전에 구현한 기능을 절대 제거하거나 롤백하지 마십시오)]:**\n"
                             f"════════════════════════════════════════\n"
                             f"{prompt}\n"
                             f"════════════════════════════════════════\n\n"
                             f"시니어 QA 리뷰 및 최종 감사관(Auditor)의 전수 검사에서 아래 추가 지적 사항이 전달되었습니다:\n"
                             f"────────────────────────────────────────\n"
-                            f"{feedback_for_coder}\n"
+                            f"{compact_fb}\n"
                             f"────────────────────────────────────────\n\n"
                             f"**[🎯 사용자 질문에 대한 직접 답변 최우선]**: 사용자가 문의한 질문이나 요청에 대한 명확한 답변을 최우선으로 작성하십시오.\n"
                             f"**[🚨 실질적 완성도 보강]**: 불필요한 프론트엔드 UI 생성이 아닌, 지적된 스크립트/메타데이터/전략 내용을 정확히 보강하십시오.\n"
                             f"**[도구 사용 주의]**: 소스코드 및 파일 수정 시 `replace_file_content`를 사용하고, `write_to_file`에 `ArtifactMetadata`를 포함하지 마십시오.\n"
-                            f"**[📉 명확한 보고 및 가독성 준수]**: 인사말/수다 배제, 절대경로 대신 상대경로(`./...`) 사용, 전체 소스코드 덤프 금지(수정은 도구로만 수행), 변경 핵심 diff 및 사용자 질문 답변을 논리적이고 명쾌하게 보고하십시오."
+                            f"**[📉 명확한 보고 및 가독성 준수]**: 인사말/수다 배제, 절대경로 대신 상대경로(`./...`) 사용, 전체 소스코드 덤프 금지(수정은 도구로만 수행), 변경 핵심 diff 및 사용자 질문 답변을 논리적이고 명쾌하게 보고하십시오.\n\n"
+                            f"**[🚨 Coder 최종 의무]**: 당신은 Coder입니다. QA 판정 태그(`[STATUS: ...]`)를 출력하지 말고 파일 수정 도구로 실제 산출물을 디스크에 반영하십시오."
                         )
                     else:
                         codebase_anchor_block = detect_codebase_anchor(session.workspace)
+                        # P0-1/P1-5: 디테일 수정 라운드에서도 레퍼런스 타깃+델타와 발산 지시를 유지한다.
+                        craft_reference_block = ""
+                        craft_divergence_block = ""
+                        if mode_registry.is_autonomous_mode(getattr(session, "mode", "")):
+                            try:
+                                import craft_inputs as _ci
+                                craft_reference_block = _ci.build_reference_target_block(
+                                    session.workspace or "",
+                                    extra_images=getattr(session, "user_reference_images", []) or [],
+                                )
+                                craft_divergence_block = _ci.build_divergence_block()
+                            except Exception as _ci_err:
+                                logger.debug(f"Craft reference/divergence injection skipped: {_ci_err}")
                         coder_prompt = (
-                            f"[피드백 반영 및 자율 운영 보강 요청 — 라운드 {round_num}/{max_rounds}]\n\n"
+                            f"[역할: 초고속 자율 엔지니어 (Coder / {coder_display}) — 피드백 반영 및 실제 소스코드 보강 — 라운드 {round_num}/{max_rounds}]\n\n"
+                            f"당신은 실제 동작하는 코드를 작성/수정하는 프로덕션 엔지니어(Coder)입니다.\n"
+                            f"절대로 검증관(QA)처럼 행동하거나 리뷰 보고서만 작성하고 끝내지 마십시오!\n\n"
+                            f"⛔ **[Coder 역할 전도 절대 금지 (Role Inversion Guard)]**:\n"
+                            f"1. **실제 코드 수정 필수**: 당신의 임무는 소스코드 파일 직접 수정(Patch)입니다.\n"
+                            f"2. **QA 평가문/판정 흉내 절대 금지**: QA의 피드백을 보고 '검증 완료', '이상 없음', '수정 필요 항목' 같은 리뷰어식 텍스트만 작성하거나, `[STATUS: APPROVED]`, `[STATUS: REJECTED]` 같은 QA 판정 태그를 출력하는 행위는 엄격히 금지됩니다. (당신은 리뷰어가 아니라 개발자입니다!)\n"
+                            f"3. **도구 호출 필수**: 반드시 파일 수정 도구(`replace_file_content`, `write_to_file` 등)를 실행하여 실제 소스코드를 디스크에 저장하십시오.\n\n"
                             f"**[🎯 사용자 원본 요청 (절대 준수 — 이전 라운드에서 구현한 기능을 절대 제거하거나 롤백하지 마십시오)]:**\n"
                             f"════════════════════════════════════════\n"
                             f"{prompt}\n"
                             f"════════════════════════════════════════\n\n"
                             f"{codebase_anchor_block}"
+                            f"{craft_reference_block}"
+                            f"{craft_divergence_block}"
                             f"**[🎯 사용자 질문에 대한 직접 답변 최우선 (User Question Direct Answer First)]**: 사용자의 질문(점수, 원인, 해결책, 의견 등)에 대한 명쾌한 답변을 본문 최상단에 반드시 포함하십시오.\n"
                             f"**[⚠️ 이전 라운드 구현 보존 필수]**: 이전 라운드에서 이미 구현된 기능(소리, 애니메이션, 점프 높낮이, 특정 UI 등)이 있다면 절대로 제거하거나 초기화하지 마십시오. 아래 지적 사항만 추가/수정하십시오.\n\n"
                             f"시니어 QA 리뷰 및 최종 감사관(Auditor)의 깐깐한 전수 검사에서 아래와 같은 추가 지적 사항이 전달되었습니다:\n"
                             f"────────────────────────────────────────\n"
-                            f"{feedback_for_coder}\n"
+                            f"{compact_fb}\n"
                             f"────────────────────────────────────────\n\n"
                             f"**[🚨 가시적 실체 수정 필수]**: 단순 테스트 파일 추가나 내부 락 변경이 아닌, **실제 화면 및 동작 코드의 실질적 수정(Patch)**을 완수하십시오.\n"
                             f"**[💡 QA 전문가 관점(디자인/아키텍처/보안) 지적사항 적극 수용]**: QA가 제안한 더 나은 대안(디자인 이목 집중, 폰트/레이아웃 계층, 나노바나나 에셋 도입, 아키텍처 개선 등)을 성실히 반영하여 단순 땜질이 아닌 한 단계 진화된 설계를 코드로 실현하십시오.\n"
@@ -1187,8 +1405,8 @@ class TrioAgentRunner:
                             f"- 변수 분리(`val shouldShow`), `else if` 쪼개기 등을 악용한 은폐형 조건부 렌더링 꼼수 절대 금지 (모든 인터랙션 상태에서 무결해야 함).\n"
                             f"- 폰트/좌표 스케일링 시 임의의 하드코딩 클램핑(`coerceIn(..., 34f)` 등 변수화 우회 포함)을 금지하고 뷰포트 비율에 맞춘 정확한 수학적 변환식을 적용하십시오.\n"
                             f"- **[🚨 레퍼런스 이미지 표절, 트레이싱(Tracing), 라운드 재탕 절대 금지]**: 사용자의 참고 이미지를 그대로 복사하거나, 스크립트 코드(Image.open, cv2.imread, findContours 등)에서 열어 외곽선/픽셀을 추출하거나, 이전 라운드의 결과물 이미지를 변경 없이 그대로 재탕하는 행위는 엄격히 금지됩니다. 반드시 실제 수정된 소스코드를 렌더링/빌드하여 고유한 새 결과물 이미지를 생성하십시오.\n"
-                            f"**[📉 명확한 보고 및 가독성 준수]**: 인사말/수다 배제, 장황한 내부 절대경로 노출 금지(상대경로 `./...` 또는 파일명만 사용), 소스코드 전체 덤프 금지(수정은 도구로만 수행하고 본문에는 변경 핵심 diff/요약 표기), 사용자 질문 답변과 변경 목적 및 검증 결과를 논리적으로 명쾌하게 보고하십시오.\n"
-                            f"위 지적 사항을 면밀히 분석하여 소스코드를 직접 수정(Patch)하고, 2~3일간 무인 운영되어도 문제없도록 완벽히 보강하십시오."
+                            f"**[📉 명확한 보고 및 가독성 준수]**: 인사말/수다 배제, 장황한 내부 절대경로 노출 금지(상대경로 `./...` 또는 파일명만 사용), 소스코드 전체 덤프 금지(수정은 도구로만 수행하고 본문에는 변경 핵심 diff/요약 표기), 사용자 질문 답변과 변경 목적 및 검증 결과를 논리적으로 명쾌하게 보고하십시오.\n\n"
+                            f"**[🚨 Coder 최종 의무 리마인더]**: 당신은 개발자(Coder)입니다. QA의 지적 사항을 면밀히 분석하여 소스코드를 직접 수정(Patch)하고 파일 수정 도구로 변경 사항을 디스크에 반영하십시오. QA 판정 태그(`[STATUS: ...]`)를 출력하지 마십시오."
                         )
 
                 async def on_coder_tool(tool_status: str):
@@ -1206,7 +1424,43 @@ class TrioAgentRunner:
 
                 # Check for execution error or cancellation
                 if cls.is_system_error(latest_coder_output) or cls.is_cancellation_or_stop(latest_coder_output) or getattr(session, "is_stopped", False):
-                    return latest_coder_output or "🛑 사용자의 요청으로 작업이 중단되었습니다."
+                    return role_authority.strip_coder_verdict_tags(latest_coder_output)[0] or "🛑 사용자의 요청으로 작업이 중단되었습니다."
+
+                # Guard against Coder Role Inversion (Coder mimicking QA reviewer/verdict tags)
+                is_coder_inverted, inversion_reason = cls.detect_coder_role_inversion(latest_coder_output)
+                if is_coder_inverted:
+                    logger.warning(
+                        f"TrioAgentRunner: Coder Role Inversion detected: {inversion_reason}. "
+                        "Attempting in-flight self-recovery retry to force actual code implementation..."
+                    )
+                    await safe_send_discord_message(
+                        main_channel,
+                        f"🔄 **[자율 자가 치유 (Self-Healing)] Coder 역할 전도(Role Inversion) 감지!**\n"
+                        f"• 사유: {inversion_reason}\n"
+                        f"• Coder는 검증관(QA)이 아닌 **코드 구현 엔지니어**입니다. 사령관 권한으로 실제 소스코드 구현 작업을 긴급 재촉구합니다..."
+                    )
+                    inversion_recovery_prompt = role_authority.build_coder_role_correction_prompt(
+                        qa_verdict=latest_qa_output
+                    )
+                    async with main_channel.typing():
+                        latest_coder_output = await cls.run_coder_turn(
+                            session=session,
+                            prompt=inversion_recovery_prompt,
+                            on_tool_update=on_coder_tool
+                        )
+                        if channel_id:
+                            AutonomySafetyLayer.record_llm_call(channel_id)
+
+                # 🛡️ [역할 권한 물리 강제] 재시도 후에도 잔존하는 QA/Auditor 판정 태그를
+                #    Coder 출력에서 결정론적으로 제거한다. (디스코드 게시 전 차단)
+                latest_coder_output, _removed_coder_verdicts = role_authority.strip_coder_verdict_tags(latest_coder_output)
+                if _removed_coder_verdicts:
+                    logger.warning(
+                        f"TrioAgentRunner: Coder 출력에서 QA 전용 판정 태그 {_removed_coder_verdicts} "
+                        "를 물리 제거했습니다(역할 전도 차단)."
+                    )
+                    if latest_coder_output.strip():
+                        latest_coder_output = f"{role_authority.CODER_RESTORED_NOTE}\n\n{latest_coder_output}"
 
                 # Guard against trivial mock completion string without substance
                 is_trivial_completion = (
@@ -1282,11 +1536,82 @@ class TrioAgentRunner:
                                 on_tool_update=on_coder_tool
                             )
 
+                # 🎨 [Image generator Tool] Coder가 이미지 생성을 요청한 경우 즉시 도구 호출
+                try:
+                    from image_creator_hub import ImageCreatorHub
+                    img_results = await ImageCreatorHub.process_agent_output(
+                        latest_coder_output,
+                        workspace=session.workspace or "",
+                        session=session,
+                        on_status=on_status_update,
+                        user_prompt=prompt,
+                    )
+                    if img_results:
+                        for _img in img_results:
+                            if not (_img.ok and _img.absolute_path and os.path.isfile(_img.absolute_path)):
+                                continue
+                            try:
+                                _itag = "🎨 **[Image generator] 실제 AI 이미지 생성 완료**" if _img.is_real_ai else "⚠️ **[Image generator] 절차적 임시 에셋(AI 생성 실패 대체)**"
+                                await safe_send_discord_message(
+                                    main_channel,
+                                    f"{_itag} `{_img.asset_name}.png`\n"
+                                    f"• 배치: `{_img.relative_path}` ({_img.width}x{_img.height})\n"
+                                    + (f"• 백엔드: `{_img.backend}` / `{_img.model}`\n" if _img.backend else "")
+                                    + (f"• 사유: {_img.message}\n" if _img.fallback_used else "")
+                                    + f"• 요청: {_img.prompt[:180]}",
+                                    files=[discord.File(_img.absolute_path, filename=f"{_img.asset_name}.png")],
+                                )
+                            except Exception as _send_err:
+                                logger.warning(f"TrioAgentRunner: image send skipped: {_send_err}")
+                            try:
+                                await ImageCreatorHub.dispatch_to_studio(qa_client, _img, origin_channel_id=channel_id)
+                            except Exception:
+                                pass
+                        # [정직 고지] 실패 건이 있으면 메인 채널에 즉시 실패 사유를 알린다.
+                        _img_fail_summary = ImageCreatorHub.summarize_failures(img_results)
+                        if _img_fail_summary:
+                            try:
+                                await safe_send_discord_message(main_channel, _img_fail_summary)
+                            except Exception:
+                                pass
+                        binding_guide = ImageCreatorHub.format_results_for_agent(img_results)
+                        if binding_guide:
+                            async with main_channel.typing():
+                                latest_coder_output = await cls.run_coder_turn(
+                                    session=session,
+                                    prompt=(
+                                        "🎨 **[사령관 지시: Image generator 도구 결과 바인딩]**\n"
+                                        f"{binding_guide}"
+                                    ),
+                                    on_tool_update=on_coder_tool,
+                                )
+                            if channel_id:
+                                AutonomySafetyLayer.record_llm_call(channel_id)
+                except Exception as _img_err:
+                    logger.warning(f"TrioAgentRunner: image request handling skipped: {_img_err}")
+
+                # 🛡️ [출력 가드] Coder 보고 본문이 비한국어 문장이면 한국어 재작성 1회.
+                #    (판정 태그 강제 없음 · 파일 재수정 금지 노트 포함 · 디스코드 포스팅 본문에만 적용)
+                coder_post_text = await cls.guard_output(
+                    latest_coder_output,
+                    approved=None,
+                    kind=None,
+                    repair_note=CODER_REPAIR_NOTE,
+                    rerun=(lambda _p: cls.run_coder_turn(
+                        session=session, prompt=_p, on_tool_update=on_coder_tool)),
+                )
+                # 🛡️ [게시 직전 재정화] 한국어 재작성본에 판정 태그가 섞여 들어와도 최종 차단한다.
+                coder_post_text, _removed_post_verdicts = role_authority.strip_coder_verdict_tags(coder_post_text)
+                if _removed_post_verdicts:
+                    logger.warning(
+                        f"TrioAgentRunner: 게시 직전 Coder 본문에서 판정 태그 {_removed_post_verdicts} 제거."
+                    )
+
                 # Post Coder response to main channel
                 user_ref_hashes = getattr(session, "user_reference_hashes_set", set())
                 user_ref_dhashes = getattr(session, "user_reference_dhashes_set", set())
                 coder_chunks, coder_file_attachments = await async_prepare_message_payload(
-                    latest_coder_output,
+                    coder_post_text,
                     workspace_root=session.workspace,
                     excluded_hashes=user_ref_hashes,
                     excluded_dhashes=user_ref_dhashes
@@ -1295,7 +1620,7 @@ class TrioAgentRunner:
                 if len(coder_chunks) > 2:
                     summary_chunk = coder_chunks[0]
                     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as tf:
-                        tf.write(latest_coder_output)
+                        tf.write(coder_post_text)
                         temp_resp_file = tf.name
                     try:
                         files_payload = [discord.File(temp_resp_file, filename="coder_details.md")] + coder_file_attachments
@@ -1338,7 +1663,7 @@ class TrioAgentRunner:
                 if not coder_send_success:
                     try:
                         logger.critical("TrioAgentRunner: Coder output lost normal channels. Attempting direct fallback send...")
-                        await main_channel.send(f"⚠️ **[비상 알림: Coder 답변 본문]**\n{latest_coder_output[:1800]}")
+                        await main_channel.send(f"⚠️ **[비상 알림: Coder 답변 본문]**\n{role_authority.strip_coder_verdict_tags(latest_coder_output)[0][:1800]}")
                     except Exception as fatal_e:
                         logger.critical(f"TrioAgentRunner: Failed even absolute direct channel send: {fatal_e}")
 
@@ -1357,12 +1682,14 @@ class TrioAgentRunner:
                 effective_ws = session.workspace
                 combined_context = f"{prompt} {latest_coder_output}"
                 import re, urllib.parse
-                ws_matches = re.findall(r'(/home/jangsung/Desktop/autocoding/[^\s`\'"\(\)]+)', combined_context)
+                base_dir = config.DEFAULT_WORKSPACE
+                agent_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                ws_matches = re.findall(r'(' + re.escape(base_dir) + r'/[^\s`\'"\(\)]+)', combined_context)
                 for m in ws_matches:
                     p = urllib.parse.unquote(m.rstrip(".,;:)'\"")).replace('\\!', '!')
                     while p and not os.path.exists(p):
                         p = os.path.dirname(p)
-                    if p and os.path.isdir(p) and p not in ("/home/jangsung/Desktop/autocoding/agy_agnet", "/home/jangsung/Desktop/autocoding"):
+                    if p and os.path.isdir(p) and os.path.realpath(p) not in (os.path.realpath(base_dir), os.path.realpath(agent_repo_root)):
                         if os.path.isdir(os.path.join(p, ".git")) or os.path.isfile(os.path.join(p, "package.json")) or os.path.isfile(os.path.join(p, "build.gradle")) or os.path.isfile(os.path.join(p, "build.gradle.kts")) or os.path.isfile(os.path.join(p, "gradlew")):
                             effective_ws = p
                             break
@@ -1572,6 +1899,12 @@ class TrioAgentRunner:
                 if getattr(session, "is_stopped", False) or not getattr(session, "is_busy", True):
                     return "🛑 사용자의 요청으로 작업이 중단되었습니다."
 
+                # 🛡️ [출력 가드 선계산] 판정 태그 정규화 이전 원문 기준으로 승인/역할전도를
+                #    계산해 두어, 가드가 태그를 부착하더라도 기존 판정 로직이 회귀하지 않게 한다.
+                _qa_pre_approved: Optional[bool] = None
+                _qa_pre_inverted: Optional[bool] = None
+                _qa_pre_inversion_reason: str = ""
+
                 if not qa1_is_enabled:
                     logger.info("TrioAgentRunner: QA1 is disabled globally. Automatically skipping QA1.")
                     qa_approved = True
@@ -1586,7 +1919,7 @@ class TrioAgentRunner:
                     # Single concise in-channel transition notice (No duplicate transit_banner spam)
                     qa_step_label = f"1/{total_steps}단계 Coder({coder_display}) 완료 ➔ 2/{total_steps}단계"
                     await send_transit_notice(
-                        f"⚡ **[{qa_step_label}]** 🕵️ <@1539448922643234876> (qa1) 코드 및 품질 게이트 정밀 검증 시작..."
+                        f"⚡ **[{qa_step_label}]** 🕵️ {config.COMMANDER_USER_MENTION} (qa1) 코드 및 품질 게이트 정밀 검증 시작..."
                     )
 
                     # Check ThermalGuard before starting QA review
@@ -1652,7 +1985,7 @@ class TrioAgentRunner:
                     # ---------------------------------------------------------
                     if (
                         _VCL is not None
-                        and getattr(session, "mode", "") in ("mode3", "mode3_plus")
+                        and mode_registry.is_autonomous_mode(getattr(session, "mode", ""))
                         and not is_non_coding
                         and visual_craft_audit_count < (_vcl_max_rounds() + 3)  # Vision 쿼터 보호 상한
                     ):
@@ -1759,18 +2092,31 @@ class TrioAgentRunner:
                         logger.debug(f"Visual Asset Gate check notice: {_vag_err}")
 
                     # ---------------------------------------------------------
-                    # 🖼️ 시각 증거 스크린샷 디스코드 공유 (!mode 3/3+ 전용)
-                    # VCL/비전 검사가 사용한 실제 렌더링 화면을 사용자도 직접 볼 수 있게 이미지로 전송한다.
+                    # 🖼️ 시각 증거 스크린샷 디스코드 공유
+                    # VCL/비전 검사/E2E 테스트가 사용한 실제 렌더링 화면을 사용자도 직접 볼 수 있게 이미지로 전송한다.
                     # (무결성 검증 통과분만, 사용자 레퍼런스 이미지 제외, 라운드 간 중복 전송 방지)
+                    # 트리거 조건:
+                    # 1) !mode 3/3+ 무인 자율 모드
+                    # 2) 사용자가 스크린샷/화면/e2e/UI 검증을 명시적으로 요청한 경우
+                    # 3) E2E/비전/VCL 검사에서 신규 스크린샷(_gallery_candidates)이 수집된 경우
                     # ---------------------------------------------------------
-                    if getattr(session, "mode", "") in ("mode3", "mode3_plus") and not is_non_coding:
+                    has_explicit_screenshot_demand = any(kw in (prompt or "").lower() for kw in [
+                        "스크린샷", "스샷", "화면", "캡처", "e2e", "screenshot", "screenshots", "ui", "view", "프레임버퍼", "사진", "렌더링"
+                    ])
+                    is_mode3_run = mode_registry.is_autonomous_mode(getattr(session, "mode", "")) and not is_non_coding
+                    should_share_screenshots = (
+                        is_mode3_run
+                        or has_explicit_screenshot_demand
+                        or len(_gallery_candidates) > 0
+                    )
+                    if should_share_screenshots:
                         try:
                             _sent_hashes = getattr(session, "_vcl_gallery_sent_hashes", None)
                             if _sent_hashes is None:
                                 _sent_hashes = set()
                                 session._vcl_gallery_sent_hashes = _sent_hashes
                             _gallery_cands = collect_candidate_screenshots(
-                                effective_ws, extra=_gallery_candidates, min_mtime=_round_start_ts
+                                effective_ws, extra=_gallery_candidates, min_mtime=_round_start_ts - 5.0
                             )
                             _sent_n = await send_screenshot_gallery(
                                 main_channel,
@@ -1779,8 +2125,8 @@ class TrioAgentRunner:
                                 excluded_dhashes=getattr(session, "user_reference_dhashes_set", set()),
                                 already_sent=_sent_hashes,
                                 max_files=4,
-                                title=f"🎨 [라운드 {round_num}] 시각 증거 스크린샷",
-                                min_mtime=_round_start_ts,
+                                title=f"🎨 [라운드 {round_num}] E2E 및 시각 검증 스크린샷",
+                                min_mtime=_round_start_ts - 5.0,
                             )
                             if _sent_n:
                                 logger.info(
@@ -1790,8 +2136,8 @@ class TrioAgentRunner:
                             else:
                                 # 이번 라운드 신규 캡처가 없는데 과거 스크린샷이 남아 있는 경우:
                                 # 이전 화면을 현재 증거로 재사용하지 않도록 경고만 남긴다(전송 생략).
-                                _stale_n = count_stale_screenshots(effective_ws, _round_start_ts)
-                                if _stale_n:
+                                _stale_n = count_stale_screenshots(effective_ws, _round_start_ts - 5.0)
+                                if _stale_n and is_mode3_run:
                                     await send_transit_notice(
                                         f"⚠️ **[시각 증거 신선도 경고]** 라운드 {round_num}: "
                                         f"이번 라운드 신규 캡처 0장, 이전 스크린샷 {_stale_n}장 감지 — "
@@ -1803,7 +2149,7 @@ class TrioAgentRunner:
                     arb_qa1_guidance = ""
                     if last_arbitration_directive:
                         arb_qa1_guidance = (
-                            f"\n**[⚖️ 사령관(<@1540273467453345812>) 최종 중재 판결 지침]**:\n"
+                            f"\n**[⚖️ 사령관({config.COMMANDER_BOT_MENTION}) 최종 중재 판결 지침]**:\n"
                             f"{last_arbitration_directive}\n\n"
                             f"⚠️ **[심사 필수 가이드]**: 사령관이 상반된 의견 대립(A안 vs B안)을 종합 중재하여 위 단일 수렴 지침으로 최종 판결했습니다.\n"
                             f"개인적인 스타일/구조 선호로 인한 번복성 재반려는 불가하며, 오직 사령관 지침이 소스코드에 충실히 반영되었는지만 집중 검증하십시오.\n\n"
@@ -1850,10 +2196,27 @@ class TrioAgentRunner:
                     qa1_persona_badge = f"{qa1_persona_info.get('icon', '🕵️')} {qa1_persona_name}"
                     qa1_persona_focus = qa1_persona_info.get("focus_prompt", "")
 
+                    # P0-1: QA도 '레퍼런스 대비'를 볼 수 있게 동일한 스타일 타깃+델타 블록을 주입한다.
+                    qa_craft_reference_block = ""
+                    if mode_registry.is_autonomous_mode(getattr(session, "mode", "")):
+                        try:
+                            import craft_inputs as _ci
+                            qa_craft_reference_block = _ci.build_reference_target_block(
+                                session.workspace or "",
+                                extra_images=getattr(session, "user_reference_images", []) or [],
+                            )
+                        except Exception as _qci_err:
+                            logger.debug(f"QA craft reference injection skipped: {_qci_err}")
+
                     qa_prompt = (
                         f"[역할: {qa1_persona_badge} & 코드 리뷰어 + 소규모 직접 패치 권한 ({qa_display_name})]\n\n"
                         f"당신은 {qa1_persona_name} 전문 리뷰어입니다.\n"
                         f"Coder의 결함과 버그를 꼼꼼히 점검하되, **실제 사용자가 체감하는 앱 품질**에 집중하십시오.\n\n"
+                        f"⛔ **[QA 역할 전도 절대 금지 (Role Inversion Guard)]**:\n"
+                        f"1. **당신은 품질 감사관(QA)입니다**: 당신은 기능을 직접 새로 개발하는 Coder가 아닙니다.\n"
+                        f"2. **대규모 코딩 절대 금지**: 사용자의 원본 요청을 보고 직접 새로운 기능을 구현하거나 10줄을 초과하는 대규모 소스코드 작성을 시도하지 마십시오.\n"
+                        f"3. **공정하고 엄격한 품질 판정**: 사용자 요청이 정상 구현되고 차단 결함이 없으면 반드시 첫 줄에 `[STATUS: APPROVED]`를 선언하십시오. 1~5줄 이내 단순 버그는 직접 패치 후 `[STATUS: APPROVED (QA Direct Patch)]`를 선언할 수 있습니다. 실제 사용자 체감 차단 결함(빌드 실패/크래시/미구현/미동작)이 명백히 존재할 때만 `[STATUS: REJECTED]`로 Coder에게 반려하십시오.\n"
+                        f"4. **답변 첫 줄 필수 선언**: 당신의 답변 첫 줄은 반드시 `[STATUS: APPROVED]` 또는 `[STATUS: REJECTED]`로 시작해야 합니다.\n\n"
                         f"**[💼 전문 역할(전공) 집중 검증 영역]**:\n"
                         f"{qa1_persona_focus}\n\n"
                         f"{build_blocking_contract_instruction()}\n\n"
@@ -1871,6 +2234,7 @@ class TrioAgentRunner:
                         + qc_prompt_block
                         + qa_vision_block
                         + visual_craft_block
+                        + qa_craft_reference_block
                         + visual_asset_gate_block
                         + f"{diff_summary_text}\n"
                         f"**[🚨 QA 도구 사용 및 검증 지침]**:\n"
@@ -1883,11 +2247,12 @@ class TrioAgentRunner:
                         f"2. **빌드/컴파일 성공**: 실제 빌드 명령으로 확인하십시오.\n"
                         f"3. **핵심 기능 동작**: 런타임 크래시, 클릭 불가 버튼, 화면 잘림 등 사용자 체감 결함을 우선 검증하십시오.\n"
                         f"4. **Mock/Stub 차단**: 가짜 데이터·더미 핸들러·빈 TODO를 확인하십시오.\n"
-                        f"5. **레퍼런스 이미지 표절 색출**: 사용자 참고 이미지 복사 여부를 확인하십시오.\n\n"
+                        f"5. **레퍼런스 이미지 표절 색출**: 사용자 참고 이미지 복사 여부를 확인하십시오.\n"
+                        f"6. **🖼️ 이미지 에셋 품질(시각 결함)**: 로고/아이콘/배너가 있으면 **화질·구도·일관성·텍스트 깨짐**을 확인하고, 개선이 필요하면 본문에 `IMAGE_EDIT`(수정, `source_image` 필수) 또는 `IMAGE_REQUEST`(신규) 태그 한 줄을 남기십시오. (사용자가 이미지 작업을 요청한 경우에만 해당) 그러면 이미지 봇이 실제 AI 백엔드로 재생성한 뒤 **다음 턴에서 Coder가 소스코드에 리바인딩**합니다.\n\n"
                         f"**[판정 규칙]**:\n"
                         f"1. **REJECTED**: 위 차단 결함이 1개 이상일 때만 선언하십시오. 첫 줄 `[STATUS: REJECTED]`, 둘째 줄 `[BLOCKING_DEFECTS: N]`(사용자 체감 차단 결함 개수), 이어서 파일/라인 근거와 즉시 구현 가능한 수정 스펙을 작성하십시오.\n"
                         f"2. **QA Direct Patch**: 직접 수정했다면 첫 줄 `[STATUS: APPROVED (QA Direct Patch)]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하십시오.\n"
-                        f"3. **APPROVED**: 차단 결함이 0건이면 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 간결히 작성하십시오. 비차단 항목은 [차기 백로그]로만 기록하십시오.\n"
+                        f"3. **APPROVED**: 차단 결함이 0건이면 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 충분히 구체적으로 작성하십시오. 비차단 항목은 [차기 백로그]로만 기록하십시오.\n"
                         f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`을 표기하십시오."
                     )
 
@@ -1914,6 +2279,17 @@ class TrioAgentRunner:
                     if cls.is_system_error(latest_qa_output):
                         return latest_qa_output
 
+                    # 🛡️ [출력 가드] 판정 태그를 첫 줄로 강제하고, 비한국어 응답이면 한국어 재작성 1회.
+                    _qa_pre_approved = cls.is_qa_approved(latest_qa_output)
+                    _qa_pre_inverted, _qa_pre_inversion_reason = cls.detect_qa_role_inversion(latest_qa_output)
+                    latest_qa_output = await cls.guard_output(
+                        latest_qa_output,
+                        approved=_qa_pre_approved,
+                        kind="qa",
+                        rerun=(lambda _p, _m=effective_qa_model: cls.run_qa_turn(
+                            session=session, prompt=_p, model=_m)),
+                    )
+
                     # Post QA review message to log target channel with safe attachments
                     qa_chunks, qa_file_attachments = await async_prepare_message_payload(
                         latest_qa_output,
@@ -1927,33 +2303,98 @@ class TrioAgentRunner:
                         if idx < len(qa_chunks) - 1:
                             await asyncio.sleep(0.4)
 
+                    # 🎨 [Image generator Tool] QA가 이미지 수정/생성을 요청한 경우 도구 호출 후 Coder 지시문에 주입
+                    try:
+                        from image_creator_hub import ImageCreatorHub
+                        qa_img_results = await ImageCreatorHub.process_agent_output(
+                            latest_qa_output,
+                            workspace=session.workspace or "",
+                            session=session,
+                            on_status=on_status_update,
+                            user_prompt=prompt,
+                        )
+                        if qa_img_results:
+                            for _img in qa_img_results:
+                                if not (_img.ok and _img.absolute_path and os.path.isfile(_img.absolute_path)):
+                                    continue
+                                try:
+                                    _qtag = "🎨 **[Image generator] QA 요청 이미지 실제 AI 생성 완료**" if _img.is_real_ai else "⚠️ **[Image generator] QA 요청 절차적 임시 에셋(AI 생성 실패 대체)**"
+                                    await safe_send_discord_message(
+                                        qa_target_channel,
+                                        f"{_qtag} `{_img.asset_name}.png` → `{_img.relative_path}`"
+                                        + (f"\n• 백엔드: `{_img.backend}` / `{_img.model}`" if _img.backend else "")
+                                        + (f"\n• 사유: {_img.message}" if _img.fallback_used else ""),
+                                        files=[discord.File(_img.absolute_path, filename=f"{_img.asset_name}.png")],
+                                    )
+                                except Exception:
+                                    pass
+                                try:
+                                    await ImageCreatorHub.dispatch_to_studio(qa_client, _img, origin_channel_id=channel_id)
+                                except Exception:
+                                    pass
+                            qa_img_guide = ImageCreatorHub.format_results_for_agent(qa_img_results)
+                            if qa_img_guide:
+                                latest_qa_output = f"{latest_qa_output}\n\n{qa_img_guide}"
+                            # [정직 고지] QA 요청 이미지 생성 실패 건도 숨기지 않고 즉시 고지한다.
+                            _qa_img_fail = ImageCreatorHub.summarize_failures(qa_img_results)
+                            if _qa_img_fail:
+                                try:
+                                    await safe_send_discord_message(qa_target_channel, _qa_img_fail)
+                                except Exception:
+                                    pass
+                    except Exception as _qa_img_err:
+                        logger.warning(f"TrioAgentRunner: QA image request handling skipped: {_qa_img_err}")
+
                 # Check QA Approval (일반 승인 + QA 직접 패치 승인 + 자연어 승인 폴백 모두 처리)
-                raw_qa_approved = cls.is_qa_approved(latest_qa_output)
+                raw_qa_approved = _qa_pre_approved if _qa_pre_approved is not None else cls.is_qa_approved(latest_qa_output)
                 qa_approved = raw_qa_approved
                 guardian_overridden = False
+
+                # 🛡️ QA Role Inversion Check (QA acting as primary Coder without status declaration)
+                if _qa_pre_inverted is not None:
+                    is_qa_inverted, qa_inversion_reason = _qa_pre_inverted, _qa_pre_inversion_reason
+                else:
+                    is_qa_inverted, qa_inversion_reason = cls.detect_qa_role_inversion(latest_qa_output)
+                if is_qa_inverted and not is_non_coding:
+                    logger.warning(f"TrioAgentRunner: QA Role Inversion detected: {qa_inversion_reason}")
+                    qa_approved = False
+                    guardian_overridden = True
+                    latest_qa_output = role_authority.format_system_gate_override(
+                        approved=False,
+                        title="🚨 **[시스템 게이트 자동 반려 — QA 역할 전도(Role Inversion) 감지]**",
+                        blocking_defects=1,
+                        detail=(
+                            f"{qa_inversion_reason}\n\n"
+                            "QA는 본분을 준수하여 대규모 코드 작성을 중단하고, 결함 위치와 수정 요구사항을 "
+                            "명시하여 [STATUS: REJECTED]로 Coder에게 재작업을 지시해야 합니다."
+                        ),
+                        original=latest_qa_output,
+                    )
 
                 # 🛡️ QA Minimum Inspection Gate (형식적 승인 방지)
                 # Non-coding tasks (diagnostic, inquiry, consulting) bypass depth validation
                 current_mode = getattr(session, "mode", "single")
-                _multi_modes = ("pair", "mode3", "pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "mode3_plus", "3+", "3plus")
+                _is_multi_agent = mode_registry.is_multi_agent_mode(current_mode)
                 qa1_was_skipped = (1 in previously_approved_qas) and round_num > 1
-                if qa_approved and current_mode in _multi_modes and not is_non_coding and not qa1_was_skipped:
+                if qa_approved and _is_multi_agent and not is_non_coding and not qa1_was_skipped:
                     is_sufficient, reject_reason = cls._validate_qa_inspection_depth(latest_qa_output, session.workspace)
                     if not is_sufficient:
                         logger.warning(f"TrioAgentRunner: QA Minimum Inspection Gate failed: {reject_reason}")
                         qa_approved = False
                         guardian_overridden = True
-                        latest_qa_output = (
-                            f"[STATUS: REJECTED]\n"
-                            f"🚨 **[품질 게이트 강제 반려 — QA 형식적 승인(Rubber-stamp) 방지]**\n"
-                            f"{reject_reason}\n\n"
-                            f"QA는 단 한 줄의 코드라도 파일명과 결함 부위를 명확히 지적하며, '승인' 전 반드시 실질적인 코드 분석을 수행해야 합니다.\n\n"
-                            f"--- QA 원본 응답 ---\n"
-                            f"{latest_qa_output}"
+                        latest_qa_output = role_authority.format_system_gate_override(
+                            approved=False,
+                            title="🚨 **[시스템 게이트 자동 반려 — QA 형식적 승인(Rubber-stamp) 방지]**",
+                            blocking_defects=1,
+                            detail=(
+                                f"{reject_reason}\n\n"
+                                "QA는 '승인' 전 최소한의 검증 항목과 근거를 서술해야 합니다."
+                            ),
+                            original=latest_qa_output,
                         )
 
                 # 🎨 Visual Asset Enforcement Gate (GUI 프로젝트 이미지 생성 기계적 강제)
-                if qa_approved and current_mode in _multi_modes:
+                if qa_approved and _is_multi_agent:
                     session_5w1h = getattr(session, "_current_5w1h_plan", None)
                     vis_app = getattr(session_5w1h, "visual_approved", False) if session_5w1h else False
                     dom = getattr(session_5w1h, "domain", "") if session_5w1h else ""
@@ -1963,14 +2404,18 @@ class TrioAgentRunner:
                             logger.warning("TrioAgentRunner: QA passed GUI task but 0 visual assets exist. Overriding to REJECTED for visual quality.")
                             qa_approved = False
                             guardian_overridden = True
-                            latest_qa_output = (
-                                f"[STATUS: REJECTED]\n"
-                                f"🎨 **[품질 게이트 강제 반려 — 시각 디자인 에셋(Visual Asset) 미생성]**\n"
-                                f"이 프로젝트는 GUI({dom}) 프로덕트이나 워크스페이스에 생성된 이미지 에셋(로고/아이콘/배너)이 0개입니다.\n"
-                                f"단순 텍스트/단색 UI로 때운 결과물은 상용 수준 품질에 미달합니다.\n"
-                                f"Coder는 `generate_image` 도구를 실행하여 필요한 대표 시각 에셋을 생성하고 소스코드에 배치하십시오.\n\n"
-                                f"--- QA 원본 응답 ---\n"
-                                f"{latest_qa_output}"
+                            latest_qa_output = role_authority.format_system_gate_override(
+                                approved=False,
+                                title="🎨 **[시스템 게이트 자동 반려 — 시각 디자인 에셋(Visual Asset) 미생성]**",
+                                blocking_defects=1,
+                                detail=(
+                                    f"이 프로젝트는 GUI({dom}) 프로덕트이나 워크스페이스에 생성된 이미지 "
+                                    "에셋(로고/아이콘/배너)이 0개입니다.\n"
+                                    "단순 텍스트/단색 UI로 때운 결과물은 상용 수준 품질에 미달합니다.\n"
+                                    "Coder는 `generate_image` 도구를 실행하여 필요한 대표 시각 에셋을 생성하고 "
+                                    "소스코드에 배치하십시오."
+                                ),
+                                original=latest_qa_output,
                             )
 
                 # 🎨 Visual Craft Loop Enforcement Gate (!mode 3/3+ 무인 자율 시각 완성도 강제)
@@ -1988,15 +2433,18 @@ class TrioAgentRunner:
                                 )
                                 qa_approved = False
                                 guardian_overridden = True
-                                latest_qa_output = (
-                                    f"[STATUS: REJECTED]\n"
-                                    f"🎨 **[품질 게이트 강제 반려 — 시각 완성도 계약(Visual Craft) 위반]**\n"
-                                    f"기능 검증은 통과했으나, 실기기/스크린샷 실측 기반 시각 감사에서 "
-                                    f"MAJOR 이상 결함이 적발되었습니다. 마케팅 문구 추가가 아니라 구조를 수정하십시오.\n\n"
-                                    f"{_VCL.build_fix_directive(visual_craft_report)}\n\n"
-                                    f"--- QA 원본 응답 ---\n{latest_qa_output}"
+                                latest_qa_output = role_authority.format_system_gate_override(
+                                    approved=False,
+                                    title="🎨 **[시스템 게이트 자동 반려 — 시각 완성도 계약(Visual Craft) 위반]**",
+                                    blocking_defects=len(visual_craft_report.failing_rule_ids or []) or 1,
+                                    detail=(
+                                        "기능 검증은 통과했으나, 실기기/스크린샷 실측 기반 시각 감사에서 "
+                                        "MAJOR 이상 결함이 적발되었습니다. 마케팅 문구 추가가 아니라 구조를 수정하십시오.\n\n"
+                                        f"{_VCL.build_fix_directive(visual_craft_report)}"
+                                    ),
+                                    original=latest_qa_output,
                                 )
-                                await safe_send_discord_message(main_channel, latest_qa_output)
+                                await post_verdict_message(latest_qa_output)
                             elif not visual_craft_escalated:
                                 visual_craft_escalated = True
                                 logger.warning(
@@ -2022,14 +2470,19 @@ class TrioAgentRunner:
                     logger.warning(f"TrioAgentRunner: QA passed verbally but anti-mocking violations exist: {anti_mock_violations}. Overriding to REJECTED.")
                     qa_approved = False
                     guardian_overridden = True
-                    latest_qa_output = (
-                        f"[STATUS: REJECTED]\n"
-                        f"🚨 **[품질 게이트 강제 반려 — Anti-Mocking / 레퍼런스 이미지 표절 적발]**\n"
-                        f"시니어 QA가 합격 판정을 내렸으나, 시스템 무결성 가디언이 결과 조작/표절/재탕을 기계적으로 적발하여 즉시 반려합니다:\n"
-                        + "\n".join(f"• {v}" for v in anti_mock_violations) + "\n\n"
-                        f"Coder는 사용자의 참고 이미지를 흉내 내거나 이전 산출물을 재탕하지 말고, 실제 코드를 렌더링/빌드하여 고유한 새 결과물을 생성하십시오."
+                    latest_qa_output = role_authority.format_system_gate_override(
+                        approved=False,
+                        title="🚨 **[시스템 게이트 자동 반려 — Anti-Mocking / 레퍼런스 이미지 표절 적발]**",
+                        blocking_defects=len(anti_mock_violations) or 1,
+                        detail=(
+                            "시니어 QA가 합격 판정을 내렸으나, 시스템 무결성 가디언이 결과 조작/표절/재탕을 "
+                            "기계적으로 적발하여 즉시 반려합니다:\n"
+                            + "\n".join(f"• {v}" for v in anti_mock_violations) + "\n\n"
+                            "Coder는 사용자의 참고 이미지를 흉내 내거나 이전 산출물을 재탕하지 말고, "
+                            "실제 코드를 렌더링/빌드하여 고유한 새 결과물을 생성하십시오."
+                        ),
                     )
-                    await safe_send_discord_message(main_channel, latest_qa_output)
+                    await post_verdict_message(latest_qa_output)
                 elif qa_approved and not any(tag in latest_qa_output for tag in ["[STATUS: APPROVED]", "STATUS: APPROVED"]):
                     latest_qa_output = f"[STATUS: APPROVED]\n{latest_qa_output}"
 
@@ -2060,14 +2513,18 @@ class TrioAgentRunner:
                         logger.warning(f"TrioAgentRunner: Anti-Collusion caught requirement omission: {missing_reqs}")
                         qa_approved = False
                         guardian_overridden = True
-                        latest_qa_output = (
-                            f"[STATUS: REJECTED]\n"
-                            f"⚠️ **[품질 게이트 강제 반려 — 필수 요구사항 누락 감지]**\n"
-                            f"{req_msg}\n"
-                            f"시니어 QA가 합격 판정을 내렸으나, 시스템 무결성 가디언이 필수 요구사항 누락을 감지하여 기계적으로 반려합니다:\n"
-                            f"누락된 핵심 요구사항을 회피하지 말고 직접 소스코드에 구현하십시오: {', '.join(missing_reqs)}"
+                        latest_qa_output = role_authority.format_system_gate_override(
+                            approved=False,
+                            title="⚠️ **[시스템 게이트 자동 반려 — 필수 요구사항 누락 감지]**",
+                            blocking_defects=len(missing_reqs or []) or 1,
+                            detail=(
+                                f"{req_msg}\n"
+                                "시니어 QA가 합격 판정을 내렸으나, 시스템 무결성 가디언이 필수 요구사항 누락을 "
+                                "감지하여 기계적으로 반려합니다:\n"
+                                f"누락된 핵심 요구사항을 회피하지 말고 직접 소스코드에 구현하십시오: {', '.join(missing_reqs)}"
+                            ),
                         )
-                        await safe_send_discord_message(main_channel, latest_qa_output)
+                        await post_verdict_message(latest_qa_output)
 
                 # 🛡️ Collaboration Intelligence Check: Coder-QA Ping-Pong Convergence Trap (A10)
                 if not qa_approved:
@@ -2154,15 +2611,18 @@ class TrioAgentRunner:
                             session.set_status("busy", "📉 비차단 항목만 잔존 → 수렴 승인 처리")
                             qa_approved = True
                             guardian_overridden = True
-                            latest_qa_output = (
-                                f"[STATUS: APPROVED]\n"
-                                f"✅ **[수렴 계약 — 비차단 항목만 잔존]**\n"
-                                f"QA가 반려를 선언했으나 `[BLOCKING_DEFECTS: 0]` — 남은 항목은 사용자 체감을 막지 않는 "
-                                f"비차단(스타일/문서/리팩토링) 항목뿐입니다. 수렴 계약에 따라 승인 처리하고 "
-                                f"잔여 항목은 [차기 백로그]로 이관합니다.\n\n"
-                                f"--- QA 원본 응답 ---\n{latest_qa_output}"
+                            latest_qa_output = role_authority.format_system_gate_override(
+                                approved=True,
+                                title="✅ **[시스템 게이트 수렴 승인 — 비차단 항목만 잔존]**",
+                                blocking_defects=0,
+                                detail=(
+                                    "QA가 반려를 선언했으나 `[BLOCKING_DEFECTS: 0]` — 남은 항목은 사용자 체감을 "
+                                    "막지 않는 비차단(스타일/문서/리팩토링) 항목뿐입니다. 수렴 계약에 따라 승인 "
+                                    "처리하고 잔여 항목은 [차기 백로그]로 이관합니다."
+                                ),
+                                original=latest_qa_output,
                             )
-                            await safe_send_discord_message(main_channel, latest_qa_output)
+                            await post_verdict_message(latest_qa_output)
                         elif _escalate:
                             _trend = ConvergenceTracker.describe(channel_id or 0)
                             logger.warning(
@@ -2182,6 +2642,23 @@ class TrioAgentRunner:
 
                 if not qa_approved:
                     feedback_for_coder = f"[qa1 반려 사유]\n{latest_qa_output}"
+                    # 🖼️ [이미지 도구 지시문 보존] QA가 실제 생성/수정 요청을 냈다면, 이후
+                    # 가디언 게이트(시각 계약/교차검증 등)가 본문을 재작성하며 태그를 소실시키지
+                    # 않도록 원본 태그를 Coder 피드백에 기계적으로 보존한다.
+                    try:
+                        from image_creator_hub import ImageCreatorHub
+                        _qa_img_reqs = ImageCreatorHub.parse_image_requests(latest_qa_output)
+                        _qa_img_directive = ImageCreatorHub.format_pending_requests(_qa_img_reqs)
+                        if _qa_img_directive:
+                            feedback_for_coder += (
+                                "\n\n🖼️ **[QA 이미지 도구 요청 보존 — 반드시 처리]**\n"
+                                "QA가 아래 이미지 생성/수정을 요청했습니다. 소스코드 반영과 함께, "
+                                "아래 태그를 **다음 턴 본문에 그대로 남겨** 이미지 봇이 실제 AI 백엔드로 "
+                                "생성/재편집하도록 하십시오(태그를 생략하면 이미지 작업이 실행되지 않습니다).\n"
+                                f"{_qa_img_directive}"
+                            )
+                    except Exception as _qa_img_parse_err:
+                        logger.debug(f"QA image directive preservation skipped: {_qa_img_parse_err}")
                     session.set_status("busy", f"⚠️ qa1 반려 ➔ Coder 보강 중 ({round_num}R)")
                     if guardian_overridden:
                         await send_transit_notice(f"❌ **[시스템 무결성 가디언 반려 (라운드 {round_num})]** QA 구두 승인 후 무결성 검증 위반이 적발되어 Coder에게 재작업을 지시합니다.")
@@ -2298,7 +2775,7 @@ class TrioAgentRunner:
                             arbitration_guidance = ""
                             if last_arbitration_directive:
                                 arbitration_guidance = (
-                                    f"\n**[⚖️ 사령관(<@1540273467453345812>) 최종 중재 판결 지침]**:\n"
+                                    f"\n**[⚖️ 사령관({config.COMMANDER_BOT_MENTION}) 최종 중재 판결 지침]**:\n"
                                     f"{last_arbitration_directive}\n\n"
                                     f"⚠️ **[심사 필수 가이드]**: 사령관이 상반된 의견 대립(A안 vs B안)을 종합 중재하여 위 단일 수렴 지침으로 최종 판결했습니다.\n"
                                     f"개인적인 스타일/구조 선호로 인한 번복성 재반려는 불가하며, 오직 사령관 지침이 소스코드에 충실히 반영되었는지만 집중 검증하십시오.\n"
@@ -2392,6 +2869,15 @@ class TrioAgentRunner:
                             if cls.is_system_error(current_ext_output):
                                 return current_ext_output
 
+                            # 🛡️ [출력 가드] 판정 태그 첫 줄 강제 + 비한국어 응답 한국어 재작성.
+                            current_ext_output = await cls.guard_output(
+                                current_ext_output,
+                                approved=cls.is_qa_approved(current_ext_output),
+                                kind="qa",
+                                rerun=(lambda _p, _cfg=qa_cfg: cls.run_extended_qa_turn(
+                                    session=session, prompt=_p, qa_config=_cfg)),
+                            )
+
                             ext_chunks, ext_file_attachments = await async_prepare_message_payload(
                                 current_ext_output,
                                 workspace_root=session.workspace,
@@ -2420,13 +2906,17 @@ class TrioAgentRunner:
                             if qa_passed and not is_anti_mock_clean:
                                 logger.warning(f"TrioAgentRunner: {qa_name} approved verbally but anti-mocking violations exist. Overriding to REJECTED.")
                                 qa_passed = False
-                                current_ext_output = (
-                                    f"[STATUS: REJECTED]\n"
-                                    f"🚨 **[{qa_name} 품질 게이트 강제 반려 — Anti-Mocking / 레퍼런스 이미지 표절 적발]**\n"
-                                    + "\n".join(f"• {v}" for v in anti_mock_violations) + "\n\n"
-                                    f"Coder는 사용자 참고 이미지 복사나 라운드 재탕을 중단하고 새로운 실체 결과물을 생성하십시오."
+                                current_ext_output = role_authority.format_system_gate_override(
+                                    approved=False,
+                                    title=f"🚨 **[{qa_name} 시스템 게이트 자동 반려 — Anti-Mocking / 레퍼런스 이미지 표절 적발]**",
+                                    blocking_defects=len(anti_mock_violations) or 1,
+                                    detail=(
+                                        "\n".join(f"• {v}" for v in anti_mock_violations) + "\n\n"
+                                        "Coder는 사용자 참고 이미지 복사나 라운드 재탕을 중단하고 "
+                                        "새로운 실체 결과물을 생성하십시오."
+                                    ),
                                 )
-                                await safe_send_discord_message(main_channel, current_ext_output)
+                                await post_verdict_message(current_ext_output)
 
 
                             if getattr(session, "is_stopped", False) or not getattr(session, "is_busy", True):
@@ -2459,7 +2949,7 @@ class TrioAgentRunner:
                     if resolution.get("has_conflict"):
                         arbitration_text = resolution.get("arbitration_text", "")
                         if arbitration_text:
-                            await safe_send_discord_message(main_channel, arbitration_text)
+                            await post_verdict_message(arbitration_text)
 
                     if not resolution.get("is_approved"):
                         extended_qa_rejected = True
@@ -2480,7 +2970,7 @@ class TrioAgentRunner:
 
                 auditor_step = squad_total_steps if active_extended_qas else total_steps
                 await send_transit_notice(
-                    f"⚡ **[{auditor_step}/{auditor_step}단계 최종 감사]** ⚖️ <@1539459595133521930> PRD 헌법 부합성 & 기계적 증거 전수 대조 감사 시작..."
+                    f"⚡ **[{auditor_step}/{auditor_step}단계 최종 감사]** ⚖️ <@{AUDITOR_MENTION_USER_ID}> PRD 헌법 부합성 & 기계적 증거 전수 대조 감사 시작..."
                 )
 
                 # Check ThermalGuard before starting Auditor final audit
@@ -2680,13 +3170,18 @@ class TrioAgentRunner:
                 if auditor_passed and not is_anti_mock_clean:
                     logger.warning(f"TrioAgentRunner: Auditor approved verbally but anti-mocking violations exist: {anti_mock_violations}. Overriding to REJECTED.")
                     auditor_passed = False
-                    latest_auditor_output = (
-                        f"[STATUS: AUDIT_FAILED] [ACTION: STOP]\n"
-                        f"🚨 **[감사관 최종 감사 거부 — Anti-Mocking / 레퍼런스 이미지 표절 적발]**\n"
-                        + "\n".join(f"• {v}" for v in anti_mock_violations) + "\n\n"
-                        f"프로젝트 헌법 및 무결성 기준에 따라 표절/재탕 행위가 감지되어 최종 승인을 거부합니다."
+                    latest_auditor_output = role_authority.format_system_gate_override(
+                        approved=False,
+                        title="🚨 **[시스템 게이트 감사 거부 — Anti-Mocking / 레퍼런스 이미지 표절 적발]**",
+                        blocking_defects=len(anti_mock_violations) or 1,
+                        detail=(
+                            "\n".join(f"• {v}" for v in anti_mock_violations) + "\n\n"
+                            "프로젝트 헌법 및 무결성 기준에 따라 표절/재탕 행위가 감지되어 최종 승인을 거부합니다."
+                        ),
+                        judge="시스템 무결성 가디언 (Auditor 판정 오버라이드)",
+                        verdict_line_override="[STATUS: AUDIT_FAILED] [ACTION: STOP]",
                     )
-                    await safe_send_discord_message(main_channel, latest_auditor_output)
+                    await safe_send_discord_message(auditor_target_channel, latest_auditor_output)
 
                 # Ground Truth Verification for Auditor (Only when Auditor mistakenly claimed no files changed)
                 if not auditor_passed and gates_info.get("all_passed") and is_anti_mock_clean and diff_info.get("has_changes"):
@@ -2719,6 +3214,15 @@ class TrioAgentRunner:
                                 f"### 🛡️ {pipe_label} 협업 품질 요약\n"
                                 f"• 👨‍💻 Coder 구현 완료 | 🕵️ QA 통과 | ⚖️ Auditor 최종 승인"
                             )
+
+                # 🛡️ [출력 가드] Auditor 판정 태그 첫 줄 강제 + 비한국어 응답 한국어 재작성.
+                # (Ground Truth 보정 이후에 수행하여 '거짓 변경없음 주장' 보정 로직을 방해하지 않는다)
+                latest_auditor_output = await cls.guard_output(
+                    latest_auditor_output,
+                    approved=auditor_passed,
+                    kind="auditor",
+                    rerun=(lambda _p: cls.run_auditor_turn(session=session, prompt=_p)),
+                )
 
                 if active_extended_qas:
                     pipe_label = f"{squad_total_steps}중"
@@ -2810,6 +3314,35 @@ class TrioAgentRunner:
 
                 if auditor_passed:
                     session.set_status("idle", "🟢 최종 감사 승인 완료 (정상 대기)")
+
+                    # 🖼️ 최종 승인 시 미공유 E2E/시각 스크린샷 메인 채널 최종 공유 보증
+                    try:
+                        _sent_hashes = getattr(session, "_vcl_gallery_sent_hashes", None)
+                        if _sent_hashes is None:
+                            _sent_hashes = set()
+                            session._vcl_gallery_sent_hashes = _sent_hashes
+                        _has_explicit_shot_req = any(kw in (prompt or "").lower() for kw in [
+                            "스크린샷", "스샷", "화면", "캡처", "e2e", "screenshot", "screenshots", "ui", "view", "프레임버퍼", "사진"
+                        ])
+                        _final_cands = collect_candidate_screenshots(
+                            effective_ws, extra=_gallery_candidates, min_mtime=_round_start_ts - 30.0
+                        )
+                        if _has_explicit_shot_req or _final_cands:
+                            _final_sent_n = await send_screenshot_gallery(
+                                main_channel,
+                                _final_cands,
+                                excluded_hashes=getattr(session, "user_reference_hashes_set", set()),
+                                excluded_dhashes=getattr(session, "user_reference_dhashes_set", set()),
+                                already_sent=_sent_hashes,
+                                max_files=4,
+                                title=f"🎨 [최종 승인 완료] E2E 및 실제 렌더링 스크린샷",
+                                min_mtime=_round_start_ts - 30.0,
+                            )
+                            if _final_sent_n:
+                                logger.info(f"TrioAgentRunner: Shared {_final_sent_n} final E2E screenshot(s) to Discord on approval.")
+                    except Exception as _final_shot_err:
+                        logger.debug(f"Final screenshot delivery notice: {_final_shot_err}")
+
                     if noti_channel:
                         try:
                             tag = f"📍 [<#{channel_id}>] " if channel_id else ""

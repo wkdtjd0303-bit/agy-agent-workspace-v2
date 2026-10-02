@@ -66,7 +66,7 @@ class TestBotPresenceModels(unittest.IsolatedAsyncioTestCase):
         self.assertIn(config.CODER_MODEL, activity.name)
 
     async def test_execute_all_in_one_hot_reset_updates_all_presences(self):
-        """execute_all_in_one_hot_reset synchronizes bot, qa, qa2, auditor, ext_qa, and consultant presences."""
+        """execute_all_in_one_hot_reset synchronizes bot, qa, qa2, auditor, ext_qa, and image presences."""
         import bot
 
         mock_channel = MagicMock()
@@ -105,7 +105,8 @@ class TestBotPresenceModels(unittest.IsolatedAsyncioTestCase):
 
             mock_qa2_presence.assert_called_once()
             qa2_activity = mock_qa2_presence.call_args[1].get("activity")
-            self.assertIn("Solar Pro 4", qa2_activity.name)
+            qa2_disp = GlobalModelManager.get_role_model_display("qa2")
+            self.assertIn(qa2_disp, qa2_activity.name, "qa2 presence must reflect the configured model display")
 
     def test_coder_model_default_and_identity_consistency(self):
         """CODER_MODEL in config and bot global identity must match consistently and follow valid model identifier conventions."""

@@ -2,10 +2,15 @@ import os
 import time
 import json
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any, Tuple
 from config import DEFAULT_WORKSPACE, DEFAULT_CHANNEL_WORKSPACES, STATE_FILE_PATH
+try:
+    import mode_registry
+except Exception:  # pragma: no cover - 무중단 폴백
+    mode_registry = None
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +68,7 @@ def kill_process_tree(pid: int):
 _INTERPRETER_OR_TOOL = {
     "bash", "sh", "dash", "zsh", "fish", "grep", "pgrep", "ps", "head", "tail",
     "timeout", "python", "python3", "node", "npm", "npx", "opencode", "hermes",
+    "cmdc", "commandcode",
     "systemctl", "journalctl", "ssh", "vim", "nano", "code", "cat", "sed", "awk",
 }
 
@@ -176,6 +182,10 @@ class ChannelSession:
     status_desc: str = "정상 대기 중"
     current_process: Any = None
     current_task: Any = None
+    # [🛡️ StallGuard 하트비트] 실제 진행 시각과 busy 시작 시각 (정지 감시 기준)
+    busy_since: float = 0.0
+    last_progress_at: float = 0.0
+    _stall_warned: bool = False
     qa2_conversation_id: Optional[str] = None
     _extended_qa_conversation_ids: Dict[str, str] = {}
     selected_qa_indices: Optional[List[int]] = None
@@ -239,9 +249,12 @@ class ChannelSession:
         # key 형식: "<engine>:<conversation_id_attr>" (예: "opencode:conversation_id")
         self.engine_conversations: Dict[str, str] = dict(engine_conversations) if isinstance(engine_conversations, dict) else {}
         init_mode = (mode or "auto").lower().strip()
-        if init_mode not in ("auto", "read", "pair_quad", "single_qa2", "pair", "single_plus", "single", "mode3", "mode3_plus"):
+        # 레거시 컨설턴트 모드(single_plus)는 제거되어 단일 에이전트 모드로 통합되었습니다.
+        if init_mode == "single_plus":
+            init_mode = "single"
+        if init_mode not in ("auto", "read", "pair_quad", "single_qa2", "pair", "single", "mode3", "mode3_plus"):
             init_mode = "auto"
-        self.mode: str = init_mode  # "auto", "pair", "pair_quad", "single", "single_plus", "single_qa2", "read", "mode3", or "mode3_plus"
+        self.mode: str = init_mode  # "auto", "pair", "pair_quad", "single", "single_qa2", "read", "mode3", or "mode3_plus"
         self.auto_enabled: bool = auto_enabled
         self.auto_mode: str = auto_mode
         self.auto_idle_seconds: int = auto_idle_seconds
@@ -250,6 +263,10 @@ class ChannelSession:
         self.current_process: Optional[asyncio.subprocess.Process] = None
         self.current_task: Optional[asyncio.Task] = None
         self.is_busy: bool = is_busy
+        # [🛡️ StallGuard] busy 시작 시각 / 실제 진행(하트비트) 시각 / 경보 발송 여부
+        self.busy_since: float = time.time() if is_busy else 0.0
+        self.last_progress_at: float = time.time()
+        self._stall_warned: bool = False
         self.status: str = status  # "idle", "busy", "error", "warning"
         self.status_desc: str = status_desc
         self.updated_at: str = updated_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -277,6 +294,10 @@ class ChannelSession:
         self.queue: List[QueuedItem] = []
         self.user_reference_images: List[Dict[str, Any]] = []
         self.round_deliverable_image_hashes: Dict[int, Dict[str, Any]] = {}
+        # [🚫 이미지 재활용 원천 차단] 이미 디스코드로 전송(전달)한 이미지의 지문(sha256/dHash).
+        # 한 번 전달된 이미지는 동일 채널 세션에서 다시 첨부·전송될 수 없다(재사용 불가).
+        self.delivered_image_hashes: List[str] = []
+        self.delivered_image_dhashes: List[str] = []
         self._on_change = on_change
 
     def get_user_directive(self) -> Optional[str]:
@@ -340,19 +361,58 @@ class ChannelSession:
         self.user_reference_images = []
         self.round_deliverable_image_hashes = {}
 
+    # [🚫 이미지 재활용 원천 차단] 디스코드로 실제 전송된 이미지의 sha256/dHash 를 누적 등록한다.
+    # 이후 동일 이미지(바이트 동일 또는 지각적 유사 dHash<=3)는 전달 후보에서 제외된다.
+    def register_delivered_images(self, paths: Optional[List[str]]) -> None:
+        """전송한 이미지 파일 경로들의 지문을 누적 등록한다(비이미지는 무시)."""
+        if not paths:
+            return
+        if not hasattr(self, "delivered_image_hashes"):
+            self.delivered_image_hashes = []
+            self.delivered_image_dhashes = []
+        try:
+            from evidence_validator import EvidenceValidator
+        except Exception:
+            EvidenceValidator = None  # type: ignore
+        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+        for p in paths:
+            try:
+                sp = str(p)
+                if not sp.lower().endswith(image_exts):
+                    continue
+                if not os.path.isfile(sp):
+                    continue
+                h = hashlib.sha256()
+                with open(sp, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        h.update(chunk)
+                sha = h.hexdigest()
+                if sha and sha not in self.delivered_image_hashes:
+                    self.delivered_image_hashes.append(sha)
+                if EvidenceValidator is not None:
+                    dh = EvidenceValidator.compute_image_dhash(sp)
+                    if dh and dh not in self.delivered_image_dhashes:
+                        self.delivered_image_dhashes.append(dh)
+            except Exception:
+                continue
+
     @property
     def user_reference_hashes_set(self) -> set:
-        """Returns a set of all SHA-256 hashes of user reference images."""
-        if not hasattr(self, "user_reference_images") or not self.user_reference_images:
-            return set()
-        return {item["sha256"] for item in self.user_reference_images if "sha256" in item}
+        """전달 제외 대상 SHA-256 집합 = 사용자 레퍼런스 이미지 ∪ 이미 전달한 이미지(재활용 차단)."""
+        hashes = set(getattr(self, "delivered_image_hashes", []) or [])
+        for item in getattr(self, "user_reference_images", []) or []:
+            if item.get("sha256"):
+                hashes.add(item["sha256"])
+        return hashes
 
     @property
     def user_reference_dhashes_set(self) -> set:
-        """Returns a set of all perceptual dHashes of user reference images."""
-        if not hasattr(self, "user_reference_images") or not self.user_reference_images:
-            return set()
-        return {item["dhash"] for item in self.user_reference_images if item.get("dhash")}
+        """전달 제외 대상 dHash 집합 = 사용자 레퍼런스 ∪ 이미 전달한 이미지(지각적 재활용 차단)."""
+        dhashes = set(getattr(self, "delivered_image_dhashes", []) or [])
+        for item in getattr(self, "user_reference_images", []) or []:
+            if item.get("dhash"):
+                dhashes.add(item["dhash"])
+        return dhashes
 
 
     def enqueue(self, message: Any, prompt: str) -> int:
@@ -422,6 +482,22 @@ class ChannelSession:
         self.clear_user_reference_images()
         if self._on_change:
             self._on_change()
+
+    def reset_for_hard_reset(self):
+        """[!reset 전용 하드 리셋] 대화 ID뿐 아니라 목표/보류/대기 컨텍스트까지 완전히 비운다.
+
+        `reset_conversation()` 은 마일스톤 사이클 전환(`reset_cycle_workers`)에서도 호출되므로
+        root_user_goal / commander_macro_history 같은 지속 목표는 의도적으로 보존한다.
+        반면 사용자의 `!reset` / `!reset all` 은 "깨끗한 새 세션"을 약속하므로, 잔존한
+        목표·보류 프롬프트·그린 대기가 다음 실행에 되살아나는 것을 막기 위해 이 메서드를 쓴다.
+        """
+        self.reset_conversation()
+        self.root_user_goal = None
+        self.user_directive = None
+        self.mode3_pending_prompt = None
+        self.wait_for_green = False
+        self.stop_after_current_cycle = False
+        self.commander_macro_history = []
 
     def reset_cycle_workers(self):
         """
@@ -553,48 +629,23 @@ class ChannelSession:
         return [cfg for cfg in (all_configs or []) if isinstance(cfg, dict) and cfg.get("index") in self.selected_qa_indices]
 
     def set_mode(self, mode: str):
-        mode = mode.lower().strip()
-        first_token = mode.split()[0] if mode else ""
-        if mode in ("auto", "automatic", "smart", "ai", "자율", "자동", "오토") or first_token in ("auto", "automatic", "smart", "ai", "자율", "자동", "오토"):
-            self.mode = "auto"
-        elif mode in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성") or first_token in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성"):
-            self.mode = "read"
-        elif (
-            mode in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+", "자율3+", "무인3+")
-            or mode.replace(" ", "") in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+")
-            or first_token in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+")
-        ):
-            self.mode = "mode3_plus"  # 무인 자율 순환 다중 협업 모드 (!mode 3+: Commander ➔ Coder ➔ QA1 ➔ QAs ➔ Auditor ➔ Commander)
-        elif (
-            mode in ("3", "mode3", "자율3", "무인3", "3자율", "3차자율")
-            or mode.replace(" ", "") in ("3", "mode3")
-            or first_token in ("3", "mode3")
-        ):
-            self.mode = "mode3"  # 무인 자율 순환 3중 협업 모드 (!mode 3: Commander ➔ Coder ↔ QA ↔ Auditor ➔ Commander)
-        elif (
-            mode in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스")
-            or mode.replace(" ", "") in ("pair+", "pair_plus", "pair_quad", "quad_pair", "2+", "2plus", "2플러스")
-            or first_token in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스")
-        ):
-            self.mode = "pair_quad"  # 사용자 주도 다중 협업 모드 (!mode 2+: Coder -> QA1 -> QAs -> Auditor -> 사용자 대기)
-        elif (
-            mode in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo", "solo_qa2")
-            or mode.replace(" ", "") in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo", "solo_qa2")
-            or first_token in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo", "solo_qa2")
-        ):
-            self.mode = "single_qa2"  # 단일 QA2 에이전트 모드 (1545711652987600937 봇 단독 동작)
-        elif mode in ("pair", "trio", "dual", "team", "collab", "3중", "페어", "협업", "2") or first_token in ("pair", "trio", "dual", "team", "collab", "3중", "페어", "협업", "2"):
-            self.mode = "pair"  # 사용자 주도 3중 협업 모드 (!mode 2: Coder ↔ QA ↔ Auditor -> 사용자 대기)
-        elif (
-            mode in ("single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트")
-            or mode.replace(" ", "") in ("single+", "1+", "single_plus")
-            or first_token in ("single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트")
-        ):
-            self.mode = "single_plus"  # 단일 컨설턴트 모드 (!mode 1+ / !mode single+: GPT Astra 등 고사양 모델 단일 자문)
-        elif mode in ("single", "solo", "단일", "싱글", "1") or first_token in ("single", "solo", "단일", "싱글", "1"):
-            self.mode = "single"
-        else:
-            self.mode = "auto"
+        """
+        동작 모드를 설정한다.
+
+        모든 별칭 해석은 `mode_registry.normalize_mode()` 단일 진실 공급원에
+        위임한다. (`!mode 2` vs `!mode 2+`, `!mode 3` vs `!mode 3+` 의 구분이
+        어떤 입력 경로로 들어와도 동일하게 해석되도록 보장)
+        """
+        try:
+            if mode_registry is None:
+                raise RuntimeError("mode_registry unavailable")
+            resolved = mode_registry.normalize_mode(mode)
+            if resolved not in mode_registry.ALL_CANONICAL_MODES:
+                resolved = "auto"
+        except Exception:
+            # 레지스트리 로드 실패 시에도 안전하게 auto 로 수렴 (무중단)
+            resolved = "auto"
+        self.mode = resolved
         if self._on_change:
             self._on_change()
 
@@ -630,10 +681,25 @@ class ChannelSession:
         if self._on_change:
             self._on_change()
 
+    def touch(self, reason: str = "") -> None:
+        """[🛡️ StallGuard] 실제 진행 발생 시 호출되는 하트비트.
+
+        CLI stdout 출력, 도구 완료, 상태 전이 등 **진짜 일한 순간**에만 호출해야 한다.
+        디스코드 8초 주기 '진행 중...' 임베드 같은 가짜 하트비트를 여기에 연결하면
+        정지 감시가 무력화되므로 절대 연결하지 않는다.
+        """
+        self.last_progress_at = time.time()
+        self._stall_warned = False
+
     def set_busy(self, is_busy: bool, desc: str = "작업 중"):
         self.is_busy = is_busy
         if is_busy:
             self.is_stopped = False
+            self.busy_since = time.time()
+        else:
+            self.busy_since = 0.0
+        self.last_progress_at = time.time()
+        self._stall_warned = False
         self.status = "busy" if is_busy else "idle"
         self.status_desc = desc
         self.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -643,6 +709,12 @@ class ChannelSession:
     def set_status(self, status: str, desc: str = ""):
         self.status = status
         self.is_busy = (status == "busy")
+        if self.is_busy and self.busy_since <= 0.0:
+            self.busy_since = time.time()
+        elif not self.is_busy:
+            self.busy_since = 0.0
+        self.last_progress_at = time.time()
+        self._stall_warned = False
         self.status_desc = desc
         self.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if self._on_change:
@@ -738,12 +810,26 @@ class ChannelSession:
             ]
         }
 
+def get_existing_session(channel_id: int) -> Optional["ChannelSession"]:
+    """[🚫 이미지 재활용 차단] 이미 생성된 세션만 반환한다(없으면 None). 새 세션을 만들지 않는다."""
+    try:
+        mgr = getattr(SessionManager, "_primary", None)
+        if mgr is None:
+            return None
+        return getattr(mgr, "_sessions", {}).get(channel_id)
+    except Exception:
+        return None
+
+
 class SessionManager:
+    _primary: Optional["SessionManager"] = None
+
     def __init__(self, state_file: str = STATE_FILE_PATH, clear_on_startup: bool = True):
         self._state_file = state_file
         self._sessions: Dict[int, ChannelSession] = {}
         self._last_mtime: float = 0.0
         self._load_state(clear_on_startup)
+        SessionManager._primary = self
 
     def _load_state(self, clear_on_startup: bool):
         saved_data = {}
@@ -775,7 +861,9 @@ class SessionManager:
                 engine_conv_ids = data.get("engine_conversations") or {}
                 auditor_conv_id = data.get("auditor_conversation_id")
                 mode = data.get("mode", "auto")
-                if mode not in ("auto", "read", "pair_quad", "single_qa2", "pair", "single_plus", "single", "mode3", "mode3_plus"):
+                if mode == "single_plus":
+                    mode = "single"  # 레거시 컨설턴트 모드 자동 마이그레이션
+                if mode not in ("auto", "read", "pair_quad", "single_qa2", "pair", "single", "mode3", "mode3_plus"):
                     mode = "auto"
                 auto_enabled = data.get("auto_enabled", False)
                 auto_mode = data.get("auto_mode", "evolve")
@@ -1088,7 +1176,7 @@ class SessionManager:
         """Resets conversation IDs and stops all active sessions across all channels."""
         self.stop_all_sessions()
         for sess in self._sessions.values():
-            sess.reset_conversation()
+            sess.reset_for_hard_reset()
             sess.status = "idle"
             sess.status_desc = "정상 대기 중 (초기화 완료)"
             sess.is_busy = False
@@ -1102,7 +1190,7 @@ class SessionManager:
         session = self._sessions.get(channel_id)
         if session:
             session.stop()
-            session.reset_conversation()
+            session.reset_for_hard_reset()
             if clear_queue:
                 session.clear_queue()
             session.status = "idle"

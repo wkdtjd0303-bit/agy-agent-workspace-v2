@@ -40,7 +40,8 @@ PROTECTED_SYSTEM_DIRS = {
 }
 
 # Standard base directory for autocoding projects
-DEFAULT_AUTOCODING_BASE = "/home/jangsung/Desktop/autocoding"
+# (사용자명 하드코딩 대신 홈 디렉토리 기준으로 유도 — 다른 계정/머신에서도 동일 동작)
+DEFAULT_AUTOCODING_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "autocoding")
 
 
 def resolve_device_path(raw_path: str, base_dir: Optional[str] = None) -> str:

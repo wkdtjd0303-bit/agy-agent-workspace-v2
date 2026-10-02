@@ -338,6 +338,49 @@ class TestDepthFirstScopeGovernor(unittest.TestCase):
         self.assertNotIn("interaction_polish", verdict.runtime_failed)
         self.assertTrue(remaining)  # sanity: static analysis path intact
 
+    # ── Motion smoothness (실측 프레임 타이밍 ↔ interaction_polish) ──────────
+    def _write_perf_report(self, avg_fps, p95_ms, slow_frames, sample_count):
+        self._write(
+            "reports/product_depth/performance_benchmark.json",
+            json.dumps({
+                "avg_fps": avg_fps,
+                "p95_ms": p95_ms,
+                "slow_frames": slow_frames,
+                "sample_count": sample_count,
+            }),
+        )
+
+    def _seed_motion_tokens(self):
+        self._write(
+            "app/src/main/java/com/example/Animations.kt",
+            "AnimatedVisibility tween easing spring haptic motion",
+        )
+
+    def test_motion_smooth_report_verifies_interaction_polish(self):
+        self._seed_shallow_ui_app(6)
+        self._seed_motion_tokens()
+        self._write_perf_report(59.8, 16.2, 0, 120)
+        verdict = ProductRefinementGovernor.evaluate(self.tmp, "mobile_app")
+        self.assertIn("interaction_polish", verdict.runtime_verified)
+        self.assertNotIn("interaction_polish", verdict.runtime_failed)
+
+    def test_motion_jank_report_forces_deepen(self):
+        self._seed_shallow_ui_app(6)
+        self._seed_motion_tokens()
+        self._write_perf_report(38.0, 41.5, 40, 120)
+        verdict = ProductRefinementGovernor.evaluate(self.tmp, "mobile_app")
+        self.assertIn("interaction_polish", verdict.runtime_failed)
+        self.assertTrue(verdict.requires_depth)
+
+    def test_motion_report_without_enough_samples_is_noop(self):
+        self._seed_shallow_ui_app(6)
+        self._seed_motion_tokens()
+        self._write_perf_report(59.8, 16.2, 0, 5)
+        verdict = ProductRefinementGovernor.evaluate(self.tmp, "mobile_app")
+        # 표본 부족 → 모션 게이트는 판정을 보류하고 기존 동작을 보존한다.
+        self.assertNotIn("interaction_polish", verdict.runtime_verified)
+        self.assertNotIn("interaction_polish", verdict.runtime_failed)
+
     # ── CLI & Quality Contracts (QC-A-01, QC-U-01, QC-P-01) ─────────────────
     def test_cli_help_and_execution(self):
         import subprocess

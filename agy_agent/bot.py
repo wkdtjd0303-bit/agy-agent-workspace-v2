@@ -21,7 +21,7 @@ from config import (
     DISCORD_QA_BOT_TOKEN,
     DISCORD_AGY_QA2_BOT_TOKEN,
     DISCORD_AUDITOR_BOT_TOKEN,
-    DISCORD_AGY_CONSULTANT_BOT_TOKEN,
+    DISCORD_AGY_IMAGE_BOT_TOKEN,
     DISCORD_SERVER_MANAGER_BOT_TOKEN,
     DEFAULT_WORKSPACE,
     COMMAND_PREFIX,
@@ -30,8 +30,7 @@ from config import (
     QA_MODEL,
     QA2_MODEL,
     AUDITOR_MODEL,
-    CONSULTANT_MODEL,
-    CONSULTANT_ENGINE,
+    IMAGE_MODEL,
     PAIR_MAX_ROUNDS,
     QA_MAX_ROUNDS,
     QA_HUB_CHANNEL_ID,
@@ -51,6 +50,7 @@ from commander import (
 from feedback_classifier import FeedbackIntentClassifier
 from agent_runner import AgentRunner
 from trio_agent_runner import TrioAgentRunner, QuotaManager
+import mode_registry
 from research_runner import ResearchRunner
 from consulting_runner import ConsultingRunner
 import discord_utils
@@ -118,8 +118,11 @@ auditor_bot = discord.Client(intents=intents)
 # 4. Server Manager Bot (Infrastructure & Telemetry)
 server_manager_intents = discord.Intents.default()
 server_manager_bot = discord.Client(intents=server_manager_intents)
-# 5. Consultant Bot (GPT Astra / High-End Advisory · !mode 1+)
-consultant_bot = discord.Client(intents=intents)
+# 5. Image Generator Bot (실제 AI 이미지 생성 도구 봇 — Nano Banana 계열 Gemini image 백엔드)
+# - 메시지 수신/명령 처리는 메인 봇이 담당하므로 최소 권한(guilds)만 사용하여
+#   privileged message_content intent 요구로 인한 로그인 실패를 방지한다.
+image_intents = discord.Intents.default()
+image_bot = discord.Client(intents=image_intents)
 
 # Dynamic Extended QA Bots Registry (QA2..QA10 plug-and-play)
 extended_qa_bots: Dict[int, discord.Client] = {2: qa2_bot}
@@ -229,19 +232,24 @@ def ensure_commander_bot_started():
     # [🛡️ Quota Protection] Telemetry loop is started exclusively in on_ready/on_server_manager_ready.
     # Calling it here caused duplicate restarts on every !reset. Removed.
 
-consultant_bot_task = None
+image_bot_task = None
 
-def ensure_consultant_bot_started():
-    global consultant_bot_task, consultant_bot
+def ensure_image_bot_started():
+    global image_bot_task, image_bot
     if os.environ.get("UNITTEST_RUNNING") == "1" or "pytest" in sys.modules:
         return
     try:
-        tok = getattr(config, "DISCORD_AGY_CONSULTANT_BOT_TOKEN", "")
-        if tok and consultant_bot and not consultant_bot.is_ready() and not consultant_bot.is_closed() and (consultant_bot_task is None or consultant_bot_task.done()):
-            logger.info("Auto-starting Consultant Bot client in background...")
-            consultant_bot_task = asyncio.create_task(consultant_bot.start(tok))
+        tok = getattr(config, "DISCORD_AGY_IMAGE_BOT_TOKEN", "")
+        if tok and image_bot:
+            if image_bot.is_closed():
+                logger.info("Re-instantiating closed Image generator Bot client...")
+                image_bot = discord.Client(intents=image_intents)
+                image_bot.on_ready = on_image_ready
+            if not image_bot.is_ready() and (image_bot_task is None or image_bot_task.done()):
+                logger.info("Auto-starting Image generator Bot client in background...")
+                image_bot_task = asyncio.create_task(image_bot.start(tok))
     except Exception as e:
-        logger.debug(f"ensure_consultant_bot_started notice: {e}")
+        logger.debug(f"ensure_image_bot_started notice: {e}")
 
 qa2_bot_task = None
 
@@ -296,6 +304,59 @@ def reload_helper_modules():
     finally:
         _in_reload_helper_modules = False
 
+def _order_modules_for_reload(modules, current_dir):
+    """[🔒 Hot-Reload Ordering] 로컬 모듈을 '의존성 우선(leaf-first)' 순서로 정렬한다.
+
+    `from helper import X` 로 가져온 심볼은 import 시점의 객체에 바인딩되므로,
+    importer 를 dependency 보다 먼저 리로드하면 옛 클래스/함수 객체가 그대로 남아
+    `!reset` 후에도 변경 사항이 반영되지 않는다. AST 로 로컬 import 그래프를 만들어
+    dependency 를 먼저 리로드하도록(위상 정렬) 보장한다.
+    """
+    import ast
+
+    local = set(modules)
+    deps = {m: set() for m in modules}
+
+    def _collect_imports(statements):
+        for stmt in statements:
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    base = alias.name.split(".")[0]
+                    if base in local and base != m:
+                        deps[m].add(base)
+            elif isinstance(stmt, ast.ImportFrom):
+                if stmt.level == 0 and stmt.module:
+                    base = stmt.module.split(".")[0]
+                    if base in local and base != m:
+                        deps[m].add(base)
+            elif isinstance(stmt, (ast.If, ast.Try)):
+                _collect_imports(stmt.body)
+                _collect_imports(getattr(stmt, "orelse", []))
+                for handler in getattr(stmt, "handlers", []):
+                    _collect_imports(handler.body)
+            # 함수/클래스 내부의 지연 import 는 호출 시점에 해석되므로 의존성에서 제외한다.
+
+    for m in modules:
+        path = os.path.join(current_dir, f"{m}.py")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=path)
+            _collect_imports(tree.body)
+        except Exception:
+            continue
+
+    ordered = []
+    pending = list(modules)
+    while pending:
+        ready = [m for m in pending if deps[m].issubset(ordered)]
+        if not ready:
+            ordered.extend(pending)  # 순환 import 는 원래 순서대로 폴백
+            break
+        ordered.extend(ready)
+        pending = [m for m in pending if m not in ready]
+    return ordered
+
+
 def _reload_helper_modules_impl():
     global qa_hub_manager, extended_qa_bots
     global TrioAgentRunner, QuotaManager, ResearchRunner, ConsultingRunner, AgentRunner
@@ -321,7 +382,7 @@ def _reload_helper_modules_impl():
     priority_modules = [
         "config", "model_registry", "session_manager", "mode_classifier", "hot_reload_bridge",
         "commander", "discord_utils", "gdrive_uploader", "android_build_manager",
-        "audio_transcriber", "android_vision_inspector", "agent_runner",
+        "audio_transcriber", "android_vision_inspector", "agent_guidelines", "agent_runner",
         "trio_agent_runner", "research_runner", "consulting_runner",
         "qa_hub", "thermal_guard", "setup_manager", "evidence_validator",
         "help_manager", "plan_wizard", "qa_wizard", "android_emulator_manager",
@@ -337,6 +398,16 @@ def _reload_helper_modules_impl():
     for m in priority_modules + sorted(all_local_py):
         if m not in modules:
             modules.append(m)
+
+    # [🔒 Hot-Reload Ordering] importer 를 dependency 보다 먼저 리로드하면
+    # `from x import Y` 바인딩이 옛 객체로 남는다. 의존성 우선 순서로 재정렬한다.
+    # (실행 중 프로세스가 구(舊) bot.py 본문일 수 있으므로 존재 여부를 방어적으로 확인)
+    _ordering_fn = globals().get("_order_modules_for_reload")
+    if callable(_ordering_fn):
+        try:
+            modules = _ordering_fn(modules, current_dir)
+        except Exception as _order_err:
+            logger.debug(f"[Hot-Reload Ordering] 모듈 정렬 건너뜀: {_order_err}")
 
     reloaded_modules = []
     for mod in modules:
@@ -365,7 +436,7 @@ def _reload_helper_modules_impl():
             if session_manager.__class__ is not SM_cls:
                 session_manager.__class__ = SM_cls
     ensure_commander_bot_started()
-    ensure_consultant_bot_started()
+    ensure_image_bot_started()
     if "trio_agent_runner" in sys.modules:
         TrioAgentRunner = sys.modules["trio_agent_runner"].TrioAgentRunner
         QuotaManager = sys.modules["trio_agent_runner"].QuotaManager
@@ -391,8 +462,11 @@ def _reload_helper_modules_impl():
     # [🛡️ Quota Protection & Continuity] Ensure telemetry status loop is active (singleton prevents duplicate tasks)
     if "telemetry_status_manager" in sys.modules:
         try:
+            tsm = sys.modules["telemetry_status_manager"]
             active_client = server_manager_bot if (DISCORD_SERVER_MANAGER_BOT_TOKEN and server_manager_bot.is_ready()) else bot
-            sys.modules["telemetry_status_manager"].ensure_telemetry_status_loop_running(active_client, session_manager)
+            tsm.ensure_telemetry_status_loop_running(active_client, session_manager)
+            if hasattr(bot, "add_view"):
+                tsm.ensure_telemetry_status_loop_running(bot, session_manager)
         except Exception as _tsm_err:
             logger.debug(f"telemetry loop check on reload notice: {_tsm_err}")
 
@@ -420,6 +494,29 @@ def _reload_helper_modules_impl():
     if not isinstance(globals().get("WATCHDOG_CIRCUIT_BREAKER_THRESHOLD"), int):
         WATCHDOG_CIRCUIT_BREAKER_THRESHOLD = 3
         logger.info("[Hot-Reload Fix] WATCHDOG_CIRCUIT_BREAKER_THRESHOLD = 3 으로 설정.")
+
+    # [🛡️ Hot-Reload Fix] 대기열 락 전역의 유실 방지.
+    # bot.py 는 __main__ 이라 importlib.reload 대상이 아니어서, 새로 추가된 전역이
+    # 핫리로드 후 사라지면 `dispatch_next_in_queue` 가 NameError 로 죽어 대기열이
+    # 영구 정지(=요청 무응답/상태 타이머 고정 프리징)했다. 여기서 항상 보장한다.
+    try:
+        if not isinstance(globals().get("_channel_queue_locks"), dict):
+            # [QA Direct Patch] 함수 내 `_channel_queue_locks = {}` 는 global 선언이 없으면
+            # '지역 변수'로만 바인딩되어 전역이 복원되지 않는다(복원 의도 무효). 전역에 직접 쓴다.
+            globals()["_channel_queue_locks"] = {}
+            logger.info("[Hot-Reload Fix] _channel_queue_locks 초기화 완료 (대기열 락 레지스트리).")
+        if not isinstance(globals().get("QUEUE_LOCK_TIMEOUT_SECONDS"), float):
+            globals()["QUEUE_LOCK_TIMEOUT_SECONDS"] = float(
+                os.environ.get("QUEUE_LOCK_TIMEOUT_SECONDS", "20") or 20
+            )
+            logger.info("[Hot-Reload Fix] QUEUE_LOCK_TIMEOUT_SECONDS 복원 완료.")
+        if not isinstance(globals().get("THERMAL_LOCK_GRACE_SECONDS"), float):
+            globals()["THERMAL_LOCK_GRACE_SECONDS"] = float(
+                os.environ.get("QUEUE_LOCK_THERMAL_GRACE_SECONDS", "320") or 320
+            )
+            logger.info("[Hot-Reload Fix] THERMAL_LOCK_GRACE_SECONDS 복원 완료.")
+    except Exception as _ql_err:
+        logger.debug(f"[Hot-Reload Fix] 대기열 락 전역 복원 알림: {_ql_err}")
 
     # 최신 bot.py 코드가 반영된 새 Watchdog 태스크 기동 보장
     try:
@@ -515,7 +612,7 @@ def _reload_helper_modules_impl():
     _safe_rebind_command("export_command", ["export", "대화백업", "backup", "chatexport", "chatlog", "대화기록", "내보내기", "채팅저장"])
     _safe_rebind_command("read_command", ["read", "기획", "자문", "방향성", "consult", "readonly", "아키텍처"])
     _safe_rebind_command("single_command", ["single", "solo", "단일", "싱글"])
-    _safe_rebind_command("single_plus_command", ["single+", "single_plus", "1+", "1plus", "consultant", "컨설턴트"])
+    _safe_rebind_command("image_command", ["image", "img", "이미지", "이미지생성", "그려줘", "draw"])
     _safe_rebind_command("pair_plus_command", ["pair+", "pair_plus", "2+", "2plus", "2플러스", "pair_quad", "quad_pair"])
     _safe_rebind_command("mode3_command", ["mode3", "3", "자율3", "무인3", "3자율", "3차자율", "auto_trio"])
     _safe_rebind_command("mode3_plus_command", ["mode3+", "mode3_plus", "3+", "3plus", "3플러스", "자율3+", "무인3+", "auto_multi"])
@@ -533,6 +630,7 @@ def _reload_helper_modules_impl():
     _safe_rebind_command("colab_command", ["colab", "android_runner", "headed", "코랩"])
     _safe_rebind_command("sim_command", ["sim", "simulator", "mobile", "viewer", "시뮬레이터"])
     _safe_rebind_command("status_command", ["status", "uptime", "info", "상태", "업타임", "정보", "sysinfo"])
+    _safe_rebind_command("stall_command", ["stall", "스톨", "정지감시", "정지감시기", "stallguard", "교착"])
     _safe_rebind_command("reset_command", ["reset", "reload", "restart", "hotreload", "리셋", "재시작", "초기화", "핫리셋"])
     _safe_rebind_command("new_session", ["new", "clear", "clean", "cls", "대화초기화", "세션초기화", "새세션", "새대화", "비우기"])
     _safe_rebind_command("setup_command", ["setup", "셋업", "설정", "init", "preset", "프리셋", "초기설정", "plan", "기획"])
@@ -780,21 +878,106 @@ async def sync_all_bot_presences():
             except Exception as e:
                 logger.debug(f"sync_all_bot_presences ext_qa error: {e}")
 
-    # 7. Consultant (consultant_bot)
-    if "consultant_bot" in globals() and consultant_bot and consultant_bot.is_ready():
+    # 7. Image generator (image_bot) — 실제 AI 이미지 생성 도구 봇 (Nano Banana 계열)
+    if "image_bot" in globals() and image_bot and image_bot.is_ready():
         try:
-            m_disp = GlobalModelManager.get_role_model_display("consultant") if GlobalModelManager else getattr(config, "CONSULTANT_MODEL", "GPT-6 Astra")
-            await consultant_bot.change_presence(
-                activity=discord.Activity(type=discord.ActivityType.watching, name=f"Consultant (고성능 자문) | {m_disp}")
+            m_disp = GlobalModelManager.get_role_model_display("image") if GlobalModelManager else getattr(config, "IMAGE_MODEL", "Gemini 3.8 Flash")
+            await image_bot.change_presence(
+                activity=discord.Activity(type=discord.ActivityType.watching, name=f"Image generator (AI) | {m_disp}")
             )
-            await _sync_bot_nickname(consultant_bot, "Consultant", m_disp)
+            await _sync_bot_nickname(image_bot, "Image generator", m_disp)
         except Exception as e:
-            logger.debug(f"sync_all_bot_presences consultant error: {e}")
+            logger.debug(f"sync_all_bot_presences image error: {e}")
 
 # Register presence sync callback to GlobalModelManager
 try:
     from model_manager import GlobalModelManager
     GlobalModelManager.register_change_callback(sync_all_bot_presences)
+except Exception:
+    pass
+
+
+def _engine_display_label(engine_id: str) -> str:
+    """[FIX] 엔진 식별자를 실제 엔진 이름으로 정확히 표기한다.
+
+    기존에는 `agy` 가 아니면 무조건 "Hermes" 로 출력해서, OpenCode 엔진으로
+    동작 중인데도 기동 로그가 "Hermes Coder Bot" 으로 찍혀 사용자가 다른 봇이
+    동작한 것으로 오인했다. (사용자 보고: "오픈코드로 세팅했는데 오픈라우터 봇이 동작")
+    """
+    eng = (engine_id or "").lower().strip()
+    labels = {
+        "agy": "AGY (Antigravity)",
+        "opencode": "OpenCode",
+        "hermes": "Hermes (OpenRouter)",
+        "openrouter": "Hermes (OpenRouter)",
+        "codex": "Codex",
+        "claude": "Claude",
+        "copilot": "Copilot",
+        "nous": "Nous",
+    }
+    return labels.get(eng, eng.upper() or "AGY (Antigravity)")
+
+
+def sync_sessions_with_global_model() -> int:
+    """[FIX] `!model`(GlobalModelManager) 의 역할 엔진을 모든 채널 세션에 반영한다.
+
+    과거 `!engine`/기본값으로 채워진 세션 필드(qa_engine=agy, qa2_engine=openrouter,
+    auditor_engine=agy)가 `!model` 에서 고른 OpenCode 를 덮어써, 표시(`!model`)와
+    실제 실행 엔진이 달라지는 "설정한 봇 ≠ 실제 동작 봇" 문제의 근원을 제거한다.
+
+    반환: 실제로 갱신된 세션 수.
+    """
+    try:
+        from model_manager import GlobalModelManager as _G
+    except Exception:
+        return 0
+    mgr = globals().get("session_manager")
+    if mgr is None or not hasattr(mgr, "get_all_sessions"):
+        return 0
+
+    # 세션 필드 → GlobalModelManager 역할 키
+    role_map = {
+        "engine": "coder",
+        "qa_engine": "qa1",
+        "qa2_engine": "qa2",
+        "auditor_engine": "auditor",
+    }
+    changed = 0
+    try:
+        sessions = mgr.get_all_sessions().values()
+    except Exception:
+        return 0
+    for sess in sessions:
+        dirty = False
+        for attr, role_key in role_map.items():
+            want = (_G.get_role_engine(role_key) or "").lower().strip()
+            if not want:
+                continue
+            cur = (getattr(sess, attr, "") or "").lower().strip()
+            # OpenRouter/Hermes 는 동일 별칭으로 취급
+            if {cur, want} <= {"openrouter", "hermes"}:
+                continue
+            if cur != want:
+                try:
+                    setattr(sess, attr, want)
+                    dirty = True
+                except Exception:
+                    pass
+        if dirty:
+            changed += 1
+    if changed and os.environ.get("UNITTEST_RUNNING") != "1":
+        try:
+            mgr.save_state()
+        except Exception:
+            pass
+    return changed
+
+
+# [FIX] `!model` 변경 시 채널 세션의 stale 엔진 값(qa_engine=agy, qa2_engine=openrouter …)도
+#        즉시 정합화하여 "설정한 봇 ≠ 실제 동작 봇" 문제를 근원에서 제거한다.
+try:
+    from model_manager import GlobalModelManager as _GMM
+    _GMM.register_change_callback(sync_sessions_with_global_model)
 except Exception:
     pass
 
@@ -830,6 +1013,13 @@ async def on_ready():
     logger.info(f"Main Bot connected as: {bot.user.name} ({bot.user.id})")
     logger.info(f"Default Workspace: {DEFAULT_WORKSPACE}")
     await sync_all_bot_presences()
+    # [FIX] 기동 시 기존 채널 세션의 stale 엔진 값을 `!model` SSOT 로 1회 정합화
+    try:
+        _healed = sync_sessions_with_global_model()
+        if _healed:
+            logger.info(f"[ModelRouting] Healed stale engine fields in {_healed} channel session(s) from !model SSOT.")
+    except Exception as _heal_err:
+        logger.debug(f"sync_sessions_with_global_model on_ready notice: {_heal_err}")
     try:
         from model_manager import GlobalModelManager
         coder_disp = GlobalModelManager.get_role_model_display("coder")
@@ -837,7 +1027,7 @@ async def on_ready():
         coder_disp = getattr(config, "CODER_MODEL", "gemini-3.8-flash-high")
     print("=" * 50)
     active_engine = getattr(config, "DEFAULT_ENGINE", "agy").lower()
-    engine_label = "AGY" if active_engine == "agy" else "Hermes"
+    engine_label = _engine_display_label(active_engine)
     print(f"🚀 [1/3] {engine_label} Coder Bot ({coder_disp}) 준비 완료: {bot.user.name} (에이전트 정체성: {active_engine})")
     print(f"기본 작업 폴더: {DEFAULT_WORKSPACE}")
     print("=" * 50)
@@ -896,7 +1086,7 @@ async def on_qa2_ready():
     except Exception:
         qa2_disp = QA2_MODEL
     print("=" * 50)
-    print(f"🕵️‍♂️ [qa2 / OpenRouter] AGY qa2 Bot ({qa2_disp}) 준비 완료: {qa2_bot.user.name}")
+    print(f"🕵️‍♂️ [2/3] {_engine_display_label(getattr(config, 'QA2_ENGINE', 'agy'))} qa2 Bot ({qa2_disp}) 준비 완료: {qa2_bot.user.name}")
     print("=" * 50)
 
 qa2_bot.on_ready = on_qa2_ready
@@ -931,19 +1121,38 @@ async def on_server_manager_ready():
 
 server_manager_bot.on_ready = on_server_manager_ready
 
-async def on_consultant_ready():
-    logger.info(f"Consultant Bot connected as: {consultant_bot.user.name} ({consultant_bot.user.id})")
+async def on_server_manager_interaction(interaction: discord.Interaction):
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id")
+        if custom_id == "telemetry_status_refresh" and not interaction.response.is_done():
+            # Silent ACK: no popup or ephemeral message
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+            try:
+                import telemetry_status_manager as tsm
+                ok = await tsm.update_status_message(interaction.client, session_manager, force=True)
+                if not ok:
+                    await asyncio.to_thread(tsm.update_status_via_rest_api, session_manager, True)
+            except Exception as e:
+                logger.error(f"server_manager_bot on_interaction error: {e}")
+
+server_manager_bot.on_interaction = on_server_manager_interaction
+
+async def on_image_ready():
+    logger.info(f"Image generator Bot connected as: {image_bot.user.name} ({image_bot.user.id})")
     await sync_all_bot_presences()
     try:
         from model_manager import GlobalModelManager
-        c_disp = GlobalModelManager.get_role_model_display("consultant")
+        c_disp = GlobalModelManager.get_role_model_display("image")
     except Exception:
-        c_disp = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
+        c_disp = getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
     print("=" * 50)
-    print(f"🧙‍♂️ [Consultant / OpenRouter] AGY Consultant Bot ({c_disp}) 준비 완료: {consultant_bot.user.name}")
+    print(f"🎨 [Image generator / 실제 AI 이미지 백엔드] Image Bot ({c_disp}) 준비 완료: {image_bot.user.name}")
     print("=" * 50)
 
-consultant_bot.on_ready = on_consultant_ready
+image_bot.on_ready = on_image_ready
 
 @bot.command(name="help", aliases=["hlep", "도움말", "도움", "명령어", "commands", "guide", "man", "메뉴", "menu"])
 async def help_command(ctx, *, topic: str = ""):
@@ -955,7 +1164,7 @@ async def help_command(ctx, *, topic: str = ""):
     importlib.reload(help_manager)
     view = help_manager.HelpInteractiveView(initial_page=topic.strip(), user_id=ctx.author.id)
     embed = view.get_current_embed()
-    msg = await ctx.send(embed=embed, view=view)
+    msg = await ctx.send(embed=embed, view=view, files=view.get_files())
     view.message = msg
 
 @bot.command(name="golden5", aliases=["핵심", "5대명령어", "essential", "필수", "치트시트", "골든5"], hidden=True)
@@ -968,8 +1177,24 @@ async def golden5_command(ctx):
     importlib.reload(help_manager)
     embed = help_manager.HelpManager.get_core_embed()
     view = help_manager.HelpInteractiveView(initial_page="core", user_id=ctx.author.id)
-    msg = await ctx.send(embed=embed, view=view)
+    msg = await ctx.send(embed=embed, view=view, files=view.get_files())
     view.message = msg
+
+
+@bot.command(name="brand", aliases=["브랜드", "배너", "banner", "로고"], hidden=True)
+async def brand_command(ctx):
+    """
+    프로젝트 브랜드 배너(Image generator 생성 에셋) 쇼케이스.
+    """
+    reload_helper_modules()
+    import brand_ui
+    importlib.reload(brand_ui)
+    embed = brand_ui.build_brand_embed()
+    files = brand_ui.banner_files()
+    if files:
+        await ctx.send(embed=embed, files=files)
+    else:
+        await ctx.send(embed=embed)
 
 @bot.command(name="auto", aliases=["자율", "오토", "autopilot", "autocode"])
 async def auto_command(ctx, *args):
@@ -1074,9 +1299,9 @@ async def export_command(ctx, *args):
             bot_roles[ext_qa[ext_idx].user.id] = f"qa{ext_idx}"
     if auditor_bot.user:
         bot_roles[auditor_bot.user.id] = f"⚖️ Client Auditor ({AUDITOR_MODEL})"
-    if "consultant_bot" in globals() and consultant_bot.user:
-        c_mod = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-        bot_roles[consultant_bot.user.id] = f"🧙‍♂️ Senior Consultant ({c_mod})"
+    if "image_bot" in globals() and image_bot.user:
+        i_mod = getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
+        bot_roles[image_bot.user.id] = f"🎨 Image generator ({i_mod})"
 
     async def on_progress(count: int):
         try:
@@ -1477,11 +1702,17 @@ async def simulator_command(ctx):
             except Exception:
                 is_running = False
 
+        session = session_manager.get_session(ctx.channel.id)
+        sim_workspace = session.workspace or DEFAULT_WORKSPACE
+
         if not is_running:
             app_dir = os.path.dirname(os.path.abspath(__file__))
+            sim_env = os.environ.copy()
+            sim_env["MOBILE_SIM_WORKSPACE"] = sim_workspace
             subprocess.Popen(
                 [sys.executable, "-m", "uvicorn", "mobile_simulator_server:app", "--host", "0.0.0.0", "--port", "3000"],
                 cwd=app_dir,
+                env=sim_env,
                 stdin=subprocess.DEVNULL,
                 stdout=open("/tmp/mobile_simulator.log", "a"),
                 stderr=subprocess.STDOUT,
@@ -1882,7 +2113,107 @@ async def status_command(ctx):
         inline=True
     )
 
+    try:
+        import telemetry_status_manager as tsm
+        quota_summary_lines = []
+        cc_usage = tsm.fetch_command_code_usage()
+        if cc_usage:
+            fh = cc_usage.get("five_hour", {})
+            wk = cc_usage.get("weekly", {})
+            m_cred = cc_usage.get("monthly_credits", 0)
+            m_str = f"${float(m_cred):.2f}" if isinstance(m_cred, (int, float)) else str(m_cred)
+            quota_summary_lines.append(f"• **Command Code (cmdc)**: 5h `{(fh.get('remaining_pct', 100.0)):.0f}%` · 주간 `{(wk.get('remaining_pct', 100.0)):.0f}%` · 잔여 {m_str} ({cc_usage.get('plan_name', 'Pro')})")
+        oc_usage = tsm.fetch_opencode_go_usage()
+        if oc_usage:
+            rolling = oc_usage.get("rolling", {}).get("percent", 0.0)
+            weekly = oc_usage.get("weekly", {}).get("percent", 0.0)
+            quota_summary_lines.append(f"• **OpenCode Go**: 5h `{max(0.0, 100.0 - float(rolling)):.0f}%` · 주간 `{max(0.0, 100.0 - float(weekly)):.0f}%`")
+        if quota_summary_lines:
+            embed.add_field(name="📊 AI 라우터 쿼터 요약", value="\n".join(quota_summary_lines), inline=False)
+    except Exception:
+        pass
+
     embed.set_footer(text=f"명령어: {COMMAND_PREFIX}reset (게이트웨이 완전 재시작) · {COMMAND_PREFIX}reset all (세션 ID 전체 초기화) · {COMMAND_PREFIX}new (현재 채널 대화 리셋)")
+    await ctx.send(embed=embed)
+
+@bot.command(name="stall", aliases=["스톨", "정지감시", "정지감시기", "stallguard", "교착"], hidden=True)
+async def stall_command(ctx):
+    """[🛡️ StallGuard] 채널 정지(교착) 감시 현황 · 최근 교착 이력 · 임계값 조회."""
+    try:
+        import json
+        import stall_guard as _sg
+    except Exception as imp_err:
+        await ctx.send(f"⚠️ StallGuard 모듈 로드 실패: {imp_err}")
+        return
+
+    now = time.time()
+    active_lines = []
+    busy_total = 0
+    for cid, sess in sorted(session_manager.get_all_sessions().items()):
+        if not getattr(sess, "is_busy", False):
+            continue
+        busy_total += 1
+        silence = max(0.0, now - float(getattr(sess, "last_progress_at", 0.0) or 0.0))
+        busy_sec = max(0.0, now - float(getattr(sess, "busy_since", 0.0) or 0.0))
+        if silence >= _sg.DEEP_SECONDS:
+            icon = "🔴"
+        elif silence >= _sg.HARD_SECONDS:
+            icon = "🟠"
+        elif silence >= _sg.WARN_SECONDS:
+            icon = "🟡"
+        else:
+            icon = "🟢"
+        desc = str(getattr(sess, "status_desc", ""))[:70]
+        active_lines.append(
+            f"{icon} <#{cid}> · 진행 끊김 `{int(silence)}s` · 작업 `{int(busy_sec)}s` · {desc}"
+        )
+        if len(active_lines) >= 8:
+            break
+    if not active_lines:
+        active_lines = ["🟢 작업 중인 채널 없음 (전 채널 정상 대기)"]
+
+    recent_lines = []
+    try:
+        with open(_sg.DEFAULT_EVIDENCE_PATH, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        for ev in payload.get("events", [])[-5:][::-1]:
+            recent_lines.append(
+                f"• `{ev.get('detected_at', '-')}` · 채널 `{ev.get('channel_id')}` · "
+                f"**{ev.get('action')}** · 무응답 `{int(ev.get('silence_seconds', 0))}s`"
+            )
+    except FileNotFoundError:
+        recent_lines = ["교착 이력 없음 (아직 감지된 정지 없음)"]
+    except Exception as ev_err:
+        recent_lines = [f"이력 파일 조회 실패: {ev_err}"]
+
+    embed = discord.Embed(
+        title="🛡️ [StallGuard 채널 정지 감시 현황]",
+        description=(
+            "작업 도중 정지(무응답/대기열 교착)를 10초 주기로 감시하고 자동 회수합니다."
+        ),
+        color=discord.Color.green()
+        if busy_total and all(not l.startswith("🔴") for l in active_lines)
+        else (discord.Color.gold() if busy_total else discord.Color.green())
+    )
+    embed.add_field(
+        name=f"⚙️ 임계값 (경보 {int(_sg.WARN_SECONDS)}s / 심층관찰 {int(_sg.HARD_SECONDS)}s / 강제회수 {int(_sg.DEEP_SECONDS)}s / 대기열 {int(_sg.QUEUE_WAIT_SECONDS)}s)",
+        value="\n".join(active_lines),
+        inline=False
+    )
+    embed.add_field(name="📜 최근 교착 이력 (최신 5건)", value="\n".join(recent_lines), inline=False)
+    # [Anti-AI-Slop] 사용자 UI 에 내부 절대경로 노출 금지 → 작업 공간 기준 상대경로로 표기
+    try:
+        _evidence_display = os.path.relpath(_sg.DEFAULT_EVIDENCE_PATH, os.getcwd())
+    except Exception:
+        _evidence_display = "reports/watchdog/stalls.json"
+    if _evidence_display.startswith(".."):
+        _evidence_display = os.path.join("agy_agent", "reports", "watchdog", "stalls.json")
+    embed.add_field(
+        name="📁 물리적 증거",
+        value=f"`{_evidence_display}` (워크스페이스 기준)",
+        inline=False
+    )
+    embed.set_footer(text="하트비트는 '실제 출력'에서만 갱신됨 (디스코드 임베드는 갱신 안 함)")
     await ctx.send(embed=embed)
 
 @bot.command(name="git", aliases=["github", "repo", "깃", "저장소", "깃허브"], hidden=True)
@@ -2218,16 +2549,16 @@ async def model_command(ctx, *args):
     from model_manager import GlobalModelManager, ModelDashboardView
 
     if not args:
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="qa2")
-        view = ModelDashboardView(selected_role="qa2", user_id=ctx.author.id)
+        embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
+        view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
         msg = await ctx.send(embed=embed, view=view)
         view.message = msg
         return
 
     sub_cmd = args[0].lower().strip()
     if sub_cmd in ("list", "status", "목록", "현황", "보기", "대시보드", "dashboard"):
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="qa2")
-        view = ModelDashboardView(selected_role="qa2", user_id=ctx.author.id)
+        embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
+        view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
         msg = await ctx.send(embed=embed, view=view)
         view.message = msg
         return
@@ -2240,8 +2571,8 @@ async def model_command(ctx, *args):
             GlobalModelManager.set_all_qa_enabled(True)
             action_desc = "🟢 **qa1 ~ qa6 전원 활성화 완료!** (6중 전수 교차 검증 가동)"
         await sync_all_bot_presences()
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="qa2")
-        view = ModelDashboardView(selected_role="qa2", user_id=ctx.author.id)
+        embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
+        view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
         msg = await ctx.send(f"{action_desc}", embed=embed, view=view)
         view.message = msg
         return
@@ -2262,7 +2593,7 @@ async def model_command(ctx, *args):
             alias_map = {
                 "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
                 "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
-                "자문": "consultant", "관제": "commander"
+                "이미지": "image", "그림": "image", "관제": "commander"
             }
             t_role = alias_map.get(t_role, t_role)
             p_val = " ".join(args[2:]).strip()
@@ -2280,7 +2611,7 @@ async def model_command(ctx, *args):
             alias_map = {
                 "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
                 "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
-                "자문": "consultant", "관제": "commander"
+                "이미지": "image", "그림": "image", "관제": "commander"
             }
             t_role = alias_map.get(t_role, t_role)
             embed = GlobalModelManager.build_dashboard_embed(selected_role=t_role)
@@ -2296,7 +2627,7 @@ async def model_command(ctx, *args):
         alias_map = {
             "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
             "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
-            "자문": "consultant", "관제": "commander"
+            "이미지": "image", "그림": "image", "관제": "commander"
         }
         target_role = alias_map.get(target_role, target_role)
 
@@ -2353,8 +2684,8 @@ async def model_command(ctx, *args):
         return
 
     # If unrecognized role, show dashboard with guidance
-    embed = GlobalModelManager.build_dashboard_embed(selected_role="qa2")
-    view = ModelDashboardView(selected_role="qa2", user_id=ctx.author.id)
+    embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
+    view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
     msg = await ctx.send(f"⚠️ 알 수 없는 모델 명령 형식입니다. 아래 대시보드에서 직접 제어하실 수 있습니다.\n*사용법: `{config.COMMAND_PREFIX}model` 또는 `{config.COMMAND_PREFIX}model qa2 off`*", embed=embed, view=view)
     view.message = msg
 
@@ -2380,8 +2711,9 @@ async def bots_command(ctx):
     cmd_disp = GlobalModelManager.get_role_model_display("commander")
     cmd_model = GlobalModelManager.get_role_model("commander") or config.COMMANDER_MODEL
     
-    cons_disp = GlobalModelManager.get_role_model_display("consultant")
-    cons_model = GlobalModelManager.get_role_model("consultant") or getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
+    img_disp = GlobalModelManager.get_role_model_display("image")
+    img_model = GlobalModelManager.get_role_model("image") or getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
+    img_eng = GlobalModelManager.get_role_engine("image") or getattr(config, "IMAGE_ENGINE", "agy")
     
     embed = discord.Embed(
         title="🤖 AGY 자율 협업 AI 봇 군단 & 실시간 모델 현황",
@@ -2428,13 +2760,34 @@ async def bots_command(ctx):
         inline=False
     )
     
-    if cons_model:
-        embed.add_field(
-            name=f"🧙‍♂️ Senior Consultant (수석 자문관) — {cons_disp}",
-            value=f"• **현재 배정 모델**: `{cons_model}`\n• **주요 역할**: 대규모 시스템 아키텍처, 전략 수립 및 심층 컨설팅",
-            inline=False
-        )
-        
+    try:
+        from image_generation_backend import ImageGenerationBackend
+        _img_backend_desc = ImageGenerationBackend.describe_backends() or "미구성 (`.env` OPENROUTER_API_KEY 또는 GEMINI_API_KEY 필요)"
+        _img_backend_ok = ImageGenerationBackend.real_backend_available()
+    except Exception:
+        _img_backend_desc = "미구성 (`.env` OPENROUTER_API_KEY 또는 GEMINI_API_KEY 필요)"
+        _img_backend_ok = False
+
+    # agy 라벨(예: gemini-3.8-flash-high) → 실제 생성에 쓰이는 Nano Banana 모델 ID 해석 표시
+    try:
+        from image_creator_hub import ImageCreatorHub
+        _img_gen_model = ImageCreatorHub.resolve_backend_model_hint(img_eng, img_model) or img_model
+    except Exception:
+        _img_gen_model = img_model
+
+    embed.add_field(
+        name=f"🎨 Image generator (실제 AI 이미지 생성 도구) — {img_disp}",
+        value=(
+            f"• **현재 배정 모델**: `{img_model}` ({img_eng.upper()})\n"
+            f"• **실제 생성 모델**: `{_img_gen_model}`\n"
+            f"• **주요 역할**: 실제 AI 이미지 백엔드로 로고·아이콘·배너·일러스트 생성/수정\n"
+            f"• **실제 백엔드**: {'✅ ' if _img_backend_ok else '⚠️ '}{_img_backend_desc}\n"
+            f"• **호출 방식**: Coder/QA가 `[IMAGE_REQUEST: ...]` 지시 → 이미지 봇 생성 → Coder가 결과물 바인딩 (`{config.COMMAND_PREFIX}image` 수동 호출 가능)\n"
+            f"• **참고**: AI 생성 실패 시 사유를 정직하게 고지하며, 절차적 임시 에셋은 명시 허용 시에만 사용합니다."
+        ),
+        inline=False
+    )
+
     embed.set_footer(text=f"명령어: {config.COMMAND_PREFIX}model 로 모델 즉시 교체 | {config.COMMAND_PREFIX}help 종합 제어판")
     await ctx.send(embed=embed)
 
@@ -2826,7 +3179,6 @@ async def mode_command(ctx, *, mode_str: str = ""):
 
     if not mode_str:
         cur_desc = get_mode_description(session.mode, session)
-        consultant_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
         qa2_model = getattr(config, "QA2_MODEL", "inclusionai/ling-3.0-flash-fin:free")
         qa_selection_info = ""
         if getattr(session, "selected_qa_indices", None):
@@ -2837,7 +3189,6 @@ async def mode_command(ctx, *, mode_str: str = ""):
             f"⚙️ **현재 채널 동작 모드:** {cur_desc}{qa_selection_info}\n\n"
             f"**모드 설정 방법:**\n"
             f"• `{COMMAND_PREFIX}mode 1` (`{COMMAND_PREFIX}mode single`) : 👤 **단일 에이전트** (초고속 단일 답변)\n"
-            f"• `{COMMAND_PREFIX}mode 1+` (`{COMMAND_PREFIX}mode single+`) : 👤 **단일 컨설턴트** (주의 필요 : 컨설턴트 모드 · {consultant_model})\n"
             f"• `{COMMAND_PREFIX}mode 2` (`{COMMAND_PREFIX}mode pair`) : 👥 **사용자 주도 3중 협업** (Coder ↔ QA ↔ Auditor 단일 턴 완결 후 사용자 대기)\n"
             f"• `{COMMAND_PREFIX}mode 2+` (`{COMMAND_PREFIX}mode pair+`) : 👥 **사용자 주도 {mode_label} 협업** ({pair_plus_chain_str} 단일 과제 완결 후 사용자 대기)\n"
             f"  - 💡 **특정 QA만 지정**: `{COMMAND_PREFIX}mode 2+ qa2`, `{COMMAND_PREFIX}mode 2+ 2,3`, `{COMMAND_PREFIX}mode 2+ all` (전체 복원)\n"
@@ -2847,7 +3198,7 @@ async def mode_command(ctx, *, mode_str: str = ""):
             f"• `{COMMAND_PREFIX}mode single_qa2` (`{COMMAND_PREFIX}mode qa2`) : 🥷 **단일 qa2 에이전트** (1545711652987600937 전용 동작)\n"
             f"• `{COMMAND_PREFIX}mode auto` : 🤖 **스마트 자동 모드 (추천)** (질의/경량은 Single, 개발/수정은 협업 자동 선택)\n"
             f"• `{COMMAND_PREFIX}mode read` : 🔍 **읽기/기획 전용** (코드 수정 없이 아키텍처·방향성 자문)\n"
-            f"• `{COMMAND_PREFIX}mode all [1|1+|2|2+|3|3+|auto|read]` : 🌐 **모든 채널 일괄 변경**"
+            f"• `{COMMAND_PREFIX}mode all [1|2|2+|3|3+|auto|read]` : 🌐 **모든 채널 일괄 변경**"
         )
         return
 
@@ -2864,6 +3215,8 @@ async def mode_command(ctx, *, mode_str: str = ""):
         "pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "mode3_plus", "mode3+", "자율3+", "무인3+",
         "single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo", "solo_qa2",
         "pair", "trio", "dual", "team", "collab", "3중", "페어", "협업", "2", "3", "mode3", "자율3", "무인3", "3자율", "3차자율",
+        # 아래 1+ 계열은 '제거된 레거시 컨설턴트 모드'의 무중단 호환 별칭이다(기능 아님).
+        # 모두 !mode 1(단일 에이전트)로 수렴한다.
         "single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트",
         "single", "solo", "단일", "싱글", "1",
     )
@@ -2872,12 +3225,15 @@ async def mode_command(ctx, *, mode_str: str = ""):
         clean_arg in valid_mode_roots
         or first_tok in valid_mode_roots
         or clean_arg.replace(" ", "") in valid_mode_roots
+        # 🎛️ SSOT 추가 검증: 레지스트리가 인식하는 모든 별칭(예: auto_multi, trio_auto 등) 허용
+        or mode_registry.is_known_mode(clean_arg)
+        or mode_registry.is_known_mode(first_tok)
         or clean_arg.startswith(("all", "전체"))
     )
     if not is_valid_mode:
         await ctx.send(
             f"⚠️ 지원되지 않는 모드입니다: `{clean_arg}`\n"
-            f"💡 **지원 모드**: `{COMMAND_PREFIX}mode 1` (단일), `{COMMAND_PREFIX}mode 1+` (컨설턴트), `{COMMAND_PREFIX}mode 2` (사용자 주도 3중), `{COMMAND_PREFIX}mode 2+` (사용자 주도 {mode_label}), `{COMMAND_PREFIX}mode 3` (무인 자율 3중), `{COMMAND_PREFIX}mode 3+` (무인 자율 {mode_label}), `{COMMAND_PREFIX}mode auto` (스마트 자동), `{COMMAND_PREFIX}mode read` (읽기/기획 전용)"
+            f"💡 **지원 모드**: `{COMMAND_PREFIX}mode 1` (단일), `{COMMAND_PREFIX}mode 2` (사용자 주도 3중), `{COMMAND_PREFIX}mode 2+` (사용자 주도 {mode_label}), `{COMMAND_PREFIX}mode 3` (무인 자율 3중), `{COMMAND_PREFIX}mode 3+` (무인 자율 {mode_label}), `{COMMAND_PREFIX}mode auto` (스마트 자동), `{COMMAND_PREFIX}mode read` (읽기/기획 전용)"
         )
         return
 
@@ -2895,7 +3251,7 @@ async def mode_command(ctx, *, mode_str: str = ""):
     if len(parts) == 2:
         candidate_mode = parts[0]
         qa_spec = parts[1]
-        if candidate_mode in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "mode3_plus"):
+        if candidate_mode in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "mode3_plus") or mode_registry.is_multi_qa_mode(candidate_mode):
             clean_arg = candidate_mode
             indices, sel_cfgs, summary_label = config.parse_qa_selection(qa_spec, all_ext_cfgs)
             session.set_selected_qa_indices(indices)
@@ -3023,7 +3379,7 @@ async def qa_command(ctx, *, arg: str = ""):
 
     # Current Channel Status
     cur_mode_desc = get_mode_description(session.mode, session)
-    is_multi_active = session.mode in ("pair_quad", "2+", "2plus", "2플러스", "pair+", "3+", "3plus", "3플러스")
+    is_multi_active = mode_registry.is_multi_qa_mode(session.mode)
     mode_status = f"🟢 활성 ({len(active_cfgs)}대 확장 QA 참여)" if is_multi_active else "⚪ 비활성 (qa1 단독 모드, 활성화: `!mode 2+` / `!mode 3+`)"
 
     sel_desc = "전체 참여 (기본)"
@@ -3089,7 +3445,7 @@ async def read_command(ctx, *, prompt: str = ""):
         session.set_busy(False, "정상 대기 중")
         session.current_task = None
 
-@bot.command(name="single", aliases=["solo", "단일", "싱글"], hidden=True)
+@bot.command(name="single", aliases=["solo", "단일", "싱글", "single+", "single_plus", "1+", "1plus", "1플러스"], hidden=True)
 async def single_command(ctx, *, prompt: str = ""):
     if not prompt:
         await ctx.send(f"⚠️ 요청 내용을 입력해주세요. 예: `{COMMAND_PREFIX}single 간단한 파이썬 스크립트 짜줘`")
@@ -3185,11 +3541,26 @@ async def single_command(ctx, *, prompt: str = ""):
         session.set_busy(False, "정상 대기 중")
         session.current_task = None
 
-@bot.command(name="single+", aliases=["single_plus", "1+", "1plus", "consultant", "컨설턴트"], hidden=True)
-async def single_plus_command(ctx, *, prompt: str = ""):
-    consultant_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
+@bot.command(name="image", aliases=["img", "이미지", "이미지생성", "그려줘", "draw"], hidden=True)
+async def image_command(ctx, *, prompt: str = ""):
+    """
+    🎨 Image generator — 실제 AI 이미지 생성 도구 (Nano Banana 계열 / OpenRouter Gemini image 등).
+    사용법: !image 우주 테마 앱 로고 (선택: `asset_name=app_logo ratio=1:1`)
+    """
     if not prompt:
-        await ctx.send(f"⚠️ 요청 내용을 입력해주세요. 예: `{COMMAND_PREFIX}single+ 시스템 아키텍처 자문해줘`\n💡 채널 모드 변경: `{COMMAND_PREFIX}mode 1+`")
+        backend_desc = "미구성"
+        try:
+            from image_generation_backend import ImageGenerationBackend
+            backend_desc = ImageGenerationBackend.describe_backends() or "미구성"
+        except Exception:
+            pass
+        await ctx.send(
+            f"⚠️ 생성할 이미지 설명을 입력해주세요. 예: `{COMMAND_PREFIX}image 우주 테마 앱 로고`\n"
+            f"• 옵션: `{COMMAND_PREFIX}image asset_name=app_logo ratio=16:9 미니멀 로고`\n"
+            f"• **수정(AI 편집)**: `{COMMAND_PREFIX}image edit app/src/main/res/drawable/hero.png 배경을 더 어둡게`\n"
+            f"  └ 또는 `{COMMAND_PREFIX}image source_image=hero.png 배경을 더 어둡게`\n"
+            f"• 실제 AI 이미지 백엔드: {backend_desc}"
+        )
         return
 
     session = session_manager.get_session(ctx.channel.id)
@@ -3197,67 +3568,128 @@ async def single_plus_command(ctx, *, prompt: str = ""):
         await ctx.send("⏳ 현재 다른 작업을 처리 중입니다. 완료 후 요청해주시거나 `!stop`으로 중단할 수 있습니다.")
         return
 
-    status_msg = await ctx.send(f"👤 **[단일 컨설턴트 에이전트 가동] {consultant_model} 파일 조회·수정 및 자문을 시작합니다...**")
-    status_updater = ThrottledStatusUpdater(status_msg, min_interval=2.0)
-    on_status_update = status_updater.get_callback(prefix=f"👤 **[단일 컨설턴트 진행 중 · {consultant_model}]**")
+    # 옵션 파싱 (asset_name=..., ratio=..., source_image=...)
+    asset_name = ""
+    aspect_ratio = "1:1"
+    source_image = ""
+    cleaned_tokens = []
+    _img_exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+    tokens = prompt.split()
+    # `!image edit <원본경로> <프롬프트>` 축약형 지원 (수정/편집/고쳐)
+    if tokens and tokens[0].lower() in ("edit", "수정", "편집", "고쳐", "고쳐줘"):
+        tokens = tokens[1:]
+        if tokens and ("/" in tokens[0] or tokens[0].lower().endswith(_img_exts)):
+            source_image = tokens.pop(0)
+    for tok in tokens:
+        low = tok.lower()
+        if low.startswith(("asset_name=", "name=")):
+            asset_name = tok.split("=", 1)[1].strip()
+        elif low.startswith(("ratio=", "aspect=")):
+            aspect_ratio = tok.split("=", 1)[1].strip() or "1:1"
+        elif low.startswith(("source_image=", "edit_of=", "source=", "원본=")):
+            source_image = tok.split("=", 1)[1].strip()
+        else:
+            cleaned_tokens.append(tok)
+    clean_prompt = " ".join(cleaned_tokens).strip() or ("이미지를 자연스럽게 개선" if source_image else prompt)
+
+    img_disp = "Gemini 3.8 Flash"
+    try:
+        from model_manager import GlobalModelManager
+        img_disp = GlobalModelManager.get_role_model_display("image")
+    except Exception:
+        pass
+
+    _img_action = "수정" if source_image else "생성"
+    status_msg = await ctx.send(f"🎨 **[Image generator({img_disp}) 가동] `{clean_prompt[:60]}` 이미지 {_img_action}을 시작합니다...**")
+    status_updater = ThrottledStatusUpdater(status_msg, min_interval=2.5)
+    on_status_update = status_updater.get_callback(prefix="🎨 **[Image generator 진행 중]**")
 
     session.current_task = asyncio.current_task()
-    session.set_busy(True, f"🧙‍♂️ AGY 단일 컨설턴트 에이전트 ({consultant_model}) 작업 진행 중 (수동 고정)")
+    session.set_busy(True, f"🎨 Image generator({img_disp}) 이미지 {_img_action} 중")
 
     try:
         reload_helper_modules()
-        consultant_engine = getattr(config, "CONSULTANT_ENGINE", "openrouter")
+        from image_creator_hub import ImageCreatorHub
+
         async with ctx.channel.typing():
-            final_response = await AgentRunner.run_prompt(
+            result = await ImageCreatorHub.generate(
+                prompt=clean_prompt,
+                workspace=session.workspace,
+                asset_name=asset_name,
+                aspect_ratio=aspect_ratio,
                 session=session,
-                prompt=prompt,
-                on_tool_update=on_status_update,
-                model=consultant_model,
-                engine=consultant_engine
+                on_status=on_status_update,
+                source_image=source_image,
             )
-            session.set_status("idle", "🟢 작업 완료 (정상 대기)")
 
         await status_updater.delete()
 
-        chunks, file_attachments = await async_prepare_message_payload(
-            final_response,
-            workspace_root=session.workspace,
-            auto_scan_deliverables=True,
-            excluded_hashes=getattr(session, "user_reference_hashes_set", set()),
-            excluded_dhashes=getattr(session, "user_reference_dhashes_set", set())
-        )
-
-        consultant_ch = consultant_bot.get_channel(ctx.channel.id) if (consultant_bot and consultant_bot.is_ready()) else None
-        target_sender = consultant_ch or ctx.message
-
-        if len(chunks) > 3:
-            summary_header = chunks[0]
-            import tempfile
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as tf:
-                tf.write(final_response)
-                temp_resp_file = tf.name
-
+        if not result.ok or not result.absolute_path or not os.path.isfile(result.absolute_path):
+            backend_desc = "미구성"
             try:
-                files_payload = [discord.File(temp_resp_file, filename="consultant_response.md")] + file_attachments
-                await safe_send_discord_message(
-                    target_sender,
-                    f"{summary_header}\n\n📎 **[전체 결과가 길어 파일로 첨부합니다]**",
-                    files=files_payload,
-                    is_reply=(target_sender == ctx.message)
-                )
-            finally:
-                try:
-                    os.remove(temp_resp_file)
-                except Exception:
-                    pass
-        else:
-            for i, chunk in enumerate(chunks):
-                files_to_send = file_attachments if i == 0 else []
-                if i == 0:
-                    await safe_send_discord_message(target_sender, chunk, files=files_to_send, is_reply=(target_sender == ctx.message))
-                else:
-                    await safe_send_discord_message(target_sender if hasattr(target_sender, "send") else ctx.channel, chunk, files=files_to_send)
+                from image_generation_backend import ImageGenerationBackend
+                backend_desc = ImageGenerationBackend.describe_backends() or "미구성"
+            except Exception:
+                pass
+            await ctx.send(
+                f"⚠️ **실제 AI 이미지 생성 실패**\n• 사유: {result.message or '알 수 없는 오류'}\n"
+                f"• 현재 이미지 백엔드: {backend_desc}\n"
+                f"• `.env`의 `OPENROUTER_API_KEY` (또는 `GEMINI_API_KEY`, `IMAGE_API_BASE`/`IMAGE_API_KEY`/`IMAGE_API_MODEL`) 설정을 확인해주세요."
+            )
+            return
 
+        # 생성 이미지 전송 (Image generator 봇 채널 우선)
+        img_ch = image_bot.get_channel(ctx.channel.id) if ("image_bot" in globals() and image_bot and image_bot.is_ready()) else None
+        target_sender = img_ch or ctx
+
+        if result.is_real_ai:
+            title = f"🎨 [Image generator] {result.asset_name}.png 실제 AI {_img_action} 완료"
+            color = 0xF59E0B
+        else:
+            title = f"⚠️ [Image generator] {result.asset_name}.png (절차적 임시 에셋)"
+            color = 0xEF4444
+        embed = discord.Embed(
+            title=title,
+            description=(
+                f"• **요청**: {result.prompt}\n"
+                f"• **작업 유형**: {'✏️ 기존 이미지 수정(AI 편집)' if source_image else '🆕 신규 이미지 생성'}\n"
+                f"• **해상도**: `{result.width}x{result.height}`\n"
+                f"• **생성 방식**: {'✅ 실제 AI 이미지' if result.is_real_ai else '⚠️ 절차적 임시 에셋(AI 생성 실패 대체)'}\n"
+                + (f"• **백엔드/모델**: `{result.backend}` / `{result.model}`\n" if result.backend else "")
+                + (f"• **⚠️ 사유**: {result.message}\n" if result.fallback_used else "")
+                + f"• **프로젝트 배치 경로**: `{result.relative_path}`"
+            ),
+            color=color,
+        )
+        embed.set_footer(text="AGY Image generator · 실제 AI 이미지 백엔드 (Coder/QA가 `[IMAGE_REQUEST: ...]`로 자동 호출)")
+        try:
+            await target_sender.send(embed=embed, file=discord.File(result.absolute_path, filename=f"{result.asset_name}.png"))
+        except Exception:
+            await safe_send_discord_message(
+                ctx, f"🎨 **[Image generator] {result.asset_name}.png**",
+                files=[discord.File(result.absolute_path, filename=f"{result.asset_name}.png")],
+                is_reply=True,
+            )
+
+        # #nano-banana-image 스튜디오 아카이빙 (best-effort)
+        try:
+            await ImageCreatorHub.dispatch_to_studio(bot, result, origin_channel_id=ctx.channel.id)
+        except Exception:
+            pass
+
+        # Coder 바인딩 가이드
+        snippet = ""
+        try:
+            from hybrid_asset_pipeline import HybridAssetPipeline
+            snippet = HybridAssetPipeline.generate_code_integration_snippets(
+                platform=HybridAssetPipeline.detect_project_platform(session.workspace),
+                asset_name=result.asset_name,
+                relative_path=result.relative_path,
+            ).get("compose") or ""
+        except Exception:
+            snippet = ""
+        if snippet:
+            await ctx.send(f"💡 **소스코드 바인딩 가이드:**\n```kotlin\n{snippet}\n```")
 
     except asyncio.CancelledError:
         try:
@@ -3265,12 +3697,11 @@ async def single_plus_command(ctx, *, prompt: str = ""):
         except discord.DiscordException:
             pass
         session.set_status("idle", "정상 대기 중 (작업 중단)")
-        await ctx.send("🛑 **진행 중이던 컨설턴트 자문 작업이 즉시 강제 중단(Stop)되었습니다.**")
+        await ctx.send("🛑 **이미지 생성 작업이 즉시 강제 중단(Stop)되었습니다.**")
     except Exception as e:
-        logger.exception("단일 컨설턴트 실행 중 오류 발생")
-        err_trace = traceback.format_exc()
+        logger.exception("Image generator 실행 중 오류 발생")
         session.set_status("error", f"⚠️ 오류 발생: {str(e)[:30]}")
-        await ctx.send(f"⚠️ 단일 컨설턴트 실행 중 오류가 발생했습니다: {str(e)}")
+        await ctx.send(f"⚠️ 이미지 생성 중 오류가 발생했습니다: {str(e)}")
     finally:
         session.set_busy(False, "정상 대기 중")
         session.current_task = None
@@ -3519,13 +3950,13 @@ async def pair_command(ctx, *, prompt: str = ""):
     multi_label = f"{multi_step_num}중 다중" if ext_cfgs and len(ext_cfgs) > 1 else ("4중 쿼드" if ext_cfgs else "3중")
     chain_names = " ↔ ".join([f"{c['name'].lower()}" for c in ext_cfgs]) if ext_cfgs else ""
 
-    if session.mode in ("pair_quad", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "pair+"):
+    if mode_registry.is_multi_qa_mode(session.mode):
         collab_chain_display = f"Coder ↔ qa1 ↔ {chain_names} ↔ Auditor" if chain_names else "Coder ↔ qa1 ↔ Auditor"
         status_msg = await ctx.send(f"👥 **[{multi_label} 에이전트 가동] {collab_chain_display} 협업 개발을 시작합니다...**")
     else:
         status_msg = await ctx.send("👥 **[3중 에이전트 가동] Coder ↔ QA ↔ Auditor 협업 개발을 시작합니다...**")
 
-    prefix = f"👥 **[{multi_label} 협업 진행 중]**" if session.mode in ("pair_quad", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "pair+") else "👥 **[3중 협업 진행 중]**"
+    prefix = f"👥 **[{multi_label} 협업 진행 중]**" if mode_registry.is_multi_qa_mode(session.mode) else "👥 **[3중 협업 진행 중]**"
     status_updater = ThrottledStatusUpdater(status_msg, min_interval=2.0)
     on_status_update = status_updater.get_callback(prefix=prefix)
 
@@ -3603,9 +4034,27 @@ async def quota_command(ctx):
 
             lines.append(f"• **{label}**: {status_icon} *({reset_str})*")
 
-        embed.add_field(name="🤖 모델별 잔여 현황", value="\n".join(lines[:12]) if lines else "모델 정보 없음", inline=False)
+        embed.add_field(name="🤖 Antigravity 모델별 잔여 현황", value="\n".join(lines[:12]) if lines else "모델 정보 없음", inline=False)
         if len(lines) > 12:
             embed.add_field(name="기타 모델", value="\n".join(lines[12:20]), inline=False)
+
+        try:
+            import telemetry_status_manager as tsm
+            cc_usage = tsm.fetch_command_code_usage()
+            if cc_usage:
+                fh = cc_usage.get("five_hour", {})
+                wk = cc_usage.get("weekly", {})
+                m_cred = cc_usage.get("monthly_credits", 0)
+                m_str = f"${float(m_cred):.2f}" if isinstance(m_cred, (int, float)) else str(m_cred)
+                cc_desc = (
+                    f"• **플랜**: `{cc_usage.get('plan_name', 'Pro')}`\n"
+                    f"• **5시간 한도 잔여**: `{(fh.get('remaining_pct', 100.0)):.1f}%` (Used: ${float(fh.get('used', 0.0)):.2f} / Cap: ${float(fh.get('cap', 14.0)):.2f})\n"
+                    f"• **주간 한도 잔여**: `{(wk.get('remaining_pct', 100.0)):.1f}%` (Used: ${float(wk.get('used', 0.0)):.2f} / Cap: ${float(wk.get('cap', 35.0)):.2f})\n"
+                    f"• **월간 잔여 크레딧**: `{m_str}` · CLI: `cmdc`"
+                )
+                embed.add_field(name="💻 Command Code (cmdc) 쿼터", value=cc_desc, inline=False)
+        except Exception:
+            pass
 
         await status_msg.delete()
         await ctx.send(embed=embed)
@@ -3622,9 +4071,22 @@ async def pwd_command(ctx):
     embed.add_field(name="🎭 채널 역할", value=f"**{role_label}**", inline=False)
     embed.add_field(
         name="동작 모드",
-        value=get_mode_description(session.mode),
+        value=get_mode_description(session.mode, session),
         inline=False
     )
+    # 🎛️ 실제 파이프라인 투입 규모를 세션 기준(표시==실행)으로 명시한다.
+    try:
+        _minfo = mode_registry.resolve_mode(session.mode, session)
+        _pipe_val = (
+            f"• **협업 체인**: {_minfo['chain']}\n"
+            f"• **협업 규모(활성 확장 QA 기준)**: `{mode_registry.describe_pipeline(session.mode, session)}` "
+            f"(활성 확장 QA {_minfo['extended_count']}대 · 라운드마다 사령관 스쿼드가 전원/부분 편성됨)"
+        )
+        if _minfo.get("warning"):
+            _pipe_val += f"\n{_minfo['warning']}"
+        embed.add_field(name="🧩 실제 파이프라인", value=_pipe_val, inline=False)
+    except Exception:
+        pass
     # [⚙️ 실제 배정 엔진] 실행에 실제로 사용되는 전역 역할 설정을 우선 표시합니다.
     # (session.engine 은 채널별 레거시 값일 수 있어 실제 실행 엔진과 불일치할 수 있음)
     try:
@@ -3912,6 +4374,26 @@ async def temp_command(ctx):
     )
     await ctx.send(embed=embed)
 
+@bot.command(name="rounds", aliases=["라운드", "maxrounds", "round_limit", "roundcap"], hidden=True)
+async def rounds_command(ctx):
+    """라운드 상한 및 상한 도달 시 계속 여부 확인 프롬프트 설정을 표시한다."""
+    continue_state = "✅ 활성 (예/아니요 확인)" if getattr(config, "ROUND_CONTINUE_ENABLED", True) else "⛔ 비활성"
+    timeout_sec = int(getattr(config, "ROUND_CONTINUE_TIMEOUT_SEC", 300))
+    embed = discord.Embed(
+        title="🔁 [최대 라운드(수렴 상한) 설정]",
+        description=(
+            f"• **3중/다중 협업** (`{COMMAND_PREFIX}pair` · `{COMMAND_PREFIX}mode 2` · `{COMMAND_PREFIX}mode 3`): "
+            f"`{PAIR_MAX_ROUNDS}라운드`\n"
+            f"• **QA 수렴 상한**: `{QA_MAX_ROUNDS}라운드`\n"
+            f"• **3중 심층 리서치**: `{config.RESEARCH_MAX_ROUNDS}라운드`\n"
+            f"• **상한 도달 시 계속 확인**: {continue_state} (무응답 자동 종료 `{timeout_sec}초`)\n\n"
+            "상한에 도달하면 봇이 **\"N회가 끝났습니다. 이어서 진행하시겠습니까?\"** 라고 예/아니요 버튼으로 확인합니다.\n"
+            f"• 값을 바꾸려면 `.env` 의 `PAIR_MAX_ROUNDS` / `QA_MAX_ROUNDS` / `RESEARCH_MAX_ROUNDS` 를 수정하세요."
+        ),
+        color=discord.Color.blurple()
+    )
+    await ctx.send(embed=embed)
+
 @bot.command(name="watchdog", aliases=["safety", "guards", "감시견", "안전가드"], hidden=True)
 async def watchdog_command(ctx, subcommand: str = ""):
     """Displays live status of the 10 Bounded Autonomy Guards or resets safety counters."""
@@ -3981,9 +4463,100 @@ def get_channel_queue_lock(channel_id: int) -> asyncio.Lock:
         _channel_queue_locks[channel_id] = asyncio.Lock()
     return _channel_queue_locks[channel_id]
 
-async def dispatch_next_in_queue(channel_id: int):
+QUEUE_LOCK_TIMEOUT_SECONDS = float(os.environ.get("QUEUE_LOCK_TIMEOUT_SECONDS", "20") or 20)
+# 열 관리 비상 쿨다운(ThermalGuard 300초) 중의 락 점유는 '정상 대기'이므로 교체하지 않는다.
+THERMAL_LOCK_GRACE_SECONDS = float(os.environ.get("QUEUE_LOCK_THERMAL_GRACE_SECONDS", "320") or 320)
+
+
+def _queue_lock_timeout_seconds() -> float:
+    """[🛡️ Hot-Reload Safe] bot.py 는 __main__ 이라 importlib.reload 로 전역이 재정의되지 않는다.
+
+    과거 !reset 핫리로드 후 `QUEUE_LOCK_TIMEOUT_SECONDS` 전역이 유실되어
+    `dispatch_next_in_queue` 가 매번 NameError 로 죽고 대기열이 영구 정지했다.
+    이 리졸버는 전역이 없어도 환경변수/기본값으로 반드시 값을 반환한다.
+    """
+    try:
+        return max(0.1, float(QUEUE_LOCK_TIMEOUT_SECONDS))  # type: ignore[name-defined]
+    except Exception:
+        return max(0.1, float(os.environ.get("QUEUE_LOCK_TIMEOUT_SECONDS", "20") or 20))
+
+
+def _thermal_lock_grace_seconds() -> float:
+    """[🛡️ Hot-Reload Safe] THERMAL_LOCK_GRACE_SECONDS 전역 유실 방어."""
+    try:
+        return max(0.1, float(THERMAL_LOCK_GRACE_SECONDS))  # type: ignore[name-defined]
+    except Exception:
+        return max(0.1, float(os.environ.get("QUEUE_LOCK_THERMAL_GRACE_SECONDS", "320") or 320))
+
+
+def _thermal_cooldown_holds_lock() -> bool:
+    """현재 락 점유가 열 관리 비상 쿨다운 때문인지 판정한다."""
+    try:
+        from thermal_guard import ThermalGuard
+        tier = ThermalGuard.get_tier()[0]
+        return tier == "EMERGENCY"
+    except Exception:
+        return False
+
+
+async def _acquire_queue_lock_or_recover(channel_id: int):
+    """[🛡️ StallGuard] 채널 대기열 락 취득 — 타임아웃 + 강제 교체 회수.
+
+    기존에는 `async with lock:` 으로 **타임아웃 없이 무한 대기**해서,
+    락 점유 태스크가 멈추는 순간 그 채널의 모든 후속 디스패치가 영구 블락
+    (요청 → 답장 없음 / 상태 타이머 고정) 되었다.
+    """
     lock = get_channel_queue_lock(channel_id)
-    async with lock:
+    queue_lock_timeout = _queue_lock_timeout_seconds()
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=queue_lock_timeout)
+        return lock
+    except asyncio.TimeoutError:
+        pass
+
+    # 열 관리 비상 쿨다운(최대 300초) 중 점유는 정상 → 락을 지키고 넉넉히 한 번 더 기다린다.
+    if _thermal_cooldown_holds_lock():
+        thermal_grace = _thermal_lock_grace_seconds()
+        logger.info(
+            f"[StallGuard] 채널 {channel_id} 락은 ThermalGuard 비상 쿨다운 중 → "
+            f"교체하지 않고 {int(thermal_grace)}초 추가 대기"
+        )
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=thermal_grace)
+            return lock
+        except asyncio.TimeoutError:
+            pass
+
+    logger.error(
+        f"[StallGuard] 채널 {channel_id} 대기열 락이 {queue_lock_timeout}초(+쿨다운 여유) 동안 "
+        f"취득되지 않음 → 락 강제 교체 후 1회 재시도"
+    )
+    _channel_queue_locks[channel_id] = asyncio.Lock()
+    lock = _channel_queue_locks[channel_id]
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=queue_lock_timeout)
+        return lock
+    except asyncio.TimeoutError:
+        logger.error(
+            f"[StallGuard] 채널 {channel_id} 락 재취득 실패 → 이번 디스패치 보류 "
+            f"(StallGuard 주기 재호출로 회복)"
+        )
+        return None
+
+
+async def dispatch_next_in_queue(channel_id: int):
+    # [🛡️ StallGuard] 락을 쥔 채 5분 열 쿨다운을 기다리지 않도록 락 취득 전에 먼저 처리한다.
+    try:
+        _pre_session = session_manager.get_session(channel_id)
+        if _pre_session.queue and not _pre_session.is_busy:
+            await ThermalGuard.check_task_start_cooldown(None)
+    except Exception:
+        pass
+
+    lock = await _acquire_queue_lock_or_recover(channel_id)
+    if lock is None:
+        return
+    try:
         await asyncio.sleep(0.3)
         session = session_manager.get_session(channel_id)
         
@@ -4036,6 +4609,12 @@ async def dispatch_next_in_queue(channel_id: int):
             logger.debug(f"Failed to send queue notice: {e}")
 
         asyncio.create_task(execute_channel_prompt(next_item.message, next_item.prompt))
+    finally:
+        # [🛡️ StallGuard] 예외/조기 return 발생 시에도 반드시 락을 반환한다.
+        try:
+            lock.release()
+        except Exception:
+            pass
 
 qa_hub_manager.set_on_complete_callback(dispatch_next_in_queue)
 
@@ -4056,9 +4635,10 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
             raw_user_prompt = raw_user_prompt.replace(f"<@{ext_bot.user.id}>", "").replace(f"<@!{ext_bot.user.id}>", "").strip()
     if auditor_bot.user:
         raw_user_prompt = raw_user_prompt.replace(f"<@{auditor_bot.user.id}>", "").strip()
-    if "consultant_bot" in globals() and consultant_bot.user:
-        raw_user_prompt = raw_user_prompt.replace(f"<@{consultant_bot.user.id}>", "").replace(f"<@!{consultant_bot.user.id}>", "").strip()
-    raw_user_prompt = raw_user_prompt.replace("<@1545711652987600937>", "").replace("<@!1545711652987600937>", "").strip()
+    if "image_bot" in globals() and image_bot.user:
+        raw_user_prompt = raw_user_prompt.replace(f"<@{image_bot.user.id}>", "").replace(f"<@!{image_bot.user.id}>", "").strip()
+    if qa2_bot.user:
+        raw_user_prompt = raw_user_prompt.replace(f"<@{qa2_bot.user.id}>", "").replace(f"<@!{qa2_bot.user.id}>", "").strip()
 
     raw_lower = raw_user_prompt.lower()
     is_explicit_code_task = any(kw in raw_user_prompt for kw in [
@@ -4226,10 +4806,15 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
         target_sender = cmd_ch or message.channel
         status_msg = await target_sender.send("👑 **[Commander 사령관 출동]** 🧠 의도 분석 및 최적 경로 판정 중...")
         decision = await Commander.analyze_intent(prompt, session.mode, session.workspace)
-        effective_mode = decision.mode
+        effective_mode = mode_registry.normalize_mode(decision.mode)
         mode_reason = decision.reason
         task_type = decision.task_type
-        is_research = (task_type == "research")
+        # 🎛️ `+`/무인 자율 모드는 리서치성 프롬프트라도 확장 QA 누락 없이 다중 파이프라인 유지
+        is_research = (
+            task_type == "research"
+            and not mode_registry.is_multi_qa_mode(effective_mode)
+            and not mode_registry.is_autonomous_mode(effective_mode)
+        )
         briefing = decision.briefing
 
         if effective_mode == "read":
@@ -4262,9 +4847,24 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
     else:
         effective_mode, mode_reason = classify_mode(prompt, session)
         task_type = classify_task_type(prompt)
-        is_research = (task_type == "research" and effective_mode not in ("mode3", "mode3_plus"))
+        # 🎛️ [모드 무결성] `+` 다중 QA 모드(pair_quad/mode3_plus)와 무인 자율 모드는
+        #    리서치성 프롬프트라도 확장 QA가 없는 ResearchRunner 로 강등하지 않는다.
+        is_research = (
+            task_type == "research"
+            and not mode_registry.is_multi_qa_mode(effective_mode)
+            and not mode_registry.is_autonomous_mode(effective_mode)
+        )
+        # 🎛️ SSOT 정규화: 이후 모든 분기/표시가 단일 정규 모드 값을 사용하도록 통일
+        effective_mode = mode_registry.normalize_mode(effective_mode)
         effective_pipeline = "pair" if effective_mode in ("pair_quad", "mode3", "mode3_plus") else effective_mode
         ext_cfgs = session.get_active_extended_qas() if hasattr(session, "get_active_extended_qas") else config.get_extended_qa_configs()
+        _mode_info = mode_registry.resolve_mode(effective_mode, session)
+        # 🚨 `+` 모드인데 활성 확장 QA가 0대이면 조용히 3중으로 붕괴하지 않고 명시 경고한다.
+        if _mode_info.get("warning"):
+            try:
+                await safe_send_discord_message(message.channel, _mode_info["warning"])
+            except Exception as _warn_err:
+                logger.debug(f"Mode integrity warning delivery skipped: {_warn_err}")
         if ext_cfgs and effective_mode in ("pair_quad", "mode3_plus"):
             try:
                 init_squad_plan = Commander.dispatch_qa_squad(
@@ -4298,9 +4898,6 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
         elif effective_mode == "pair":
             collab_desc = "Lead Analyst ↔ Fact Checker ↔ Chief Auditor 심층 리서치" if is_research else "Coder ↔ QA ↔ Auditor 협업"
             status_label = f"👥 **[3중 에이전트 가동 (사용자 주도 · !mode 2)] {collab_desc} 진행 중입니다...**"
-        elif effective_mode == "single_plus":
-            c_mod = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-            status_label = f"👤 **[단일 컨설턴트 에이전트 가동 (수동 고정)] {c_mod} 작업(파일 조회·수정·자문) 진행 중입니다...**"
         elif effective_mode in ("pair_plus", "single_qa2"):
             status_label = "🥷 **[단일 qa2 가동 (수동 고정)] 작업 진행 중입니다...**"
         else:
@@ -4337,9 +4934,6 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                 return f"👑 **[Commander: 👥 {multi_label} 협업 ({mode_reason})]**" if session.mode == "auto" else f"👥 **[{multi_label} 협업 진행 중]**"
             else:
                 return f"👑 **[Commander: 👥 3중 협업 ({mode_reason})]**" if session.mode == "auto" else "👥 **[3중 협업 진행 중]**"
-        elif effective_mode == "single_plus":
-            c_mod = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-            return f"👑 **[Commander: 👤 단일 컨설턴트 ({mode_reason})]**" if session.mode == "auto" else f"🧙‍♂️ **[단일 컨설턴트 자문 진행 중 · {c_mod}]**"
         elif effective_mode in ("pair_plus", "single_qa2"):
             return "🥷 **[단일 qa2 진행 중]**"
         else:
@@ -4378,7 +4972,7 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                         qa_client=qa_bot,
                         auditor_client=auditor_bot,
                         on_status_update=on_tool_update,
-                        max_rounds=3
+                        max_rounds=config.RESEARCH_MAX_ROUNDS
                     )
                 else:
                     pipeline_prompt = prompt
@@ -4492,6 +5086,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                             except Exception as em1_err:
                                 logger.error(f"Failed to send 5W1H m1 message: {em1_err}")
 
+                            # [🎨 Visual Craft Loop 연동] 5W1H 플랜(도메인/시각 에셋 승인/QC 계약)을 파이프라인에 바인딩
+                            session._current_5w1h_plan = plan_1_5w1h
                             pipeline_prompt = plan_1_5w1h.directive_for_coder
                         elif not prompt.strip().startswith("🎯 [Commander 사령관"):
                             # User-directed incremental task or feedback: Commander prioritizes user intent over static roadmap
@@ -4625,6 +5221,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                             except Exception as em_err:
                                 logger.error(f"Failed to send 5W1H ongoing message: {em_err}")
 
+                            # [🎨 Visual Craft Loop 연동] 진행 마일스톤 5W1H 플랜 바인딩
+                            session._current_5w1h_plan = plan_5w1h
                             pipeline_prompt = plan_5w1h.directive_for_coder
 
                     final_response = await TrioAgentRunner.run_pipeline(
@@ -4638,18 +5236,6 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                         on_status_update=on_tool_update,
                         max_rounds=PAIR_MAX_ROUNDS
                     )
-            elif effective_mode == "single_plus":
-                c_mod = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-                c_eng = getattr(config, "CONSULTANT_ENGINE", "openrouter")
-                session.set_busy(True, f"🧙‍♂️ AGY 단일 컨설턴트 에이전트 ({c_mod}) 작업 진행 중 ({mode_reason})")
-                final_response = await AgentRunner.run_prompt(
-                    session=session,
-                    prompt=prompt,
-                    on_tool_update=on_tool_update,
-                    model=c_mod,
-                    engine=c_eng
-                )
-                session.set_status("idle", "🟢 작업 완료 (정상 대기)")
             elif effective_mode in ("pair_plus", "single_qa2"):
                 qa2_model = getattr(config, "QA2_MODEL", "upstage/solar-pro4")
                 qa2_engine = getattr(config, "QA2_ENGINE", "openrouter")
@@ -4681,6 +5267,63 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                     engine=coder_eng
                 )
                 session.set_status("idle", "🟢 작업 완료 (정상 대기)")
+
+                # 🎨 [Image generator Tool] 단일 Coder가 이미지 생성을 요청한 경우 도구 호출 후 바인딩 재작업
+                try:
+                    from image_creator_hub import ImageCreatorHub
+                    img_results = await ImageCreatorHub.process_agent_output(
+                        final_response,
+                        workspace=session.workspace or "",
+                        session=session,
+                        on_status=on_tool_update,
+                        user_prompt=prompt,
+                    )
+                    if img_results:
+                        for _img in img_results:
+                            if not (_img.ok and _img.absolute_path and os.path.isfile(_img.absolute_path)):
+                                continue
+                            try:
+                                _tag = "🎨 **[Image generator] 실제 AI 이미지 생성 완료**" if _img.is_real_ai else "⚠️ **[Image generator] 절차적 임시 에셋(AI 생성 실패 대체)**"
+                                await safe_send_discord_message(
+                                    message.channel,
+                                    f"{_tag} `{_img.asset_name}.png`\n"
+                                    f"• 배치: `{_img.relative_path}` ({_img.width}x{_img.height})\n"
+                                    + (f"• 백엔드: `{_img.backend}` / `{_img.model}`\n" if _img.backend else "")
+                                    + (f"• 사유: {_img.message}" if _img.fallback_used else ""),
+                                    files=[discord.File(_img.absolute_path, filename=f"{_img.asset_name}.png")],
+                                )
+                            except Exception as _isend:
+                                logger.warning(f"Image send skipped: {_isend}")
+                            try:
+                                await ImageCreatorHub.dispatch_to_studio(bot, _img, origin_channel_id=message.channel.id)
+                            except Exception:
+                                pass
+                        # [정직 고지] 실패 건이 있으면 사용자에게 즉시 실패 사유를 알린다.
+                        _img_fail_summary = ImageCreatorHub.summarize_failures(img_results)
+                        if _img_fail_summary:
+                            try:
+                                await safe_send_discord_message(message.channel, _img_fail_summary)
+                            except Exception as _fsend:
+                                logger.warning(f"Image failure notice skipped: {_fsend}")
+                        binding_guide = ImageCreatorHub.format_results_for_agent(img_results)
+                        if binding_guide:
+                            session.set_busy(True, "🎨 이미지 에셋 바인딩 작업 진행 중")
+                            async with message.channel.typing():
+                                bind_resp = await AgentRunner.run_prompt(
+                                    session=session,
+                                    prompt=(
+                                        "🎨 **[Image generator 도구 결과 바인딩 지시]**\n"
+                                        f"{binding_guide}"
+                                    ),
+                                    on_tool_update=on_tool_update,
+                                    model=coder_m,
+                                    engine=coder_eng,
+                                )
+                            if bind_resp and str(bind_resp).strip():
+                                final_response = f"{final_response}\n\n\n{bind_resp}"
+                            session.set_status("idle", "🟢 작업 완료 (정상 대기)")
+                except Exception as _img_err:
+                    logger.warning(f"Single-agent image request handling skipped: {_img_err}")
 
         # Update or delete status message
         await status_updater.delete()
@@ -4714,7 +5357,7 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
             and not final_response.strip().startswith("🎉")
             and not is_approval
         )
-        if effective_mode in ("single", "single_plus", "pair_plus", "single_qa2") or is_stoppage_or_error or is_direct_answer:
+        if effective_mode in ("single", "pair_plus", "single_qa2") or is_stoppage_or_error or is_direct_answer:
             chunks, file_attachments = await async_prepare_message_payload(
                 final_response, 
                 workspace_root=session.workspace,
@@ -4724,8 +5367,7 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
             )
 
             qa2_ch = qa2_bot.get_channel(message.channel.id) if (effective_mode in ("pair_plus", "single_qa2") and "qa2_bot" in globals() and qa2_bot and qa2_bot.is_ready()) else None
-            consultant_ch = consultant_bot.get_channel(message.channel.id) if (effective_mode == "single_plus" and "consultant_bot" in globals() and consultant_bot and consultant_bot.is_ready()) else None
-            target_dest = qa2_ch or consultant_ch or message
+            target_dest = qa2_ch or message
 
             if len(chunks) > 3:
                 summary_header = chunks[0]
@@ -4900,6 +5542,8 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
                         macro_memory_text=macro_mem
                     )
 
+                # [🎨 Visual Craft Loop 연동] 차기 마일스톤 5W1H 플랜(도메인/시각 에셋 승인/QC) 바인딩
+                session._current_5w1h_plan = next_plan_5w1h
                 next_title = f"{next_plan_5w1h.version} — {next_plan_5w1h.title}"
                 mode3_next_dispatched = True
 
@@ -5154,7 +5798,7 @@ async def on_message(message: discord.Message):
         pass
 
     ensure_commander_bot_started()
-    ensure_consultant_bot_started()
+    ensure_image_bot_started()
     ensure_qa2_bot_started()
 
     # Check for prefix command first (! or ~)
@@ -5172,7 +5816,7 @@ async def on_message(message: discord.Message):
                 importlib.reload(help_manager)
                 view = help_manager.HelpInteractiveView(initial_page=cmd_args, user_id=message.author.id)
                 embed = view.get_current_embed()
-                msg = await message.channel.send(embed=embed, view=view)
+                msg = await message.channel.send(embed=embed, view=view, files=view.get_files())
                 view.message = msg
                 return
             elif cmd_name in ("plan", "기획"):
@@ -5362,9 +6006,10 @@ async def on_message(message: discord.Message):
             raw_user_prompt = raw_user_prompt.replace(f"<@{ext_bot.user.id}>", "").replace(f"<@!{ext_bot.user.id}>", "").strip()
     if auditor_bot.user:
         raw_user_prompt = raw_user_prompt.replace(f"<@{auditor_bot.user.id}>", "").strip()
-    if "consultant_bot" in globals() and consultant_bot.user:
-        raw_user_prompt = raw_user_prompt.replace(f"<@{consultant_bot.user.id}>", "").replace(f"<@!{consultant_bot.user.id}>", "").strip()
-    raw_user_prompt = raw_user_prompt.replace("<@1545711652987600937>", "").replace("<@!1545711652987600937>", "").strip()
+    if "image_bot" in globals() and image_bot.user:
+        raw_user_prompt = raw_user_prompt.replace(f"<@{image_bot.user.id}>", "").replace(f"<@!{image_bot.user.id}>", "").strip()
+    if qa2_bot.user:
+        raw_user_prompt = raw_user_prompt.replace(f"<@{qa2_bot.user.id}>", "").replace(f"<@!{qa2_bot.user.id}>", "").strip()
 
     prompt = raw_user_prompt
 
@@ -5378,34 +6023,6 @@ async def on_message(message: discord.Message):
             except Exception:
                 await message.channel.send(f"💡 **[사용자 피드백 접수 완료]** \"{prompt}\"\n차기 마일스톤 기획에 최우선 반영하여 즉시 개발 순환을 재개합니다! 🚀")
             return
-
-    # Direct agent identity ping test response (natural language test check)
-    clean_check = prompt.replace(" ", "").lower()
-    if any(pattern in prompt for pattern in [
-        "agy agent로 동작하는 봇은",
-        "hermes agnet로 구동하는 봇은",
-        "hermes agent로 구동하는 봇은",
-        "정상적으로 구동하고 있는지 테스트",
-        "너 agy야 hermes야",
-        "너 agy야",
-        "너 hermes야",
-    ]) or (("너" in prompt or "who" in prompt.lower()) and any(k in prompt for k in ["뭐야", "누구야", "정체성", "identity", "who are you"])):
-        engine = getattr(session, "engine", "agy").lower().strip()
-        direct_badge = "agy" if engine == "agy" else "hermes"
-        coder_model = getattr(session, "engine_model", None) or getattr(config, "CODER_MODEL", "gemini-3.8-flash-high")
-        
-        embed = discord.Embed(
-            title=f"🤖 **[에이전트 정체성 응답]** `{direct_badge}`",
-            description=f"현재 채널 세션은 **`{direct_badge}`** 에이전트로 정상 구동 중입니다.",
-            color=0x34A853 if engine == "agy" else 0x9B59B6
-        )
-        embed.add_field(name="에이전트 (Identity)", value=f"**`{direct_badge}`**", inline=True)
-        embed.add_field(name="Coder 엔진", value=f"`{engine.upper()}`", inline=True)
-        embed.add_field(name="배정 모델", value=f"`{coder_model}`", inline=True)
-        embed.add_field(name="상태", value="🟢 정상 구동 및 명령 수신 대기 중", inline=True)
-        
-        await message.reply(f"{direct_badge}", embed=embed)
-        return
 
     # Handle attachments (text files read into prompt; voice/audio transcribed; media formatted safely)
     attachment_notes = []
@@ -5655,6 +6272,24 @@ async def on_message(message: discord.Message):
     await execute_channel_prompt(message, prompt)
 
 @bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id")
+        if custom_id == "telemetry_status_refresh" and not interaction.response.is_done():
+            # Silent ACK: no popup or ephemeral message
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+            try:
+                import telemetry_status_manager as tsm
+                ok = await tsm.update_status_message(interaction.client, session_manager, force=True)
+                if not ok:
+                    await asyncio.to_thread(tsm.update_status_via_rest_api, session_manager, True)
+            except Exception as e:
+                logger.error(f"bot on_interaction error: {e}")
+
+@bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     if hasattr(ctx.command, 'on_error'):
         return
@@ -5831,7 +6466,12 @@ async def start_all_bots():
         logger.info("Starting QA Bot client...")
         tasks.append(qa_bot.start(DISCORD_QA_BOT_TOKEN))
     if DISCORD_AGY_QA2_BOT_TOKEN:
-        logger.info("Starting QA2 Bot client (OpenRouter Upstage Solar Pro 4)...")
+        try:
+            from model_manager import GlobalModelManager as _Qa2GMM
+            _qa2_disp = _Qa2GMM.get_role_model_display("qa2")
+        except Exception:
+            _qa2_disp = getattr(config, "QA2_MODEL", "qa2")
+        logger.info(f"Starting QA2 Bot client ({_qa2_disp})...")
         tasks.append(qa2_bot.start(DISCORD_AGY_QA2_BOT_TOKEN))
     ext_qa = globals().get("extended_qa_bots", {})
     for ext_cfg in config.get_extended_qa_configs():
@@ -5850,12 +6490,53 @@ async def start_all_bots():
     if DISCORD_AUDITOR_BOT_TOKEN:
         logger.info("Starting Auditor Bot client...")
         tasks.append(auditor_bot.start(DISCORD_AUDITOR_BOT_TOKEN))
-    if DISCORD_AGY_CONSULTANT_BOT_TOKEN:
-        logger.info("Starting Consultant Bot client (GPT Astra)...")
-        tasks.append(consultant_bot.start(DISCORD_AGY_CONSULTANT_BOT_TOKEN))
+    if DISCORD_AGY_IMAGE_BOT_TOKEN:
+        try:
+            from model_manager import GlobalModelManager as _ImgGMM
+            _img_disp = _ImgGMM.get_role_model_display("image")
+        except Exception:
+            _img_disp = getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
+        logger.info(f"Starting Image generator Bot client ({_img_disp})...")
+        tasks.append(image_bot.start(DISCORD_AGY_IMAGE_BOT_TOKEN))
     if DISCORD_SERVER_MANAGER_BOT_TOKEN:
         logger.info("Starting Server Manager Bot client...")
         tasks.append(server_manager_bot.start(DISCORD_SERVER_MANAGER_BOT_TOKEN))
+
+    # [🛡️ StallGuard] 채널 오케스트레이션 교착(정지) 자동 감시·해제 태스크 상시 가동
+    try:
+        from stall_guard import build_guard, WARN_SECONDS, HARD_SECONDS, DEEP_SECONDS, QUEUE_WAIT_SECONDS
+
+        class _LiveSessions:
+            """bot 모듈 글로벌을 매 호출마다 재해석 → !reset/핫리로드 후에도 최신 세션을 본다."""
+
+            def get_all_sessions(self):
+                return session_manager.get_all_sessions()
+
+        async def _stall_notify(channel_id: int, text: str) -> None:
+            try:
+                ch = bot.get_channel(channel_id)
+                if ch is None:
+                    ch = await bot.fetch_channel(channel_id)
+                if ch is not None:
+                    await safe_send_discord_message(ch, text)
+            except Exception as notify_err:
+                logger.debug(f"StallGuard 채널 알림 실패(무시): {notify_err}")
+
+        _stall_guard = build_guard(
+            _LiveSessions(),
+            notify_fn=_stall_notify,
+            dispatch_fn=dispatch_next_in_queue,
+            lock_registry=_channel_queue_locks,
+        )
+        tasks.append(_stall_guard.run())
+        logger.info(
+            f"[StallGuard] 기동: 무응답 경보 {int(WARN_SECONDS)}s / 심층 관찰 {int(HARD_SECONDS)}s / "
+            f"강제 회수(절대 상한) {int(DEEP_SECONDS)}s / 대기열 정체 {int(QUEUE_WAIT_SECONDS)}s "
+            f"(증거: reports/watchdog/stalls.json)"
+        )
+    except Exception as guard_err:
+        logger.warning(f"[StallGuard] 기동 실패(봇은 계속 가동): {guard_err}")
+
     await asyncio.gather(*tasks)
 
 # [QC-P-01] Registered temporary scratch directories for cleanup on shutdown

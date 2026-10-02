@@ -11,14 +11,14 @@ import subprocess
 from pathlib import Path
 
 # Paths
-BASE_DIR = Path("/home/jangsung/Desktop/autocoding/!5_agy_agent")
+BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state" / "channel_sessions.json"
 AGY_SERVICE = "agy-discord-bot.service"
 SURFACE_SERVICE = "surface-status.service"
 
 # Known channel names for display
 CHANNEL_NICKNAMES = {
-    "1538529408703266902": "!5_agy_agent",
+    "1538529408703266902": "ANY QUESTION",
     "1538693952310485062": "ministry",
     "1538368240089169960": "status (Surface Pro 7)",
     "1538794871437918339": "noti (Surface Pro 7)",

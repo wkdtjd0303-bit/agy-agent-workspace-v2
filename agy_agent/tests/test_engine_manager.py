@@ -146,14 +146,15 @@ class TestEngineManager(unittest.TestCase):
         if "hermes" in (or_cmd[0] or ""):
             self.assertIn("chat", or_cmd)
             self.assertIn("-q", or_cmd)
-            self.assertIn(prompt, or_cmd)
+            # 프롬프트는 무질문 자율 진행 지시문과 함께 래핑될 수 있으므로 부분 포함으로 검증한다.
+            self.assertTrue(any(prompt in arg for arg in or_cmd))
             self.assertIn("--oneshot", or_cmd)
             self.assertIn("-Q", or_cmd)
             self.assertIn("-m", or_cmd)
             # Hermes CLI requires normalized raw model ID without openrouter/ prefix
             self.assertIn("qwen/qwen-2.5-coder-32b-instruct", or_cmd)
         else:
-            self.assertIn(prompt, or_cmd)
+            self.assertTrue(any(prompt in arg for arg in or_cmd))
         self.assertEqual(os.environ.get("OR_DATA_COLLECTION"), "deny")
         self.assertEqual(os.environ.get("OPENROUTER_PROVIDER_DATA_COLLECTION"), "deny")
 
@@ -164,14 +165,31 @@ class TestEngineManager(unittest.TestCase):
 
     def test_resolve_qa_model_gemini_pro_priority(self):
         from trio_agent_runner import TrioAgentRunner
+        from model_manager import GlobalModelManager
         with unittest.mock.patch('config.QA_MODEL', 'gemini-3.1-pro-high'):
             model_high, display_high, _ = asyncio.run(TrioAgentRunner.resolve_qa_model(risk_level="HIGH"))
             self.assertEqual(model_high, "gemini-3.1-pro-high")
-            self.assertIn("Gemini 3.1 Pro High", display_high)
+            # 표시명은 `!model`(GlobalModelManager) 과 동일한 포맷터를 사용해야 한다.
+            self.assertEqual(display_high, GlobalModelManager.format_model_name("gemini-3.1-pro-high"))
+            self.assertIn("Gemini 3.1 Pro", display_high)
 
             model_low, display_low, _ = asyncio.run(TrioAgentRunner.resolve_qa_model(risk_level="LOW"))
             self.assertEqual(model_low, "gemini-3.1-pro-high")
-            self.assertIn("Gemini 3.1 Pro High", display_low)
+            self.assertEqual(display_low, GlobalModelManager.format_model_name("gemini-3.1-pro-high"))
+
+    def test_resolve_qa_model_display_matches_model_config(self):
+        """회귀: 모델 문자열에 'flash'가 포함된다는 이유로 비-Gemini 모델이
+        'Gemini 3.7 Flash High'로 잘못 표기되던 버그 방지.
+        봇 작동 배너의 표시명은 실제 설정 모델의 `!model` 표기와 동일해야 한다."""
+        from trio_agent_runner import TrioAgentRunner, QuotaManager
+        from model_manager import GlobalModelManager
+        QuotaManager.reset_exhaustion()
+        with unittest.mock.patch('config.QA_MODEL', 'opencode-go/mimo-v2.6-flash'):
+            model, display, _ = asyncio.run(TrioAgentRunner.resolve_qa_model(risk_level="HIGH"))
+            self.assertEqual(model, "opencode-go/mimo-v2.6-flash")
+            self.assertEqual(display, "MiMo 2.6 Flash")
+            self.assertNotIn("Gemini", display)
+            self.assertEqual(display, GlobalModelManager.format_model_name("opencode-go/mimo-v2.6-flash"))
 
     def test_channel_session_engine_persistence(self):
         sess = ChannelSession(channel_id=999999, workspace=self.workspace, engine="agy")
@@ -457,6 +475,35 @@ class TestEngineManager(unittest.TestCase):
         self.assertEqual(normalize_engine_id("codex"), "codex")
         self.assertEqual(normalize_engine_id("claude"), "claude")
         self.assertEqual(normalize_engine_id(None), "agy")
+
+
+    def test_opencode_event_hint_is_human_readable(self):
+        """[회귀] qa1 처럼 text 파트 없이 도구만 연속 실행하는 구간에서
+        원시 JSON(`{"type":"step_start"...`)이 채널에 노출되지 않고 사람이 읽는
+        진행 문구가 나와야 한다. (Coder/QA 공용 OpenCode 어댑터 표기 통일)"""
+        from engine_manager import _opencode_event_hint
+
+        h = _opencode_event_hint("step_start", {})
+        self.assertIn("추론", h)
+        self.assertNotIn("step_start", h)
+        self.assertNotIn("{", h)
+
+        h = _opencode_event_hint("tool_use", {"tool": "bash", "state": {"status": "running"}})
+        self.assertIn("도구 실행 중", h)
+        self.assertIn("bash", h)
+        self.assertNotIn('{"type"', h)
+
+        h = _opencode_event_hint(
+            "tool_use", {"tool": "bash", "state": {"status": "completed", "title": "npm test"}}
+        )
+        self.assertIn("도구 완료", h)
+        self.assertIn("npm test", h)
+
+        self.assertIn("단계 완료", _opencode_event_hint("step_finish", {}))
+        self.assertIn("오류", _opencode_event_hint("error", {}))
+
+        # text 는 힌트를 만들지 않고 실제 발화(text_parts) 경로로 표기한다.
+        self.assertEqual(_opencode_event_hint("text", {"text": "hello"}), "")
 
 
 if __name__ == "__main__":

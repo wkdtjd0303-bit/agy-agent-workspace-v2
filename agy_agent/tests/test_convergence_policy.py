@@ -165,6 +165,24 @@ class TestFallbackHeuristic(unittest.TestCase):
         self.assertEqual(source, "heuristic")
         self.assertEqual(count, 0)
 
+    def test_heuristic_zero_for_channel1_meta_nitpicks(self):
+        """[회귀] 채널1 로그의 Fact Checker 반려는 문서/포맷/환경 제약 같은 비차단 항목뿐이었다.
+        이런 반려는 차단 결함 0건으로 해석되어 수렴(강제 승인)되어야 한다 — 무한 반려 루프 방지."""
+        out = (
+            "[STATUS: REJECTED]\n"
+            "D1 [LOW] 클리핑 스크립트가 390px만 고정이라 '1280px 스캔' 항목은 디스크 증거 미비 — 문서/증거 포맷 보강 권고\n"
+            "D2 [LOW] .NET 10 종료일 표기가 1일 차이 — 표기 정정 권고\n"
+            "D3 [LOW] 라이브 E2E 16/16은 브라우저 미연동으로 재실행 불가 — 환경 제약, 정보 정확성과 무관\n"
+        )
+        count, source = resolve_blocking_count(out)
+        self.assertEqual(count, 0, "문서/포맷/환경 제약은 차단 결함이 아니다")
+        self.assertEqual(source, "heuristic")
+
+        ConvergenceTracker.reset_all()
+        ConvergenceTracker.record(999, count)
+        self.assertTrue(ConvergenceTracker.should_force_accept(999))
+        ConvergenceTracker.reset_all()
+
     def test_none_when_no_defect_statements(self):
         out = "[STATUS: REJECTED]\n좋은 시도였습니다. 다시 해주세요."
         self.assertEqual(resolve_blocking_count(out), (None, "none"))
@@ -289,6 +307,39 @@ class TestRunnerWiring(unittest.TestCase):
         text = build_blocking_contract_instruction()
         self.assertIn("거짓", text)
         self.assertIn("차기 백로그", text)
+
+
+class TestResearchRunnerWiring(unittest.TestCase):
+    """ResearchRunner(Analyst ➔ Fact Checker ➔ Auditor) 에도 수렴/정직성 계약이
+    실제로 배선되어 있는지 고정한다. (리서치 파이프라인의 무한 반려·환각 루프 방지)
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        runner = WORKSPACE_ROOT / "research_runner.py"
+        with open(runner, "r", encoding="utf-8") as f:
+            cls.code = f.read()
+
+    def test_research_runner_imports_and_uses_convergence_policy(self):
+        self.assertIn("from convergence_policy import", self.code)
+        self.assertIn("build_blocking_contract_instruction", self.code)
+        self.assertIn("resolve_blocking_count(", self.code)
+        self.assertIn("ConvergenceTracker.should_force_accept", self.code)
+        self.assertIn("ConvergenceTracker.should_escalate", self.code)
+
+    def test_research_runner_resets_tracker_per_mission(self):
+        self.assertIn("ConvergenceTracker.reset(channel_id", self.code)
+
+    def test_research_runner_records_and_exports_telemetry(self):
+        self.assertIn("ConvergenceTelemetry.record(", self.code)
+        self.assertIn("ConvergenceTelemetry.export(", self.code)
+
+    def test_fact_checker_prompt_requires_blocking_marker(self):
+        self.assertIn("BLOCKING_DEFECTS:", self.code)
+
+    def test_fact_checker_prompt_has_anti_hallucination_rule(self):
+        self.assertIn("환각", self.code)
+        self.assertIn("골대이동", self.code)
 
 
 class TestContractInstruction(unittest.TestCase):

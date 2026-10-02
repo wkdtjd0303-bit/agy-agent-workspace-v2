@@ -9,8 +9,9 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, Any, List
 
 import config
-from config import AGY_PATH, COMMANDER_MODEL
+from config import AGY_PATH, COMMANDER_MODEL, COMMANDER_USER_MENTION, COMMANDER_BOT_MENTION
 from mode_classifier import classify_mode, classify_task_type
+import mode_registry
 from codebase_reality_inspector import CodebaseRealityInspector, CodebaseReality
 from quality_state_manager import QualityStateManager
 
@@ -66,6 +67,8 @@ class Milestone5W1HPlan:
     thinking_process: str = ""    # [4-Stage Structured Thinking] 폐루프 제어 4단계 추론 과정
     coverage_matrix: List[Dict[str, Any]] = field(default_factory=list)  # 사용자 요청 → 태스크 1:1 반영 매트릭스
     intent_coverage: str = ""     # "5/5" 형태의 요구사항 커버리지 요약
+    visual_gap_analysis: str = "" # [📸 스크린샷 실측 제품 결손] 실 렌더링 E2E 화면 비전 분석 요약
+    product_value_analysis: str = "" # [📦 제품 가치 기획] 아직 없는 사용자 체감 신규 기능 (품질 하드닝 대체)
 
     def coverage_summary(self) -> str:
         """Human-readable 'covered/total' summary of the intent coverage contract."""
@@ -121,6 +124,18 @@ class Milestone5W1HPlan:
                 value="\n".join(qc_lines)[:1000],
                 inline=False
             )
+        if self.visual_gap_analysis:
+            embed.add_field(
+                name="📸 스크린샷 실측 결손 진단 (Planner Visual Gap)",
+                value=self.visual_gap_analysis[:1000],
+                inline=False
+            )
+        if self.product_value_analysis:
+            embed.add_field(
+                name="📦 제품 가치 기획 (Product Value)",
+                value=self.product_value_analysis[:1000],
+                inline=False
+            )
         if self.visual_approved and self.visual_asset_spec and self.domain not in ("cli_agent", "daemon", "backend_api"):
             embed.add_field(
                 name="🎨 디자인 & 에셋",
@@ -143,6 +158,16 @@ class Milestone5W1HPlan:
             source_badge = "\n🔎 **[디스크 신호 기반]** 실제 코드/로그에서 감지된 결손을 최우선 해소합니다."
         elif self.source == "feedback":
             source_badge = "\n🎯 **[사용자 피드백 최우선 반영]** 사용자가 요청한 지시사항 및 개선 포인트를 최우선 반영합니다."
+        elif self.source == "visual_gap":
+            source_badge = (
+                "\n📸 **[스크린샷 실측 결손 우선]** 실 렌더링 E2E 화면 비전 분석에서 검출된 "
+                "제품 기능 공백을 최우선 해소합니다 (일반론적 E2E 통과 과제 대체)."
+            )
+        elif self.source == "product_value":
+            source_badge = (
+                "\n📦 **[제품 가치 기획 우선]** 아직 구현되지 않은 사용자 체감 신규 기능을 발주합니다 "
+                "(품질 하드닝/E2E 통과 같은 자기참조적 과제 대체)."
+            )
         desc = f"💡 **기획 의도**: {self.why}" if self.why else "💡 **기획 의도**: 이번 단계의 핵심 목표와 기능을 개발합니다."
         what_items = [f"• {item}" for item in self.what] if self.what else ["• 핵심 프로덕션 기능 구현"]
         what_text = "\n".join(what_items[:7])
@@ -200,6 +225,20 @@ class Milestone5W1HPlan:
                 "\n".join(qc_items)
             ])
 
+        if self.visual_gap_analysis:
+            parts.extend([
+                "",
+                "📸 **스크린샷 실측 결손 진단 (실 렌더링 E2E 화면 분석)**",
+                self.visual_gap_analysis[:1200]
+            ])
+
+        if self.product_value_analysis:
+            parts.extend([
+                "",
+                "📦 **제품 가치 기획 (아직 없는 사용자 기능)**",
+                self.product_value_analysis[:1200]
+            ])
+
         if self.visual_approved and self.visual_asset_spec and self.domain not in ("cli_agent", "daemon", "backend_api"):
             parts.extend([
                 "",
@@ -245,6 +284,24 @@ class Milestone5W1HPlan:
                 + "\n".join(cov_lines) + "\n"
             )
 
+        visual_gap_section = ""
+        if self.visual_gap_analysis:
+            visual_gap_section = (
+                f"\n**[📸 실 렌더링 스크린샷 실측 결손 (기획 물리 근거)]**:\n"
+                f"{self.visual_gap_analysis}\n"
+                f"→ 위는 실제 렌더링된 화면에서 확인된 제품 기능 공백입니다. 반드시 실체 구현으로 해소하십시오. "
+                f"'전체 E2E 통과/품질 하드닝' 같은 자기참조적 일반론으로 대체하지 마십시오.\n"
+            )
+
+        product_value_section = ""
+        if self.product_value_analysis:
+            product_value_section = (
+                f"\n**[📦 제품 가치 기획 (아직 없는 사용자 체감 기능)]**:\n"
+                f"{self.product_value_analysis}\n"
+                f"→ 이번 마일스톤은 품질 하드닝/E2E 통과가 아니라, 사용자가 화면·동작에서 실제로 새로 "
+                f"체감하는 제품 기능을 추가해야 합니다. 신규 기능을 실체 구현하고 기존 워크플로에 연결하십시오.\n"
+            )
+
         directive = (
             f"🎯 [Commander 사령관 5W1H 개발 지침 — 마일스톤 {self.version}: {self.title}]\n\n"
             f"**[1. 왜 (Why - 구현 목적 & 전략 가치)]**:\n"
@@ -259,6 +316,8 @@ class Milestone5W1HPlan:
             f"{when_str}\n"
             f"{qc_section}"
             f"{coverage_section}"
+            f"{visual_gap_section}"
+            f"{product_value_section}"
             f"{memory_section}\n"
             f"**[사령관 3대 핵심 훈령 (Commander Directives)]:**\n"
             f"1. **컨텍스트 청정화 및 명령 순응**: 이전 회차의 기억과 잡음을 완전히 비운 청정 상태에서, 이번 5W1H 마일스톤 목표에만 100% 집중하여 구현하십시오.\n"
@@ -355,11 +414,11 @@ The user has commissioned an end-to-end software project. You must analyze the u
    - v3.0: Production Hardening, Release & E2E Quality (focus on deployment/export, performance, zero crash, regression E2E tests)
 5. CONCRETE TASKS: Under EACH milestone, provide 3 actionable, specific task descriptions that directly build the requested application.
 6. INITIAL DIRECTIVE: A clear, inspiring, authoritative instruction to Coder and QA explaining the mission, key technical expectations, and quality standards for v1.0, acting as an executive technical leader representing the user's requirements.
-7. VISUAL ASSET AUTHORIZATION & TAXONOMY (사령관 <@1539448922643234876> 시각 에셋 공식 승인 헌법):
-   - You act as the user's executive proxy. Under Rule 8, Coder/QA cannot generate images without Commander (<@1539448922643234876>) or user explicit approval.
+7. VISUAL ASSET AUTHORIZATION & TAXONOMY (사령관 <COMMANDER_USER_MENTION> 시각 에셋 공식 승인 헌법):
+   - You act as the user's executive proxy. Under Rule 8, Coder/QA cannot generate images without Commander (<COMMANDER_USER_MENTION>) or user explicit approval.
    - For GUI apps (Games, Mobile apps, SaaS Web apps): Proactively evaluate visual polish needs (e.g. game sprites, joystick, splash screen, brand emblem/badge, empty state hero, or UI icons).
-   - When visual assets are beneficial: Explicitly authorize image generation in `visual_asset_spec`, `milestones`, and `initial_directive` using the official approval tag `<@1539448922643234876>`:
-     "[🎨 사령관 <@1539448922643234876> 공식 시각 에셋 생성 승인: Type A (풀컷 씬) / Type B (모듈러 독립 파츠)]"
+   - When visual assets are beneficial: Explicitly authorize image generation in `visual_asset_spec`, `milestones`, and `initial_directive` using the official approval tag `<COMMANDER_USER_MENTION>`:
+     "[🎨 사령관 <COMMANDER_USER_MENTION> 공식 시각 에셋 생성 승인: Type A (풀컷 씬) / Type B (모듈러 독립 파츠)]"
    - Specify Rule 8 taxonomy:
      ① Type A (Full-cut scene/illustration: splash, background, hero banner - 16:9 or 9:16)
      ② Type B (Modular isolated part: sprite, joystick, icon, badge, button, item - 1:1 single object on clean/transparent background)
@@ -387,7 +446,7 @@ Return ONLY a valid, raw JSON object (without markdown code blocks, without ```j
   "key_value_proposition": "Primary value proposition",
   "design_vibe": "Tailored visual theme or architecture specification",
   "monetization_strategy": "Realistic feasibility, monetization, or distribution strategy",
-  "visual_asset_spec": "Specification of visual assets and Commander <@1539448922643234876> approval, or 'None required' for headless CLI/backend",
+  "visual_asset_spec": "Specification of visual assets and Commander <COMMANDER_USER_MENTION> approval, or 'None required' for headless CLI/backend",
   "milestones": [
     {
       "version": "v1.0",
@@ -425,7 +484,7 @@ Return ONLY a valid, raw JSON object (without markdown code blocks, without ```j
   ],
   "initial_directive": "Comprehensive, authoritative instruction for Coder & QA on v1.0 (including visual asset approval clause if applicable)"
 }
-"""
+""".replace("<COMMANDER_USER_MENTION>", COMMANDER_USER_MENTION)
 
 class ResolvingDict(dict):
     """
@@ -483,7 +542,14 @@ class Commander:
         mode_normalized = (session_mode or "auto").lower().strip()
 
         # 1. Respect manually pinned modes
-        if mode_normalized in ("read", "readonly", "read-only", "consult", "consulting", "plan", "planning", "읽기", "기획", "자문", "방향성"):
+        #    🎛️ SSOT: mode_registry 가 `!mode 2` / `!mode 2+` / `!mode 3` / `!mode 3+` 의
+        #    유일한 해석 기준이다. (모듈별 별칭 하드코딩 드리프트 제거)
+        manual_canonical = (
+            mode_registry.normalize_mode(mode_normalized)
+            if mode_registry.is_known_mode(mode_normalized)
+            else None
+        )
+        if manual_canonical == "read":
             return CommanderDecision(
                 mode="read",
                 reason="수동 고정 모드 (🔍 3중 읽기/기획 전용 아키텍처 자문)",
@@ -493,7 +559,7 @@ class Commander:
                 source="manual",
                 latency_ms=0.1
             )
-        elif mode_normalized in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+") or mode_normalized.replace(" ", "") in ("3+", "3plus", "3플러스", "mode3_plus", "mode3+"):
+        elif manual_canonical == "mode3_plus":
             task_type = classify_task_type(clean_prompt)
             try:
                 import config
@@ -511,7 +577,7 @@ class Commander:
                 source="manual",
                 latency_ms=0.1
             )
-        elif mode_normalized in ("3", "mode3", "자율3", "무인3", "3자율", "3차자율") or mode_normalized.replace(" ", "") in ("3", "mode3"):
+        elif manual_canonical == "mode3":
             task_type = classify_task_type(clean_prompt)
             return CommanderDecision(
                 mode="mode3",
@@ -522,7 +588,7 @@ class Commander:
                 source="manual",
                 latency_ms=0.1
             )
-        elif mode_normalized in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스") or mode_normalized.replace(" ", "") in ("pair+", "pair_plus", "pair_quad", "quad_pair", "2+", "2plus", "2플러스"):
+        elif manual_canonical == "pair_quad":
             task_type = classify_task_type(clean_prompt)
             try:
                 import config
@@ -545,7 +611,7 @@ class Commander:
                 source="manual",
                 latency_ms=0.1
             )
-        elif mode_normalized in ("pair", "trio", "dual", "collab", "team", "3중", "페어", "협업", "2"):
+        elif manual_canonical == "pair":
             task_type = classify_task_type(clean_prompt)
             briefing = "👥 3중 협업부대 출동 (사용자 주도 모드 · !mode 2)"
             reason = "수동 고정 모드 (👥 3중 에이전트 사용자 주도 협업 · !mode 2)"
@@ -561,7 +627,7 @@ class Commander:
                 source="manual",
                 latency_ms=0.1
             )
-        elif mode_normalized in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo") or mode_normalized.replace(" ", "") in ("single_qa2", "qa2+", "qa2_plus", "qa2", "qa2_solo"):
+        elif manual_canonical == "single_qa2":
             return CommanderDecision(
                 mode="single_qa2",
                 reason="수동 고정 모드 (🥷 단일 qa2 에이전트)",
@@ -571,18 +637,7 @@ class Commander:
                 source="manual",
                 latency_ms=0.1
             )
-        elif mode_normalized in ("single_plus", "single+", "1+", "1plus", "1플러스", "single_consultant", "consultant", "컨설턴트") or mode_normalized.replace(" ", "") in ("single+", "1+", "single_plus"):
-            consultant_model = getattr(config, "CONSULTANT_MODEL", "openai/gpt-6-astra")
-            return CommanderDecision(
-                mode="single_plus",
-                reason=f"수동 고정 모드 (👤 단일 컨설턴트 에이전트 · {consultant_model})",
-                briefing=f"👤 단일 컨설턴트 에이전트 출동 (수동 고정 모드 · {consultant_model})",
-                task_type="consulting",
-                confidence=1.0,
-                source="manual",
-                latency_ms=0.1
-            )
-        elif mode_normalized in ("single", "solo", "단일", "싱글"):
+        elif manual_canonical == "single":
             return CommanderDecision(
                 mode="single",
                 reason="수동 고정 모드 (👤 단일 에이전트)",
@@ -732,10 +787,58 @@ class Commander:
         return "\n".join(text_parts).strip() or None
 
     @classmethod
+    async def _run_cmdc_commander_query(
+        cls, prompt: str, workspace: Optional[str], model_name: str
+    ) -> Optional[str]:
+        """Runs a Commander query through Command Code CLI (cmdc)."""
+        from engine_manager import EngineManager
+        adapter = EngineManager.get_adapter("cmdc")
+        if not adapter:
+            return None
+        bin_path = adapter.get_binary_path()
+        if not bin_path:
+            return None
+        cwd = workspace or os.getcwd()
+        cmd = [bin_path, "-p", prompt, "-t", "--yolo", "--tools-all", "--skip-onboarding", "--output-format", "json"]
+        if model_name:
+            cmd.extend(["-m", model_name])
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=30 * 1024 * 1024,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=40.0)
+            if proc.returncode == 0 and stdout:
+                lines = stdout.decode("utf-8", errors="replace").splitlines()
+                final_text = ""
+                for line in lines:
+                    try:
+                        d = json.loads(line)
+                        if d.get("type") == "result":
+                            final_text = d.get("finalText") or final_text
+                    except Exception:
+                        pass
+                return final_text.strip() if final_text else stdout.decode("utf-8", errors="replace").strip()
+        except Exception as e:
+            logger.debug(f"Commander cmdc query notice: {e}")
+        return None
+
+    @classmethod
     async def _run_commander_external_query(
         cls, prompt: str, workspace: Optional[str], model_name: str
     ) -> Optional[str]:
         """Routes a Commander query to a non-Gemini engine without any Gemini fallback."""
+        try:
+            from model_manager import GlobalModelManager
+            cmd_eng = GlobalModelManager.get_role_engine("commander")
+            if cmd_eng in ("cmdc", "commandcode"):
+                return await cls._run_cmdc_commander_query(prompt, workspace, model_name)
+        except Exception:
+            pass
         ml = (model_name or "").lower()
         if ml.startswith(("opencode-go/", "opencode/")):
             return await cls._run_opencode_commander_query(prompt, workspace, model_name)
@@ -1498,7 +1601,7 @@ class Commander:
         Enforces user constraints:
         - Base core squad: qa1 + qa2 + qa6 fixed whenever available.
         - qa7: ONLY if difficulty is >= 7.5/10 AND remaining quota >= 10%.
-        - Dynamic selection: Commander (<@1540273467453345812>) selects 1~2 additional QAs matching task characteristics.
+        - Dynamic selection: Commander bot selects 1~2 additional QAs matching task characteristics.
         """
         difficulty, risk_level, risk_reason, is_debate = cls.evaluate_task_difficulty(prompt, diff_info)
 
@@ -1549,7 +1652,7 @@ class Commander:
             # User specifically asked for QA2 only
             selected_indices = [2]
             strategy_desc = "사용자 자연어 지시: qa2 단독 집중 교차 검증"
-        elif force_all or (mode in ("pair_quad", "pair+", "pair_plus", "quad_pair", "2+", "2plus", "2플러스", "3+", "3plus", "3플러스", "mode3_plus") and 7 not in qa_by_idx):
+        elif force_all or (mode_registry.is_multi_qa_mode(mode) and 7 not in qa_by_idx):
             # Explicit affirmative user request for all QAs or !mode 2+ (pair_quad) collaboration without Sonnet
             selected_indices = [cfg["index"] for cfg in available_extended_qas if cfg["index"] != 7]
             if 7 in qa_by_idx:
@@ -1660,7 +1763,7 @@ class Commander:
         # Squad display banner for Discord
         squad_names_str = " ➔ ".join([f"**qa{c.get('index', '')}**" if c.get("index") else f"**{c.get('name', 'qa').lower()}**" for c in selected_qas]) or "없음"
         dispatch_banner = (
-            f"🎯 **[사령관 <@1540273467453345812> 지능형 QA 스쿼드 편성]**\n"
+            f"🎯 **[사령관 {COMMANDER_BOT_MENTION} 지능형 QA 스쿼드 편성]**\n"
             f"• **작업 난이도**: **{difficulty}/10** ({risk_reason})\n"
             f"• **출동 스쿼드**: **qa1** ➔ {squad_names_str}\n"
             f"• **기본 고정**: qa1 + qa2 + qa6\n"
@@ -1816,7 +1919,7 @@ class Commander:
             )
 
         arbitration_text = (
-            f"⚖️ **[사령관 <@1540273467453345812> & 수석감사관 교차 중재 판결 (Conflict Resolution)]**\n"
+            f"⚖️ **[사령관 {COMMANDER_BOT_MENTION} & 수석감사관 교차 중재 판결 (Conflict Resolution)]**\n"
             f"────────────────────────────────────────\n"
             f"**[상황 진단]**: 복수 QA 리뷰어 간 관점 충돌 또는 다중 반려 발생 (사공 분쟁 방지 프로토콜)\n"
             + (f"**[승인 측 의견 (A안)]**:\n" + "\n".join(app_points) + "\n" if app_points else "")
@@ -1937,7 +2040,7 @@ class Commander:
                     "title": "Game Visual Assets & Audio (사령관 에셋 승인 및 시각/오디오 연동)",
                     "dimension": "visual_quality",
                     "tasks": [
-                        "사령관 <@1539448922643234876> 공식 승인 하에 Rule 8 에셋(Type A/B 스프라이트/배경) generate_image 호출 생성 및 바인딩",
+                        f"사령관 {COMMANDER_USER_MENTION} 공식 승인 하에 Rule 8 에셋(Type A/B 스프라이트/배경) generate_image 호출 생성 및 바인딩",
                         "Canvas 60fps 파티클 폭발 및 충돌 피드백 연출",
                         "WebAudio 절차적 사운드 효과음 및 배경음악 연결"
                     ],
@@ -3246,6 +3349,18 @@ class Commander:
             preserve_caller_milestone=preserve_caller_milestone
         )
 
+        # 📸 [Planner Visual Gap] 실 렌더링 스크린샷 결손 증거를 이 마일스톤 기획에도 물리 증거로 주입한다.
+        _vg_digest = ""
+        _vg_block = ""
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            _vg_review = PlannerVisualGapAnalyzer.load_review(workspace)
+            if _vg_review:
+                _vg_block = PlannerVisualGapAnalyzer.format_prompt_block(_vg_review)
+                _vg_digest = PlannerVisualGapAnalyzer.format_digest(_vg_review)
+        except Exception as _vg_err:
+            logger.debug(f"[Commander] 5W1H visual gap injection skipped: {_vg_err}")
+
         user_priority_rule = ""
         if user_prompt and not user_prompt.strip().startswith("🎯 ["):
             user_priority_rule = (
@@ -3267,13 +3382,15 @@ class Commander:
             f"Candidate Tasks: {', '.join(heuristic_plan.what or tasks or []) if (heuristic_plan.what or tasks) else 'N/A'}\n"
             f"User Prompt: {user_prompt[:2000] if user_prompt else 'N/A'}\n"
             f"Macro History: {macro_memory_text[:1500] if macro_memory_text else 'None'}\n\n"
-            f"[CRITICAL COMMANDER ARCHITECTURAL PRINCIPLES]\n"
+            + (f"{_vg_block}\n\n" if _vg_block else "")
+            + f"[CRITICAL COMMANDER ARCHITECTURAL PRINCIPLES]\n"
             f"1. ATOMIC SCOPE DECOMPOSITION (단일 책임 마일스톤): If the target milestone or candidate tasks bundle multiple disparate complex systems (e.g. combining Text Search + Pen Drawing + Redaction + Export), you MUST narrow and decompose the scope to EXACTLY ONE cohesive capability for this milestone. Defer secondary features so Coder does not produce shallow stubs.\n"
             f"2. ZERO-STUB & ANTI-MOCK MANDATE: The Coder is strictly prohibited from writing dummy mocks, placeholder buttons, or '// TODO' stubs. Require deep, substantive algorithmic and data-level implementation.\n"
             f"3. HARDENED ACCEPTANCE CRITERIA: In 'when_acceptance', specify concrete stress/edge-case tests, real-world data validation (e.g., handling edge-case inputs, memory safety, 60fps responsiveness), not just 'build succeeds'.\n"
             f"4. QUALITY CONTRACT (기계적 정량 품질 검증 계약): Formulate 3~5 verifiable atomic QC items (Level 1: AST/Code/Metric, Level 2: Binary Vision). E.g. [QC-G-01], [QC-V-01], [QC-U-01], [QC-P-01]. Each MUST have a concrete verification rule.\n"
-            f"5. SMART VISUAL ASSET AUTHORIZATION: Only authorize visual image generation (Rule 8) if this milestone explicitly implements new visual screens or graphical UI assets. For core algorithms, search, or backend logic, state that image generation is deferred to focus on core logic.\n\n"
-            f"Output a valid JSON object ONLY with the following structure:\n"
+            f"5. SMART VISUAL ASSET AUTHORIZATION: Only authorize visual image generation (Rule 8) if this milestone explicitly implements new visual screens or graphical UI assets. For core algorithms, search, or backend logic, state that image generation is deferred to focus on core logic.\n"
+            + ("6. VISUAL GAP FIRST (스크린샷 실측 결손 우선): 위 [실 렌더링 E2E 스크린샷 기반 제품 결손 분석]에 구체적 기능/패널/워크플로 결손이 있으면, 이번 마일스톤은 그중 가장 가치 높은 1건을 원자적으로 해소해야 합니다. '전체 E2E 통과/품질 하드닝' 같은 일반론으로 대체하지 마십시오.\n" if _vg_block else "")
+            + f"\nOutput a valid JSON object ONLY with the following structure:\n"
             f"{{\n"
             f'  "title": "단일 마일스톤 타이틀 (사용자 요구사항을 직접 반영하여 구체적으로 명명)",\n'
             f'  "why": "전략적 당위성 및 목적 (왜 이번 단일 마일스톤에 집중해야 하는지 2~3문장)",\n'
@@ -3372,6 +3489,9 @@ class Commander:
                             macro_memory_text=macro_memory_text,
                             user_prompt=user_prompt
                         )
+                        if _vg_digest and not is_feedback_mode:
+                            ai_plan.visual_gap_analysis = _vg_digest
+                            cls._rebuild_directive(ai_plan, macro_memory_text=macro_memory_text, user_prompt=user_prompt)
                         return ai_plan
         except Exception as e:
             logger.debug(f"Commander 5W1H AI planning note (fallback to heuristic): {e}")
@@ -3388,6 +3508,9 @@ class Commander:
             macro_memory_text=macro_memory_text,
             user_prompt=user_prompt
         )
+        if _vg_digest and not (heuristic_plan.title or "").startswith("사용자 피드백"):
+            heuristic_plan.visual_gap_analysis = _vg_digest
+            cls._rebuild_directive(heuristic_plan, macro_memory_text=macro_memory_text, user_prompt=user_prompt)
         return heuristic_plan
 
     @classmethod
@@ -4184,6 +4307,334 @@ class Commander:
         except Exception as rm_err:
             logger.debug(f"Adaptive roadmap sync notice: {rm_err}")
 
+    # ──────────────────────────────────────────────
+    # 📸 스크린샷 실측 제품 결손 (Planner Visual Gap) — 기획 단계 비전 증거
+    # ──────────────────────────────────────────────
+    @classmethod
+    def _load_visual_gap_review(cls, workspace: Optional[str]) -> Optional[Dict[str, Any]]:
+        """디스크에 저장된 스크린샷 결손 리뷰(JSON dict)를 읽는다. 없으면 None."""
+        if not workspace:
+            return None
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            return PlannerVisualGapAnalyzer.load_review(workspace)
+        except Exception as e:
+            logger.debug(f"[Commander] visual gap review load skipped: {e}")
+            return None
+
+    @classmethod
+    def _visual_gap_seed(
+        cls,
+        review: Optional[Dict[str, Any]],
+        root_user_goal: str,
+        reality: CodebaseReality,
+        domain: str,
+        workspace: Optional[str],
+        target_version: str,
+        allowed_categories: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        스크린샷 결손 리뷰 → 차기 마일스톤 시드(title/what/how/why/asset/digest).
+        이미 디스크에 구현된 기능이면 오탐으로 보고 None 을 반환한다(중복 기획 차단).
+        """
+        if not review:
+            return None
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+        except Exception:
+            return None
+
+        gaps = list(review.get("gaps") or []) if isinstance(review, dict) else []
+        if allowed_categories and gaps:
+            filtered = [
+                g for g in gaps
+                if str(g.get("category", "")).upper() in {c.upper() for c in allowed_categories}
+            ]
+            if filtered:
+                review = dict(review, gaps=filtered)
+
+        top = PlannerVisualGapAnalyzer.select_top_gap(review)
+        if not top:
+            return None
+        feature = str(top.get("feature") or "").strip()
+        if not feature:
+            return None
+
+        # 이미 구현된 컴포넌트명과 일치하면 결손 아님 (Vision 할루시네이션 차단)
+        norm_feature = re.sub(r"\s+", "", feature).lower()
+        comps_blob = re.sub(r"\s+", "", " ".join(getattr(reality, "implemented_components", []) or [])).lower()
+        if len(norm_feature) >= 3 and norm_feature in comps_blob:
+            logger.info(f"[Commander] 스크린샷 결손 후보 '{feature}' 는 이미 디스크에 존재 → 스킵")
+            return None
+
+        tasks = PlannerVisualGapAnalyzer.build_gap_tasks(review)
+        if not tasks:
+            return None
+        digest = PlannerVisualGapAnalyzer.format_digest(review)
+        category = str(top.get("category", "CORE_FEATURE")).upper()
+
+        title = f"스크린샷 실측 결손 해소: {feature}"
+        if category == "UX_WORKFLOW":
+            title = f"스크린샷 실측 UX 결손 해소: {feature}"
+        elif category == "LAYOUT_PANEL":
+            title = f"스크린샷 실측 레이아웃 결손 해소: {feature}"
+
+        missing = str(top.get("missing") or "화면상 미구현")
+        why = (
+            f"실 렌더링 E2E 스크린샷 비전 분석 결과, 사용자가 체감하는 제품 기능 공백 [{feature}]이 확인되었습니다. "
+            f"({missing[:160]}) 소스코드/PRD만으로는 드러나지 않는 '실제 화면'의 결손이므로, "
+            f"일반론적 E2E 안정화·품질 하드닝보다 이 기능 공백을 먼저 원자적으로 해소합니다."
+        )
+        how = (
+            f"기존 검증 완료 코드는 100% 보존(Zero-Regression)하고, 결손 기능 [{feature}]을 "
+            f"실사용자 워크플로에 맞게 신규 구현·연결합니다. {top.get('plan_hint') or ''}"
+        ).strip()
+
+        visual_asset_spec = ""
+        visual_approved = False
+        if domain in ("saas_web", "mobile_app", "game"):
+            visual_asset_spec = (
+                "🎨 [Rule 8 시각 디자인 에셋 생성 승인]\n"
+                f"• Type B: [{feature}] 구현에 필요한 도구/아이콘/패널 에셋을 실제 이미지로 생성하여 소스에 바인딩\n"
+                "• 단색 사각형·텍스트 임시 대체 금지 (실제 렌더링 품질 확보)"
+            )
+            visual_approved = True
+
+        return {
+            "title": title,
+            "what": tasks,
+            "how": how,
+            "why": why,
+            "visual_asset_spec": visual_asset_spec,
+            "visual_approved": visual_approved,
+            "digest": digest,
+            "feature": feature,
+            "category": category,
+        }
+
+    @classmethod
+    def _build_visual_gap_plan(
+        cls,
+        review: Optional[Dict[str, Any]],
+        root_user_goal: str,
+        reality: CodebaseReality,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> Optional[Milestone5W1HPlan]:
+        """스크린샷 결손을 단일 원자적 마일스톤 5W1H 플랜으로 승격한다."""
+        seed = cls._visual_gap_seed(
+            review, root_user_goal, reality, domain, workspace, target_version
+        )
+        if not seed:
+            return None
+        try:
+            plan = cls._build_heuristic_5w1h_plan(
+                milestone_title=seed["title"],
+                milestone_version=target_version,
+                tasks=seed["what"],
+                domain=domain,
+                workspace=workspace,
+                user_prompt=f"사용자 원본 목표: {root_user_goal}\n\n{seed['why']}",
+                macro_memory_text=macro_memory_text,
+                delta_analysis=f"실 렌더링 스크린샷 분석 기반 결손 [{seed['feature']}] 타깃팅",
+            )
+        except Exception as e:
+            logger.debug(f"[Commander] visual gap plan build skipped: {e}")
+            return None
+        plan.source = "visual_gap"
+        plan.why = seed["why"]
+        plan.how = seed["how"]
+        plan.visual_asset_spec = seed["visual_asset_spec"]
+        plan.visual_approved = seed["visual_approved"]
+        plan.visual_gap_analysis = seed["digest"]
+        cls._rebuild_directive(plan, macro_memory_text=macro_memory_text, user_prompt=f"사용자 원본 목표: {root_user_goal}")
+        return plan
+
+    # ──────────────────────────────────────────────
+    # 📦 제품 가치 기획 (Product Value) — 하드닝 단독 기획 차단
+    # ──────────────────────────────────────────────
+    @classmethod
+    def _value_seed(
+        cls,
+        root_user_goal: str,
+        reality: CodebaseReality,
+        domain: str,
+        workspace: Optional[str],
+        target_version: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        디스크에 아직 없는 '사용자 체감 신규 기능'을 다음 마일스톤 시드로 선택한다.
+        (품질 하드닝/E2E 통과류 자기참조적 폴백을 대체한다.)
+        """
+        try:
+            from product_value_planner import ProductValuePlanner
+            if not ProductValuePlanner.enabled():
+                return None
+            existing_titles = list(getattr(reality, "completed_milestones", []) or [])
+            cur = getattr(reality, "current_milestone", None)
+            if cur:
+                existing_titles.append(str(cur))
+            return ProductValuePlanner.build_seed(
+                domain=domain,
+                root_goal=root_user_goal,
+                reality=reality,
+                workspace=workspace,
+                existing_titles=existing_titles,
+            )
+        except Exception as e:
+            logger.debug(f"[Commander] product value seed skipped: {e}")
+            return None
+
+    @classmethod
+    def _build_value_plan(
+        cls,
+        seed: Dict[str, Any],
+        root_user_goal: str,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> Optional[Milestone5W1HPlan]:
+        """제품 가치 신규 기능 시드를 단일 원자적 5W1H 마일스톤으로 승격한다."""
+        if not seed:
+            return None
+        try:
+            plan = cls._build_heuristic_5w1h_plan(
+                milestone_title=seed["title"],
+                milestone_version=target_version,
+                tasks=seed["what"],
+                domain=domain,
+                workspace=workspace,
+                user_prompt=f"사용자 원본 목표: {root_user_goal}\n\n{seed['why']}",
+                macro_memory_text=macro_memory_text,
+                delta_analysis=f"제품 가치 기획 기반 차기 사용자 기능 [{seed['feature']}] 타깃팅",
+            )
+        except Exception as e:
+            logger.debug(f"[Commander] product value plan build skipped: {e}")
+            return None
+        plan.source = "product_value"
+        plan.why = seed["why"]
+        plan.how = seed["how"]
+        plan.visual_asset_spec = seed["visual_asset_spec"]
+        plan.visual_approved = seed["visual_approved"]
+        plan.product_value_analysis = seed["digest"]
+        cls._rebuild_directive(
+            plan, macro_memory_text=macro_memory_text, user_prompt=f"사용자 원본 목표: {root_user_goal}"
+        )
+        return plan
+
+    @classmethod
+    def _prefer_value_over_hardening(
+        cls,
+        plan: Optional[Milestone5W1HPlan],
+        root_user_goal: str,
+        reality: CodebaseReality,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> Milestone5W1HPlan:
+        """
+        [기획자 역할 강제] 최종 기획이 품질 하드닝/E2E 통과류 자기참조적 과제로만 구성되었는데
+        아직 구현되지 않은 사용자 체감 기능이 남아 있으면, 그 가치 기능을 다음 마일스톤으로 강제 교체한다.
+        (사용자 피드백 / 신호 결손 / 심도 / 스크린샷 결손 플랜은 절대 덮어쓰지 않는다.)
+        """
+        if plan is None:
+            return plan
+        if getattr(plan, "source", "") in ("feedback", "depth", "signal", "visual_gap", "product_value"):
+            return plan
+        if not cls.is_generic_validation_plan(plan.title, plan.what):
+            return plan
+
+        seed = cls._value_seed(root_user_goal, reality, domain, workspace, target_version)
+        if not seed:
+            return plan
+        value_plan = cls._build_value_plan(
+            seed, root_user_goal, domain, target_version, workspace, macro_memory_text
+        )
+        if value_plan is None:
+            return plan
+        logger.info(
+            f"[Commander] 하드닝 단독 기획 차단: '{plan.title}' → 제품 가치 신규 기능 "
+            f"'{value_plan.title}' 로 교체"
+        )
+        return value_plan
+
+    @classmethod
+    def _prefer_visual_gap_over_generic(
+        cls,
+        plan: Optional[Milestone5W1HPlan],
+        review: Optional[Dict[str, Any]],
+        root_user_goal: str,
+        reality: CodebaseReality,
+        domain: str,
+        target_version: str,
+        workspace: Optional[str],
+        macro_memory_text: str = "",
+    ) -> Optional[Milestone5W1HPlan]:
+        """
+        [일반론 차단] 차기 마일스톤이 '전체 E2E 통과/품질 하드닝'류 자기참조적 과제인데
+        실제 스크린샷 결손이 존재하면, 결손 해소 플랜으로 강제 교체한다.
+        (사용자 피드백 플랜은 절대 덮어쓰지 않는다.)
+        """
+        if plan is None or not review:
+            return plan
+        if cls._is_feedback_plan(plan) or getattr(plan, "source", "") in ("feedback", "visual_gap"):
+            return plan
+        if not cls.is_generic_validation_plan(plan.title, plan.what):
+            return plan
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            PlannerVisualGapAnalyzer.is_generic_validation_plan  # noqa: B018
+        except Exception:
+            return plan
+        gap_plan = cls._build_visual_gap_plan(
+            review, root_user_goal, reality, domain, target_version, workspace, macro_memory_text
+        )
+        if gap_plan is None:
+            return plan
+        logger.info(
+            f"[Commander] 일반론 기획 차단: '{plan.title}' → 스크린샷 결손 플랜 "
+            f"'{gap_plan.title}' 로 교체"
+        )
+        return gap_plan
+
+    @classmethod
+    def is_generic_validation_plan(cls, title: str, tasks: Optional[List[str]] = None) -> bool:
+        """'전체 E2E 시나리오 테스트 100% 무결점 통과'류 자기참조적 일반론/하드닝 전용 과제 판정."""
+        try:
+            from product_value_planner import ProductValuePlanner
+            return ProductValuePlanner.is_hardening_only_plan(title, tasks)
+        except Exception:
+            pass
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            return PlannerVisualGapAnalyzer.is_generic_validation_plan(title, tasks)
+        except Exception:
+            blob = f"{title or ''}\n" + "\n".join(tasks or [])
+            return any(
+                m in blob for m in (
+                    "무결점 통과", "시나리오 테스트 100%", "회귀 검증",
+                    "품질 하드닝", "품질 안정화", "상용 배포 품질", "E2E 회귀",
+                    "하드닝", "경계 조건", "대용량 데이터", "크래시 방어",
+                    "응답 속도", "불필요한 연산",
+                )
+            )
+
+    @staticmethod
+    def _rebuild_directive(plan: Optional[Milestone5W1HPlan], macro_memory_text: str = "", user_prompt: str = "") -> None:
+        """visual_gap_analysis 등 late-bound 필드를 반영해 Coder 훈령을 재생성한다."""
+        if plan is None:
+            return
+        try:
+            plan.directive_for_coder = plan.build_directive_for_coder(
+                macro_memory_text=macro_memory_text, user_prompt=user_prompt
+            )
+        except Exception:
+            pass
+
     @classmethod
     def _build_heuristic_adaptive_plan(
         cls,
@@ -4201,6 +4652,10 @@ class Commander:
         comps = set(c.lower() for c in reality.implemented_components)
         p_lower = root_user_goal.lower()
         quality_contracts: List[Dict[str, Any]] = []
+
+        # 📸 기획 단계 스크린샷 실측 결손 (Persisted evidence, no network here)
+        visual_gap_review = cls._load_visual_gap_review(workspace)
+        visual_gap_seed: Optional[Dict[str, Any]] = None
 
         # 0. User Feedback & Directive Priority: User directives always supersede autonomous ladders
         has_root_feedback = cls._detect_user_feedback_intent(root_user_goal)
@@ -4336,15 +4791,24 @@ class Commander:
                     how = "옵저버 패턴 스코어 이벤트 버스 및 LocalStorage 키-값 영속화"
                     why = "핵심 충돌 규칙이 완성되었으므로, 득점과 재도전 루프를 구현하여 완전한 1회 플레이 사이클을 완성합니다."
                 else:
-                    # Final Polish & Hardening
-                    title = "상용 배포 품질 하드닝 및 E2E 회귀 검증"
-                    what = [
-                        "10분 연속 플레이 시 메모리 누수 0건 및 60fps 유지",
-                        "난이도 점진적 상승 곡선 (시간 경과에 따른 사과 낙하 속도 증가)",
-                        "전체 E2E 시나리오 테스트 100% 무결점 통과"
-                    ]
-                    how = "메모리 프로파일링 및 렌더링 최적화, 자동 회귀 테스트"
-                    why = "게임의 모든 규칙과 UI가 완성되었으므로, 상용 릴리즈 수준의 성능과 무결점을 확보합니다."
+                    # Final Polish & Hardening (단, 실 렌더링 스크린샷 결손이 있으면 그 해소를 우선한다)
+                    visual_gap_seed = cls._visual_gap_seed(
+                        visual_gap_review, root_user_goal, reality, domain, workspace, target_version
+                    )
+                    if visual_gap_seed:
+                        title = visual_gap_seed["title"]
+                        what = visual_gap_seed["what"]
+                        how = visual_gap_seed["how"]
+                        why = visual_gap_seed["why"]
+                    else:
+                        title = "상용 배포 품질 하드닝 및 E2E 회귀 검증"
+                        what = [
+                            "10분 연속 플레이 시 메모리 누수 0건 및 60fps 유지",
+                            "난이도 점진적 상승 곡선 (시간 경과에 따른 사과 낙하 속도 증가)",
+                            "전체 E2E 시나리오 테스트 100% 무결점 통과"
+                        ]
+                        how = "메모리 프로파일링 및 렌더링 최적화, 자동 회귀 테스트"
+                        why = "게임의 모든 규칙과 UI가 완성되었으므로, 상용 릴리즈 수준의 성능과 무결점을 확보합니다."
             else:
                 if reality.is_empty or not any(k in comps for k in ["game", "engine", "canvas", "screen", "mainactivity"]):
                     title = "코어 게임 아키텍처 및 렌더링 루프 뼈대 구축"
@@ -4440,14 +4904,25 @@ class Commander:
                 how = "코루틴 비동기 텍스트 인덱서 및 Canvas 하이라이트 경계 박스 렌더링"
                 why = "뷰어, 주석, 페이지 편집 기능이 이미 디스크에 완성되어 있으므로, 사용자가 문서 내 특정 단어를 즉시 찾을 수 있는 본문 검색 엔진을 구축합니다."
             elif not any(k in c for c in comps for k in ["cache", "oom", "twotier"]):
-                title = "초고속 메모리 캐시 풀 및 OOM 선제적 방어 하드닝"
-                what = [
-                    "LruCache 비트맵 메모리 풀 및 디스크 2차 캐시 최적화",
-                    "대용량 문서 스크롤 시 프레임 드롭 제로화 및 메모리 누수 방어",
-                    "전 기능 E2E 회귀 테스트 100% 무결점 통과"
-                ]
-                how = "Two-Tier LruCache 메모리 관리 및 Android LeakCanary 회귀 방어"
-                why = "모든 핵심 기능이 구현되었으므로, 상용 앱 수준의 안정성과 메모리 무결성을 위한 최적화 하드닝을 진행합니다."
+                # 스크린샷에 아직 없는 핵심 기능/UX 결손이 보이면 캐시 하드닝보다 그 기능 공백을 먼저 해소한다.
+                visual_gap_seed = cls._visual_gap_seed(
+                    visual_gap_review, root_user_goal, reality, domain, workspace, target_version,
+                    allowed_categories=["CORE_FEATURE", "UX_WORKFLOW"],
+                )
+                if visual_gap_seed:
+                    title = visual_gap_seed["title"]
+                    what = visual_gap_seed["what"]
+                    how = visual_gap_seed["how"]
+                    why = visual_gap_seed["why"]
+                else:
+                    title = "초고속 메모리 캐시 풀 및 OOM 선제적 방어 하드닝"
+                    what = [
+                        "LruCache 비트맵 메모리 풀 및 디스크 2차 캐시 최적화",
+                        "대용량 문서 스크롤 시 프레임 드롭 제로화 및 메모리 누수 방어",
+                        "전 기능 E2E 회귀 테스트 100% 무결점 통과"
+                    ]
+                    how = "Two-Tier LruCache 메모리 관리 및 Android LeakCanary 회귀 방어"
+                    why = "모든 핵심 기능이 구현되었으므로, 상용 앱 수준의 안정성과 메모리 무결성을 위한 최적화 하드닝을 진행합니다."
             elif not any(k in c for c in comps for k in ["password", "security", "cipher", "lock", "암호"]):
                 title = "PDF 보안 문서 암호화 및 비밀번호 잠금 해제"
                 what = [
@@ -4497,14 +4972,25 @@ class Commander:
                 how = "단방향 데이터 플로우(UDF) 및 로컬 스토리지 연동"
                 why = "기본 골격이 마련되었으므로, 사용자의 핵심 조작에 반응하는 상태 관리 및 인터랙션을 구현합니다."
             else:
-                title = "상용 배포 품질 하드닝 및 E2E 회귀 검증"
-                what = [
-                    "경계 조건 및 대용량 데이터 입력 시 크래시 방어",
-                    "응답 속도 최적화 및 불필요한 연산 제거",
-                    "전체 E2E 시나리오 테스트 100% 무결점 통과"
-                ]
-                how = "비동기 파이프라인 최적화 및 견고한 테스트 러너 연동"
-                why = "주요 기능이 디스크에 구비되었으므로, 실환경 배포를 위한 상용 안정성 하드닝을 완성합니다."
+                # 🚫 "전체 E2E 통과"류 자기참조적 일반론 차단:
+                #    실 렌더링 스크린샷에서 제품 기능 공백이 보이면 그 해소를 우선한다.
+                visual_gap_seed = cls._visual_gap_seed(
+                    visual_gap_review, root_user_goal, reality, domain, workspace, target_version
+                )
+                if visual_gap_seed:
+                    title = visual_gap_seed["title"]
+                    what = visual_gap_seed["what"]
+                    how = visual_gap_seed["how"]
+                    why = visual_gap_seed["why"]
+                else:
+                    title = "상용 배포 품질 하드닝 및 E2E 회귀 검증"
+                    what = [
+                        "경계 조건 및 대용량 데이터 입력 시 크래시 방어",
+                        "응답 속도 최적화 및 불필요한 연산 제거",
+                        "전체 E2E 시나리오 테스트 100% 무결점 통과"
+                    ]
+                    how = "비동기 파이프라인 최적화 및 견고한 테스트 러너 연동"
+                    why = "주요 기능이 디스크에 구비되었으므로, 실환경 배포를 위한 상용 안정성 하드닝을 완성합니다."
 
         completed_label = ", ".join(reality.completed_milestones) if reality.completed_milestones else "초기 상태"
         delta_summary = f"디스크 실사 분석 기반 결손 [{title}] 타깃팅 (이전 완료: {completed_label})"
@@ -4536,6 +5022,29 @@ class Commander:
             plan.how = how
             plan.visual_asset_spec = visual_asset_spec
             plan.visual_approved = visual_approved
+        elif visual_gap_seed:
+            # 📸 스크린샷 실측 결손 플랜: 일반 도메인 템플릿의 why/how/asset을 결손 서술로 재고정한다.
+            plan.source = "visual_gap"
+            plan.why = visual_gap_seed["why"]
+            plan.how = visual_gap_seed["how"]
+            plan.visual_asset_spec = visual_gap_seed["visual_asset_spec"]
+            plan.visual_approved = visual_gap_seed["visual_approved"]
+            plan.visual_gap_analysis = visual_gap_seed["digest"]
+            cls._rebuild_directive(
+                plan, macro_memory_text=macro_memory_text, user_prompt=f"사용자 원본 목표: {root_user_goal}"
+            )
+
+        # 📦 [기획자 역할 강제] 도메인 사다리 종단의 품질 하드닝/E2E 통과 폴백은 기획이 아니다.
+        #    아직 없는 사용자 체감 기능이 남아 있으면 그 가치 기능을 다음 마일스톤으로 승격한다.
+        plan = cls._prefer_value_over_hardening(
+            plan,
+            root_user_goal=root_user_goal,
+            reality=reality,
+            domain=domain,
+            target_version=target_version,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+        )
         return plan
 
     @classmethod
@@ -4560,6 +5069,26 @@ class Commander:
         feedback_locked = cls._derive_feedback_precedence(
             root_user_goal, reality=reality, macro_memory_text=macro_memory_text, workspace=workspace
         )
+
+        # 📸 [Planner Visual Gap] 실제 렌더링 E2E 스크린샷을 비전 분석하여
+        #    '소스/PRD에는 없지만 화면에 아직 없는' 제품 기능 공백을 기획 증거로 확보한다.
+        #    (스크린샷/시각 증거가 없으면 None → 초기 프로젝트에서 오탐/지연 없음)
+        visual_gap_review: Optional[Dict[str, Any]] = None
+        visual_gap_brief = ""
+        try:
+            from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+            if PlannerVisualGapAnalyzer.enabled():
+                _vg = await PlannerVisualGapAnalyzer.analyze_for_planning(
+                    workspace=workspace,
+                    root_user_goal=root_user_goal,
+                    domain=dom,
+                    max_images=2,
+                )
+                if _vg is not None:
+                    visual_gap_review = _vg.to_dict()
+                    visual_gap_brief = PlannerVisualGapAnalyzer.format_prompt_block(_vg)
+        except Exception as vg_err:
+            logger.debug(f"[Commander] planner visual gap analysis skipped: {vg_err}")
 
         # Baseline heuristic with circuit breaker
         try:
@@ -4657,6 +5186,10 @@ class Commander:
             f"[DISK CODE/SIGNAL GAP DISCOVERY]:\n"
             f"{signal_brief}\n"
             f"(This gap was read from real code/logs on disk. When it is the highest Value x Risk x Cost target, close it first.)\n\n"
+            f"[VISUAL GAP — REAL RENDERED E2E SCREENSHOT GAP ANALYSIS]:\n"
+            f"{visual_gap_brief or '없음 (실 렌더링 스크린샷 결손 없음 또는 아직 스크린샷 부재)'}\n"
+            f"(This evidence comes from real rendered screenshots of the product, not from source code or documents. "
+            f"When a concrete missing feature/panel/workflow is visible here, it OUTRANKS generic hardening such as 'pass all E2E tests'.)\n\n"
             f"{quality_state_summary}\n\n"
             f"[MACRO CYCLE HISTORY]:\n"
             f"{macro_memory_text[:1200] if macro_memory_text else 'None'}\n\n"
@@ -4679,7 +5212,11 @@ class Commander:
             f"   3. Idea Convergence & Surgical Edit (발산 수렴 및 외과수술식 정밀 타격): 전체 파일 재작성을 금지하고, 기존 코드의 어느 파일(who_where), 어느 함수/식별자/수식 계수(Weight)를 정밀 수정할 것인지 핀포인트 확정.\n"
             f"   4. Action Type Partition (1루프 1심화 스코프 가딩): 네이밍/구조 정리(Refactor)와 물리 수치/로직 조정(Tuning)을 분리하여 한 회차에 하나의 '결'만 손보도록 작업 분리.\n"
             f"   5. Verification Contract & Quality Contracts (기계적 검증식 확정): AI 감상평이 아닌 기계적/불리언으로 판정 가능한 3~5개의 Level 1/Level 2 QC 검증식 및 인수 기준(when_acceptance) 확정.\n"
-            f"   </thinking>\n\n"
+            f"   </thinking>\n"
+            f"8. VISUAL GAP FIRST & PRODUCT VALUE OVER HARDENING (스크린샷 결손·사용자 가치 우선 — 일반론 금지): When [VISUAL GAP] above lists a concrete missing feature/panel/workflow that is visible in the real rendered screenshots, this milestone MUST close the single highest-value gap. "
+            f"If no screen gap is listed, you MUST still plan a USER-FACING new capability that the product does not yet have (예: 즐겨찾기, 설정/개인화, 검색·필터, 공유·내보내기, 업적/리더보드, 알림·리마인더, 다크 모드, 접근성, 다국어). "
+            f"NEVER plan a hardening-only milestone (e.g. '경계 조건 및 대용량 데이터 입력 시 크래시 방어', '응답 속도 최적화 및 불필요한 연산 제거', '전체 E2E 시나리오 테스트 100% 무결점 통과', '상용 배포 품질 하드닝', '회귀 검증') unless no user-facing capability remains un-implemented — such tasks improve nothing the user can see. "
+            f"Quality/defense work is allowed ONLY as a minor supporting line inside a value milestone, never as the milestone itself.\n\n"
             f"Output the <thinking> block first, followed ONLY by a valid JSON object with the following structure:\n"
             f"{{\n"
             f'  "title": "단일 마일스톤 타이틀 (예: 실시간 본문 텍스트 검색 및 하이라이트 오버레이)",\n'
@@ -4818,6 +5355,43 @@ class Commander:
         except Exception as e:
             logger.info(f"Adaptive LLM planning notice (using domain heuristic): {e}")
 
+        # 📸 [일반론 차단 가드] 최종 기획안이 '전체 E2E 통과/품질 하드닝'류 자기참조적
+        #    과제인데 실 렌더링 스크린샷 결손이 존재하면, 결손 해소 플랜으로 교체한다.
+        plan = cls._prefer_visual_gap_over_generic(
+            plan,
+            visual_gap_review,
+            root_user_goal=root_user_goal,
+            reality=reality,
+            domain=dom,
+            target_version=target_version,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+        )
+
+        # 📦 [기획자 역할 강제] AI/휴리스틱 기획이 품질 하드닝/E2E 통과류로 수렴했는데
+        #    아직 없는 사용자 체감 기능이 남아 있으면, 그 가치 기능을 다음 마일스톤으로 교체한다.
+        plan = cls._prefer_value_over_hardening(
+            plan,
+            root_user_goal=root_user_goal,
+            reality=reality,
+            domain=dom,
+            target_version=target_version,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+        )
+
+        # 기획안이 피드백 고정이 아니고 스크린샷 결손 증거가 있으면, 그 진단을 기획서에 동봉한다.
+        if visual_gap_review and not getattr(plan, "visual_gap_analysis", ""):
+            if not cls._is_feedback_plan(plan):
+                try:
+                    from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+                    plan.visual_gap_analysis = PlannerVisualGapAnalyzer.format_digest(visual_gap_review)
+                    cls._rebuild_directive(
+                        plan, macro_memory_text=macro_memory_text, user_prompt=f"사용자 원본 목표: {root_user_goal}"
+                    )
+                except Exception:
+                    pass
+
         # 🎯 요구사항 커버리지 계약: 차기 마일스톤이 사용자 요청 원장을 벗어나지 않도록
         #    최종 감사하고, off-target(허공 치기)이면 충실한 피드백 계획으로 강제 교체한다.
         plan = cls.apply_intent_coverage(
@@ -4900,6 +5474,38 @@ class Commander:
         plan = cls._apply_depth_gate(
             plan, depth_verdict, reality, dom, target_version, workspace, macro_memory_text
         )
+
+        # 📸 [Planner Visual Gap] 디스크에 저장된 스크린샷 결손 증거를 동기 경로에도 반영한다.
+        visual_gap_review = cls._load_visual_gap_review(workspace)
+        plan = cls._prefer_visual_gap_over_generic(
+            plan,
+            visual_gap_review,
+            root_user_goal=root_user_goal,
+            reality=reality,
+            domain=dom,
+            target_version=target_version,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+        )
+        # 📦 [기획자 역할 강제] (동기 경로) 품질 하드닝 단독 기획을 제품 가치 신규 기능으로 교체한다.
+        plan = cls._prefer_value_over_hardening(
+            plan,
+            root_user_goal=root_user_goal,
+            reality=reality,
+            domain=dom,
+            target_version=target_version,
+            workspace=workspace,
+            macro_memory_text=macro_memory_text,
+        )
+        if visual_gap_review and not getattr(plan, "visual_gap_analysis", "") and not cls._is_feedback_plan(plan):
+            try:
+                from planner_visual_gap_analyzer import PlannerVisualGapAnalyzer
+                plan.visual_gap_analysis = PlannerVisualGapAnalyzer.format_digest(visual_gap_review)
+                cls._rebuild_directive(
+                    plan, macro_memory_text=macro_memory_text, user_prompt=f"사용자 원본 목표: {root_user_goal}"
+                )
+            except Exception:
+                pass
 
         # 🎯 요구사항 커버리지 계약 (동기 경로): off-target 차기 기획 차단 및 요청 1:1 반영 감사.
         plan = cls.apply_intent_coverage(
