@@ -34,6 +34,7 @@ class TestGlobalModelManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qa6", roles)
         self.assertIn("auditor", roles)
         self.assertIn("image", roles)
+        self.assertIn("vision", roles)
         self.assertIn("commander", roles)
 
     def test_qa_enable_disable_toggle(self):
@@ -366,6 +367,79 @@ class TestGlobalModelManager(unittest.IsolatedAsyncioTestCase):
         mock_interaction2.response.send_modal.assert_awaited_once()
         modal_arg2 = mock_interaction2.response.send_modal.call_args[0][0]
         self.assertIsInstance(modal_arg2, model_manager.ModelSearchModal)
+
+    def test_qwen_flash_vs_plus_model_name_formatting(self):
+        """Verifies that Qwen 3.7 Flash and Plus are distinctly and accurately formatted."""
+        self.assertEqual(GlobalModelManager.format_model_name("qwen/qwen3.7-flash"), "Qwen 3.7 Flash")
+        self.assertEqual(GlobalModelManager.format_model_name("qwen3.7-flash"), "Qwen 3.7 Flash")
+        self.assertEqual(GlobalModelManager.format_model_name("opencode-go/qwen3.7-flash"), "Qwen 3.7 Flash")
+        self.assertEqual(GlobalModelManager.format_model_name("qwen/qwen3.7-plus"), "Qwen 3.7 Plus")
+        self.assertEqual(GlobalModelManager.format_model_name("qwen3.7-plus"), "Qwen 3.7 Plus")
+        self.assertEqual(GlobalModelManager.format_model_name("qwen/qwen3.7-max"), "Qwen 3.7 Max")
+        self.assertEqual(GlobalModelManager.format_model_name("qwen/qwen-2.5-coder-32b-instruct"), "Qwen 2.5 Coder 32B")
+
+    def test_model_cost_tier_ordering(self):
+        """Verifies that free/flash models have lower tier numbers than pro/max/opus models."""
+        free_tier, _ = model_manager.get_model_cost_tier("poolside/laguna-s-2.1-free")
+        flash_tier, _ = model_manager.get_model_cost_tier("qwen/qwen3.7-flash")
+        plus_tier, _ = model_manager.get_model_cost_tier("qwen/qwen3.7-plus")
+        pro_tier, _ = model_manager.get_model_cost_tier("deepseek/deepseek-v4-pro")
+        max_tier, _ = model_manager.get_model_cost_tier("qwen/qwen3.8-max")
+        opus_tier, _ = model_manager.get_model_cost_tier("claude-opus-5-5")
+
+        self.assertEqual(free_tier, 0)
+        self.assertLessEqual(flash_tier, 2)
+        self.assertLess(flash_tier, plus_tier)
+        self.assertLess(plus_tier, pro_tier)
+        self.assertLess(pro_tier, max_tier)
+        self.assertEqual(opus_tier, 5)
+
+    async def test_model_preset_dropdown_cheapest_first_and_paging(self):
+        """Verifies that preset dropdown orders cheaper models first and supports in-place paging."""
+        GlobalModelManager.set_role_engine("coder", "cmdc")
+        view = model_manager.ModelDashboardView(selected_role="coder")
+        preset_dropdown = [c for c in view.children if isinstance(c, model_manager.ModelPresetDropdown)][0]
+
+        opt_values = [o.value for o in preset_dropdown.options]
+        self.assertTrue(any("flash" in v for v in opt_values), "Flash models should be present on page 0")
+
+        page_options = [o.value for o in preset_dropdown.options if o.value.startswith("__page_")]
+        if page_options:
+            target_page_val = page_options[0]
+            preset_dropdown._values = [target_page_val]
+            mock_interaction = AsyncMock()
+            mock_interaction.response = MagicMock()
+            mock_interaction.response.is_done = MagicMock(return_value=False)
+            mock_interaction.response.defer = AsyncMock()
+            mock_interaction.edit_original_response = AsyncMock()
+            mock_interaction.response.edit_message = AsyncMock()
+
+            await preset_dropdown.callback(mock_interaction)
+            self.assertEqual(view.model_page, 1)
+
+    async def test_search_result_select_updates_parent_and_edits_inplace(self):
+        """Verifies that selecting a model from search updates parent dashboard and edits in-place."""
+        parent_view = model_manager.ModelDashboardView(selected_role="coder")
+        parent_view.message = AsyncMock()
+
+        search_select = model_manager.ModelSearchResultSelect(
+            selected_role="coder",
+            engine="cmdc",
+            results=[("qwen/qwen3.7-flash", "Qwen 3.7 Flash")],
+            parent_view=parent_view,
+        )
+        search_select._values = ["qwen/qwen3.7-flash"]
+
+        mock_interaction = AsyncMock()
+        mock_interaction.response = MagicMock()
+        mock_interaction.response.is_done = MagicMock(return_value=False)
+        mock_interaction.response.edit_message = AsyncMock()
+
+        await search_select.callback(mock_interaction)
+
+        parent_view.message.edit.assert_awaited_once()
+        mock_interaction.response.edit_message.assert_awaited_once()
+        self.assertEqual(GlobalModelManager.get_role_model("coder"), "qwen/qwen3.7-flash")
 
 
 if __name__ == "__main__":

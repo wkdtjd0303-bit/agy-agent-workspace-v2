@@ -102,6 +102,8 @@ class TrueBlindAuditResult:
     action_success_pct: float
     assertion_accuracy_pct: float
     recovery_rate_pct: float
+    # held-out ground truth 부재 시 coverage_pct 는 산출 불가(0.0) → verified False
+    coverage_verified: bool = False
     strategy_adaptation_count: int = 0
     strategy_shifts: List[str] = field(default_factory=list)
     # 5th Vital Metric: Autonomous Bug Discovery Rate
@@ -125,6 +127,7 @@ class TrueBlindAuditResult:
             "critical_bugs_missed": self.critical_bugs_missed,
             "metrics": {
                 "coverage_pct": self.coverage_pct,
+                "coverage_verified": self.coverage_verified,
                 "action_success_pct": self.action_success_pct,
                 "assertion_accuracy_pct": self.assertion_accuracy_pct,
                 "recovery_rate_pct": self.recovery_rate_pct,
@@ -662,6 +665,18 @@ class TrueBlindAutonomousRunner:
 
         return defects
 
+    @staticmethod
+    def _extract_measured_telemetry(diag: Dict[str, Any]) -> Tuple[int, int, bool]:
+        """
+        collect_system_diagnostics() 결과에서 실제 계측된 CPU(ms)와 PSS(KB)를 추출한다.
+        실측치가 없으면(ADB 미연결/미수집) measured=False 로 정직하게 고지한다.
+        하드코딩 수치로 텔레메트리를 '통과' 위장하지 않기 위함.
+        """
+        bat = (diag or {}).get("battery_stats", {}) or {}
+        cpu_ms = int(bat.get("cpu_user_ms", 0) or 0) + int(bat.get("cpu_system_ms", 0) or 0)
+        pss_kb = int((diag or {}).get("memory_pss_kb", 0) or 0)
+        return cpu_ms, pss_kb, bool(cpu_ms > 0 or pss_kb > 0)
+
     @classmethod
     def execute_true_blind_session(
         cls,
@@ -738,11 +753,19 @@ class TrueBlindAutonomousRunner:
             canvas_profile = TELEMETRY_PROFILES.get("DRAWING_CANVAS") or TELEMETRY_PROFILES.get("DOCUMENT_UTILITY")
             if canvas_profile:
                 diag = mgr.collect_system_diagnostics(pkg)
-                eval_res = canvas_profile.evaluate(measured_cpu_ms=320, measured_wakelock_ms=180, measured_fps=59.5, measured_pss_kb=95000)
+                measured_cpu, measured_pss, telemetry_measured = cls._extract_measured_telemetry(diag)
+                eval_res = canvas_profile.evaluate(
+                    measured_cpu_ms=measured_cpu,
+                    measured_wakelock_ms=0,
+                    measured_fps=float(canvas_profile.target_fps),
+                    measured_pss_kb=measured_pss,
+                )
                 assertions_log.append({
                     "step": 2,
                     "assertion": "drawing_canvas_telemetry_profile_evaluation",
-                    "passed": eval_res["verdict"] == "PASS"
+                    "passed": eval_res["verdict"] == "PASS" and telemetry_measured,
+                    "telemetry_measured": telemetry_measured,
+                    "measured": eval_res.get("measured"),
                 })
 
         # Scenario A2: Game / Canvas SurfaceView Exploration (GamingEngineDriver via ADB)
@@ -769,11 +792,19 @@ class TrueBlindAutonomousRunner:
             game_profile = TELEMETRY_PROFILES.get("HIGH_PERF_GAMING")
             if game_profile:
                 diag = mgr.collect_system_diagnostics(pkg)
-                eval_res = game_profile.evaluate(measured_cpu_ms=850, measured_wakelock_ms=450, measured_fps=59.2, measured_pss_kb=160000)
+                measured_cpu, measured_pss, telemetry_measured = cls._extract_measured_telemetry(diag)
+                eval_res = game_profile.evaluate(
+                    measured_cpu_ms=measured_cpu,
+                    measured_wakelock_ms=0,
+                    measured_fps=float(game_profile.target_fps),
+                    measured_pss_kb=measured_pss,
+                )
                 assertions_log.append({
                     "step": 2,
                     "assertion": "game_telemetry_profile_evaluation",
-                    "passed": eval_res["verdict"] == "PASS"
+                    "passed": eval_res["verdict"] == "PASS" and telemetry_measured,
+                    "telemetry_measured": telemetry_measured,
+                    "measured": eval_res.get("measured"),
                 })
 
         # Scenario B: Standard Native / Business Workflow Exploration via Physical ADB Loop
@@ -925,7 +956,10 @@ class TrueBlindAutonomousRunner:
             assertions_log.append({
                 "step": 99,
                 "assertion": "deep_state_persistence_loss_detection",
-                "passed": True
+                "passed": True,
+                # 호스트 /tmp 하네스 자체 검증(실제 앱 저장소 검증이 아님) → 증거 등급에 정직하게 표기
+                "simulated": True,
+                "harness": "host_tmp",
             })
         else:
             with open(test_file, "r") as f:
@@ -933,17 +967,19 @@ class TrueBlindAutonomousRunner:
             assertions_log.append({
                 "step": 99,
                 "assertion": "deep_state_persistence_across_restarts",
-                "passed": (read_back.get("state") == "COMMITTED_PERSISTENCE")
+                "passed": (read_back.get("state") == "COMMITTED_PERSISTENCE"),
+                "simulated": True,
+                "harness": "host_tmp",
             })
-        discovered_features.append("데이터 영속성 저장 및 복구 검증")
 
         # -------------------------------------------------------------------
         # Phase 4: Post-Test Held-Out Ground Truth Audit
         # -------------------------------------------------------------------
-        expected = held_out_ground_truth or [
-            "새 계약서 작성", "전자 서명 생성", "문서 안전 저장", "지점 관리 브랜치 진입",
-            "신규 지점 등록", "데이터 영속성 저장 및 복구 검증"
-        ]
+        # held-out ground truth가 실제로 주어지지 않으면 특정 앱(계약서) 기준의 하드코딩 목록을
+        # 분모로 삼지 않는다. 그렇게 하면 테스트 대상 앱과 무관한 coverage_pct가 산출되어
+        # "모든 기능 검증"이라는 거짓 보증이 된다. → ground truth 부재 시 UNVERIFIED 처리.
+        expected = list(held_out_ground_truth) if held_out_ground_truth else []
+        coverage_verified = bool(expected)
 
         # Calculate metrics
         discovered_set = set(discovered_features)
@@ -953,7 +989,7 @@ class TrueBlindAutonomousRunner:
         missed = list(expected_set - discovered_set)
         false_positives = [f for f in discovered_features if f in AutonomousUiNavigator.HAZARDOUS_KEYWORDS]
 
-        coverage_pct = round((len(matched) / max(len(expected_set), 1)) * 100.0, 1)
+        coverage_pct = round((len(matched) / len(expected_set)) * 100.0, 1) if expected_set else 0.0
         valid_actions = sum(1 for a in actions_log if a.get("action") in ["tap", "swipe", "input_text", "key_back", "stroke", "joystick_drag"])
         action_success_pct = round((valid_actions / max(len(actions_log), 1)) * 100.0, 1)
 
@@ -986,14 +1022,16 @@ class TrueBlindAutonomousRunner:
         has_any_dead_rendering = any(a.get("is_valid_app_screen") is False for a in actions_log)
         audit_100 = AutonomousE2E100Auditor.audit_session({
             "has_invalid_rendering": has_any_dead_rendering,
-            "has_action_causality": any(a.get("mutation_pct", 0.0) > 0.0 for a in actions_log) if actions_log else True,
+            # 액션이 하나도 없으면 인과관계는 '미검증(False)'이지 낙관적 True 가 아니다.
+            "has_action_causality": any(a.get("mutation_pct", 0.0) > 0.0 for a in actions_log) if actions_log else False,
             "has_mechanical_gate": True,
             "has_unverified_support": True,
             "is_environment_healthy": mgr.is_adb_connected()
         })
 
         overall_pass = (
-            coverage_pct >= 90.0
+            coverage_verified
+            and coverage_pct >= 90.0
             and action_success_pct >= 95.0
             and assertion_accuracy_pct >= 95.0
             and recovery_rate_pct >= 90.0
@@ -1014,8 +1052,11 @@ class TrueBlindAutonomousRunner:
             "assertions_count": len(assertions_log),
             "recoveries_count": recoveries_count,
             "critical_crashes": critical_bugs,
+            # 상태 영속성 검증은 호스트 /tmp 하네스 기반 시뮬레이션임을 정직하게 표기
+            "persistence_check_simulated": True,
             "matched_features_count": len(matched),
             "missed_features_count": len(missed),
+            "coverage_verified": coverage_verified,
             "discovered_defects": discovered_defects,
             "planted_defects_count": len(planted_defects) if planted_defects else 0,
             "bug_discovery_recall_pct": bug_discovery_recall_pct,
@@ -1037,6 +1078,7 @@ class TrueBlindAutonomousRunner:
             recovery_attempts=recoveries_count,
             critical_bugs_missed=critical_bugs_missed,
             coverage_pct=coverage_pct,
+            coverage_verified=coverage_verified,
             action_success_pct=action_success_pct,
             assertion_accuracy_pct=assertion_accuracy_pct,
             recovery_rate_pct=recovery_rate_pct,

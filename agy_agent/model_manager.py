@@ -127,33 +127,37 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
             ("opencode-go/mimo-v2.6-pro", "MiMo V2.6 Pro (고성능 검증)"),
             ("opencode-go/qwen3.8-flash", "Qwen 3.8 Flash (최신 초고속)"),
             ("opencode-go/qwen3.8-max", "Qwen 3.8 Max (최상위 대형 모델)"),
+            ("opencode-go/qwen3.7-plus", "Qwen 3.7 Plus (균형 코딩)"),
             ("opencode-go/gpt-6-luna", "GPT-6 Luna (최신 수석 자문/코딩)"),
             ("opencode-go/gpt-5.6-luna", "GPT-5.6 Luna (차세대 추론)"),
             ("opencode-go/kimi-k3", "Kimi K3 (장문 컨텍스트/코딩)"),
             ("opencode-go/kimi-k2.7-code", "Kimi K2.7 Code (코딩 특화)"),
             ("opencode-go/grok-4.7", "Grok 4.7 (xAI 최신 추론)"),
+            ("opencode-go/grok-4.6", "Grok 4.6"),
             ("opencode-go/minimax-m3", "MiniMax M3 (대규모 멀티모달)"),
-            ("opencode-go/qwen3.7-max", "Qwen 3.7 Max (고성능 추론)"),
-            ("opencode-go/qwen3.7-plus", "Qwen 3.7 Plus (균형 코딩)"),
-            ("opencode-go/qwen3.6-plus", "Qwen 3.6 Plus (경량 코딩)"),
-            ("opencode-go/longcat-2.0", "LongCat 2.0 (초장문 컨텍스트)"),
-            ("opencode-go/space-bunny-free", "Space Bunny (무과금/초고속)"),
-            ("opencode-go/hy4-preview", "Hunyuan 4 Preview (신규 고성능)"),
-            ("opencode-go/muse-spark-1.3-contributor", "Muse Spark 1.3 (창의적 추론)"),
-            ("opencode-go/deepseek-v4-flash", "DeepSeek V4 Flash"),
-            ("opencode-go/deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision Exp"),
-            ("opencode-go/omen-alpha", "Omen Alpha (실험적 추론)"),
+            ("opencode-go/minimax-m2.7", "MiniMax M2.7"),
             ("opencode-go/mimo-v2.5-pro", "MiMo V2.5 Pro"),
             ("opencode-go/mimo-v2.5", "MiMo V2.5"),
-            ("opencode-go/minimax-m2.7", "MiniMax M2.7"),
-            ("opencode-go/minimax-m2.5", "MiniMax M2.5"),
-            ("opencode-go/kimi-k2.6", "Kimi K2.6"),
-            ("opencode-go/glm-5.2", "GLM 5.2"),
-            ("opencode-go/glm-5.1", "GLM 5.1"),
-            ("opencode-go/grok-4.6", "Grok 4.6"),
+            ("opencode-go/hy4-preview", "Hunyuan 4 Preview (신규 고성능)"),
             ("opencode-go/hy3", "Hunyuan 3"),
+            ("opencode-go/longcat-2.0", "LongCat 2.0 (초장문 컨텍스트)"),
+            ("opencode-go/longcat-2.5-preview-free", "LongCat 2.5 Preview (무과금)"),
+            ("opencode-go/muse-spark-1.3-contributor", "Muse Spark 1.3 (창의적 추론)"),
             ("opencode-go/muse-spark-1.2-contributor", "Muse Spark 1.2"),
-            ("opencode-go/deepseek-flash", "DeepSeek Flash"),
+            ("opencode-go/glm-5.2", "GLM 5.2"),
+            ("opencode-go/deepseek-v4-flash", "DeepSeek V4 Flash"),
+            ("opencode-go/deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision Exp"),
+            ("opencode-go/space-bunny-free", "Space Bunny (무과금/초고속)"),
+            ("opencode/big-pickle", "Big Pickle (무과금)"),
+            ("opencode/fledge-alpha-free", "Fledge Alpha (무과금)"),
+            ("opencode/space-bunny-free", "Space Bunny Free (무과금)"),
+            ("opencode/mimo-v2.6-flash-free", "MiMo V2.6 Flash Free (무과금)"),
+            ("opencode/muse-spark-1.3-contributor-free", "Muse Spark 1.3 Free (무과금)"),
+            ("opencode/ling-3.0-flash-fin-free", "Ling 3.0 Flash Fin (무과금)"),
+            ("opencode/ling-3.1-flash-free", "Ling 3.1 Flash (무과금)"),
+            ("opencode/longcat-2.5-preview-free", "LongCat 2.5 Preview Free (무과금)"),
+            ("opencode/nemotron-3-ultra-free", "Nemotron 3 Ultra (무과금)"),
+            ("opencode/nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning (무과금)"),
         ]
     },
     "cmdc": {
@@ -204,6 +208,61 @@ IMAGE_MODEL_PRESETS: List[Tuple[str, str]] = [
     ("google/gemini-3-pro-image", "✨ Gemini 3 Pro Image · 최고 품질 (Nano Banana Pro)"),
     ("gemini-3.8-flash-high", "🏔️ Antigravity Gemini 3.8 Flash High · AGY CLI 기본(→나노바나나 해석)"),
 ]
+
+# 🖼️ Vision(첨부 이미지 분석) 전용 모델 프리셋 (이미지 입력을 지원하는 멀티모달 모델만 노출).
+#   사용자가 첨부한 이미지의 OCR/레이아웃/디자인을 정밀 분석하는 역할이므로,
+#   `!model` 에서 Vision Analyst 선택 시 이 목록을 보여준다. (OpenRouter 슬러그)
+VISION_MODEL_PRESETS: List[Tuple[str, str]] = [
+    ("google/gemini-3.8-flash", "✨ Gemini 3.8 Flash · 최고 품질 OCR/레이아웃 (권장)"),
+    ("google/gemini-3.5-flash", "⚡ Gemini 3.5 Flash · 품질/속도 균형"),
+    ("google/gemini-2.5-flash", "💨 Gemini 2.5 Flash · 저비용 고속"),
+    ("qwen/qwen3.8-27b", "🌐 Qwen 3.8 27B · 구 무료(qwen3.8-27b:free)의 유료 전환 슬러그"),
+    ("qwen/qwen-2.5-coder-32b-instruct", "🧩 Qwen 2.5 Coder 32B · 코드 스크린샷 특화"),
+    ("openai/gpt-4o", "🟢 GPT-4o · 강력한 범용 비전"),
+    ("anthropic/claude-3.7-sonnet", "🟣 Claude 3.7 Sonnet · 비전 지원"),
+]
+
+
+def get_model_cost_tier(model_id: str, label: str = "") -> Tuple[int, str]:
+    """
+    Computes a cost & capability tier for sorting models in `!model`:
+    Lower tier number = cheaper / lighter / faster (displayed at top).
+    Higher tier number = higher capability / heavier / more expensive (displayed at bottom).
+
+    Tiers:
+      0: Free / 0-cost (무과금, :free)
+      1: Ultra-light / Nano / Micro / Haiku (초경량 / 최저가)
+      2: Flash / Fast / High-Efficiency (경량 / 초고속) e.g. Qwen Flash, DeepSeek Flash, Gemini Flash
+      3: Plus / Standard / Balanced (중급 / 균형 / 표준 코딩) e.g. Qwen Plus, Solar Pro, Claude Sonnet
+      4: Pro / High-Performance (고성능 / 심층 추론) e.g. DeepSeek Pro, MiMo Pro, Gemini Pro
+      5: Max / Opus / Ultra / Flagship (최상위 플래그십) e.g. Qwen Max, Claude Opus, GPT-6 Astra, R1
+    """
+    m = (model_id or "").lower()
+    lbl = (label or "").lower()
+    combined = f"{m} {lbl}"
+
+    # Tier 0: Free / 0-cost
+    if any(k in combined for k in (":free", "-free", " free", "/free", "무과금", "free-tier", "big-pickle", "fledge-alpha", "space-bunny-free", "laguna-s-2.1-free")):
+        tier = 0
+    # Tier 5: Max / Opus / Ultra / Astra / R1 / O1 / Flagship (Highest performance)
+    elif any(k in combined for k in ("max", "opus", "ultra", "gpt-6-astra", "deepseek-r1", "openai/o1", "o1-preview", "thinking")):
+        tier = 5
+    # Tier 4: Pro / Large models / 70B+ (High performance)
+    elif any(k in combined for k in ("pro-high", "-pro", "/pro", " pro", "grok-4.7", "grok-4.5", "minimax-m3", "235b", "70b", "mistral-large", "fable")):
+        tier = 4
+    # Tier 1: Ultra-light / Nano / Micro / Haiku / Mini
+    elif any(k in combined for k in ("nano", "micro", "mini", "lite", "haiku", "flash-low", "pro-low", "gemini-3-flash", "ling-3.0", "ling-3.1")):
+        tier = 1
+    # Tier 2: Flash / Fast / Efficient
+    elif any(k in combined for k in ("flash", "luna", "sol", "fast", "speed", "longcat")):
+        tier = 2
+    # Tier 3: Plus / Sonnet / Standard / Balanced (Default / Mid-tier)
+    elif any(k in combined for k in ("plus", "sonnet", "solar-pro", "chat", "standard", "medium", "middle", "tiered", "coder", "kimi", "glm", "mimo", "hy4", "hy3", "muse")):
+        tier = 3
+    else:
+        tier = 3
+
+    return (tier, m)
 
 
 def _sort_agy_models(models: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
@@ -637,6 +696,18 @@ DEFAULT_ROLES: Dict[str, Dict[str, Any]] = {
         "persona": "designer",
         "description": "실제 AI 이미지 생성·수정 전용 도구 봇 (Nano Banana 계열 Gemini image 백엔드 · Coder/QA 호출)"
     },
+    "vision": {
+        "name": "Vision Analyst (이미지 분석)",
+        "role_key": "vision",
+        "icon": "🖼️",
+        "enabled": True,
+        "engine": "hermes",
+        "model": "google/gemini-3.8-flash",
+        "env_model_key": "OPENROUTER_VISION_MODEL",
+        "env_engine_key": None,
+        "persona": "designer",
+        "description": "사용자가 첨부한 이미지·스크린샷을 OCR/레이아웃/디자인 관점에서 정밀 분석해 Coder/QA 프롬프트에 주입"
+    },
     "commander": {
         "name": "Commander (관제 사령관)",
         "role_key": "commander",
@@ -734,12 +805,24 @@ class GlobalModelManager:
             return "DeepSeek V3"
         if "qwen3.8-max" in m_lower or "qwen-3.8-max" in m_lower:
             return "Qwen 3.8 Max"
+        if ("qwen3.8" in m_lower or "qwen-3.8" in m_lower) and "plus" in m_lower:
+            return "Qwen 3.8 Plus"
+        if ("qwen3.8" in m_lower or "qwen-3.8" in m_lower) and "flash" in m_lower:
+            return "Qwen 3.8 Flash"
         if "qwen3.8" in m_lower or "qwen-3.8" in m_lower:
             return "Qwen 3.8 Flash"
-        if "qwen3.7-max" in m_lower:
+        if "qwen3.7-max" in m_lower or ("qwen3.7" in m_lower and "max" in m_lower):
             return "Qwen 3.7 Max"
-        if "qwen3.7" in m_lower:
+        if "qwen3.7-flash" in m_lower or ("qwen3.7" in m_lower and "flash" in m_lower) or ("qwen-3.7" in m_lower and "flash" in m_lower):
+            return "Qwen 3.7 Flash"
+        if "qwen3.7-plus" in m_lower or ("qwen3.7" in m_lower and "plus" in m_lower) or ("qwen-3.7" in m_lower and "plus" in m_lower):
             return "Qwen 3.7 Plus"
+        if "qwen3.7" in m_lower or "qwen-3.7" in m_lower:
+            return "Qwen 3.7 Plus"
+        if "qwen-2.5-coder-32b" in m_lower or "qwen2.5-coder-32b" in m_lower:
+            return "Qwen 2.5 Coder 32B"
+        if "qwen-2.5-coder" in m_lower or "qwen2.5-coder" in m_lower:
+            return "Qwen 2.5 Coder"
         if "qwen3-235b" in m_lower or "qwen-3" in m_lower:
             return "Qwen 3 235B"
         if "glm-5.3-flash" in m_lower:
@@ -1163,8 +1246,11 @@ class GlobalModelManager:
         except Exception as e:
             logger.debug(f"[DeprecatedModel] migration skipped: {e}")
 
-        # 1. Exact preset lookup across all engines first
-        for check_eng in ("agy", "hermes", "codex", "copilot", "claude", "opencode"):
+        # 1. Exact preset lookup — 대상 엔진을 먼저 조회해 동일 별칭이 다른 엔진의
+        #    모델로 오해석되는 것을 막는다. (예: opencode 입력 'glm-5.3-flash' 가
+        #    hermes 라이브 카탈로그의 'z-ai/glm-5.3-flash' 로 먼저 잡히던 문제)
+        _engine_order = [eng] + [e for e in ("agy", "hermes", "codex", "copilot", "claude", "opencode") if e != eng]
+        for check_eng in _engine_order:
             for mid, _ in get_engine_models(check_eng):
                 if mid.lower() == inp_lower:
                     return mid
@@ -1250,24 +1336,24 @@ class GlobalModelManager:
             # 1. Qwen 계열 (Qwen 3.8 Flash, Qwen 3.8 Max, Qwen 3.7 등)
             if "qwen" in inp_lower and "3.8" in inp_lower and "max" in inp_lower:
                 return "opencode-go/qwen3.8-max"
-            if "qwen" in inp_lower and ("3.8" in inp_lower or "flash" in inp_lower):
+            if "qwen" in inp_lower and "3.8" in inp_lower and "flash" in inp_lower:
+                return "opencode-go/qwen3.8-flash"
+            if "qwen" in inp_lower and "3.8" in inp_lower:
                 return "opencode-go/qwen3.8-flash"
             if "qwen" in inp_lower and "3.7" in inp_lower and "max" in inp_lower:
                 return "opencode-go/qwen3.7-max"
+            if "qwen" in inp_lower and "3.7" in inp_lower and "flash" in inp_lower:
+                return "opencode-go/qwen3.7-flash"
             if "qwen" in inp_lower and "3.7" in inp_lower:
                 return "opencode-go/qwen3.7-plus"
-            if "qwen" in inp_lower and "3.6" in inp_lower:
-                return "opencode-go/qwen3.6-plus"
             if "qwen" in inp_lower:
                 return "opencode-go/qwen3.8-flash"
 
-            # 2. GLM 계열 (GLM 5.3 Flash, GLM 5.3, GLM 5.2, GLM 5.1)
+            # 2. GLM 계열 (GLM 5.3 Flash, GLM 5.3, GLM 5.2)
             if "glm" in inp_lower and "flash" in inp_lower:
                 return "opencode-go/glm-5.3-flash"
             if "glm" in inp_lower and "5.2" in inp_lower:
                 return "opencode-go/glm-5.2"
-            if "glm" in inp_lower and "5.1" in inp_lower:
-                return "opencode-go/glm-5.1"
             if "glm" in inp_lower and "5.3" in inp_lower:
                 return "opencode-go/glm-5.3"
             if "glm" in inp_lower:
@@ -1297,11 +1383,9 @@ class GlobalModelManager:
             if "deepseek" in inp_lower:
                 return "opencode-go/deepseek-v4.1-flash"
 
-            # 6. Kimi 계열 (Kimi K3, Kimi K2.7 Code, Kimi K2.6)
+            # 6. Kimi 계열 (Kimi K3, Kimi K2.7 Code)
             if "kimi" in inp_lower and "code" in inp_lower:
                 return "opencode-go/kimi-k2.7-code"
-            if "kimi" in inp_lower and "2.6" in inp_lower:
-                return "opencode-go/kimi-k2.6"
             if "kimi" in inp_lower:
                 return "opencode-go/kimi-k3"
 
@@ -1311,11 +1395,9 @@ class GlobalModelManager:
             if "grok" in inp_lower:
                 return "opencode-go/grok-4.7"
 
-            # 8. MiniMax 계열 (MiniMax M3, M2.7, M2.5)
+            # 8. MiniMax 계열 (MiniMax M3, M2.7)
             if "minimax" in inp_lower and "2.7" in inp_lower:
                 return "opencode-go/minimax-m2.7"
-            if "minimax" in inp_lower and "2.5" in inp_lower:
-                return "opencode-go/minimax-m2.5"
             if "minimax" in inp_lower:
                 return "opencode-go/minimax-m3"
 
@@ -1330,8 +1412,27 @@ class GlobalModelManager:
                 return "opencode-go/hy3"
             if "muse" in inp_lower:
                 return "opencode-go/muse-spark-1.3-contributor"
-            if "omen" in inp_lower:
-                return "opencode-go/omen-alpha"
+        elif eng in ("cmdc", "commandcode"):
+            if "qwen" in inp_lower and "3.8" in inp_lower and "max" in inp_lower:
+                return "qwen/qwen3.8-max"
+            if "qwen" in inp_lower and "3.8" in inp_lower and "flash" in inp_lower:
+                return "qwen/qwen3.8-flash"
+            if "qwen" in inp_lower and "3.8" in inp_lower:
+                return "qwen/qwen3.8-flash"
+            if "qwen" in inp_lower and "3.7" in inp_lower and "flash" in inp_lower:
+                return "qwen/qwen3.7-flash"
+            if "qwen" in inp_lower and "3.7" in inp_lower and "plus" in inp_lower:
+                return "qwen/qwen3.7-plus"
+            if "qwen" in inp_lower and "3.7" in inp_lower:
+                return "qwen/qwen3.7-plus"
+            if "qwen" in inp_lower and "flash" in inp_lower:
+                return "qwen/qwen3.7-flash"
+            if "deepseek" in inp_lower and "4.1" in inp_lower:
+                return "deepseek/deepseek-v4.1-flash"
+            if "deepseek" in inp_lower and "pro" in inp_lower:
+                return "deepseek/deepseek-v4-pro"
+            if "deepseek" in inp_lower:
+                return "deepseek/deepseek-v4.1-flash"
         return None
 
     @classmethod
@@ -1537,7 +1638,7 @@ class GlobalModelManager:
 
         # 1. Core Agents - compact single-line format
         core_lines = []
-        for rk in ("coder", "auditor", "image", "commander"):
+        for rk in ("coder", "auditor", "image", "vision", "commander"):
             cfg = cls._roles.get(rk, {})
             icon = cfg.get("icon", "🤖")
             name = cfg.get("name", rk)
@@ -1608,6 +1709,14 @@ class GlobalModelManager:
             except Exception:
                 img_note = ""
 
+        # 🖼️ Vision Analyst 역할이면 '첨부 이미지 분석'에 쓰이는 모델임을 명확히 표시한다.
+        vision_note = ""
+        if (selected_role or "").lower().strip() == "vision":
+            vision_note = (
+                "\n**용도** 메시지에 첨부한 이미지·스크린샷의 OCR/레이아웃/디자인을 분석해 "
+                "Coder/QA 프롬프트에 주입합니다. (이미지 생성은 🎨 Image generator 역할)"
+            )
+
         # [🔄 자동화] 현재 선택된 엔진의 실시간 카탈로그 상태 표시.
         #   (메뉴얼 없이 자동 갱신되는지/얼마나 최신인지 사용자가 즉시 확인 가능)
         cat_note = cls._build_catalog_status_note(raw_curr_eng)
@@ -1619,6 +1728,7 @@ class GlobalModelManager:
                 f"**역할** {curr_p_info.get('icon', '💼')} {curr_p_info.get('name', '기본값')}\n"
                 f"{cat_note}\n"
                 f"{img_note}\n"
+                f"{vision_note}\n"
                 f"💡 아래 드롭다운과 버튼으로 변경하세요."
             ),
             inline=False
@@ -1797,7 +1907,7 @@ class ModelSearchModal(Modal):
             return
 
         ordered = [(m, l) for _, m, l in scored]
-        view = ModelSearchResultView(self.selected_role, eng, q, ordered, len(scored))
+        view = ModelSearchResultView(self.selected_role, eng, q, ordered, len(scored), parent_view=self.parent_view)
         msg = (
             f"🔍 `{q}` 검색 결과 **{len(scored)}개** / 카탈로그 {len(catalog)}개"
             + (f" — `{eng.upper()}` 실시간 목록" if not is_image else " — 이미지 모델")
@@ -1817,7 +1927,7 @@ class ModelSearchModal(Modal):
 class ModelSearchResultSelect(Select):
     """검색 결과 중 실제 모델을 고르는 Select."""
 
-    def __init__(self, selected_role: str, engine: str, results: List[Tuple[str, str]]):
+    def __init__(self, selected_role: str, engine: str, results: List[Tuple[str, str]], parent_view: Optional['ModelDashboardView'] = None):
         options = [
             discord.SelectOption(label=mid[:100], value=mid, description=(label or "")[:100])
             for mid, label in results[:25]
@@ -1828,22 +1938,37 @@ class ModelSearchResultSelect(Select):
         )
         self.selected_role = selected_role
         self.engine = engine
+        self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
         new_model = self.values[0]
         GlobalModelManager.set_role_model(self.selected_role, new_model)
+
+        # 1. 원본 !model 대시보드 메시지 실시간 갱신 (deepseek 등 이전 모델 잔류 방지)
+        if self.parent_view:
+            self.parent_view.update_components()
+            embed = GlobalModelManager.build_dashboard_embed(self.parent_view.selected_role)
+            if getattr(self.parent_view, "message", None):
+                try:
+                    await self.parent_view.message.edit(embed=embed, view=self.parent_view)
+                except Exception as e:
+                    logger.debug(f"Failed to edit parent dashboard message: {e}")
+
+        # 2. 검색 결과 메시지 자체를 제자리에서 변경 안내로 교체 (추가 메시지 증식 방지)
+        confirm_text = f"✅ **[{self.selected_role.upper()}]** 모델이 `{new_model}`(으)로 변경되었습니다!"
         try:
-            await interaction.followup.send(
-                f"✅ **[{self.selected_role.upper()}]** 모델이 `{new_model}`(으)로 변경되었습니다!",
-                ephemeral=True,
-            )
-        except Exception:
-            pass
+            if hasattr(interaction, "response") and not interaction.response.is_done():
+                await interaction.response.edit_message(content=confirm_text, view=None, embed=None)
+            elif hasattr(interaction, "edit_original_response"):
+                await interaction.edit_original_response(content=confirm_text, view=None, embed=None)
+            elif hasattr(interaction, "message") and interaction.message:
+                await interaction.message.edit(content=confirm_text, view=None, embed=None)
+        except Exception as e:
+            logger.debug(f"Search in-place confirmation edit failed, fallback: {e}")
+            try:
+                await interaction.followup.send(confirm_text, ephemeral=True)
+            except Exception:
+                pass
 
 
 class ModelSearchResultView(View):
@@ -1864,6 +1989,7 @@ class ModelSearchResultView(View):
         query: str,
         results: List[Tuple[str, str]],
         total: int,
+        parent_view: Optional['ModelDashboardView'] = None,
     ):
         super().__init__(timeout=180)
         self.selected_role = selected_role
@@ -1873,6 +1999,7 @@ class ModelSearchResultView(View):
         self.results = list(results)
         self.page = 0
         self.message = None
+        self.parent_view = parent_view
         self._render()
 
     # -- paging ----------------------------------------------------------
@@ -1886,7 +2013,7 @@ class ModelSearchResultView(View):
             start = self.page * self.PAGE_SIZE
             self.add_item(
                 ModelSearchResultSelect(
-                    self.selected_role, self.engine, self.results[start:start + self.PAGE_SIZE]
+                    self.selected_role, self.engine, self.results[start:start + self.PAGE_SIZE], parent_view=self.parent_view
                 )
             )
         if self.page_count > 1:
@@ -1976,6 +2103,7 @@ class RoleSelectDropdown(Select):
             pass
         view: ModelDashboardView = self.view
         view.selected_role = self.values[0]
+        view.model_page = 0
         view.update_components()
         embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
         await _safe_edit_view(interaction, embed, view)
@@ -2038,35 +2166,17 @@ class EngineSelectDropdown(Select):
         
         GlobalModelManager.set_role_engine(view.selected_role, new_engine)
 
-        # [🔄 자동화] 방금 고른 엔진의 실시간 카탈로그를 **지금** 불러온다.
-        #   (예: OpenCode 선택 → `opencode models` CLI + Zen Go API 결과를 자동으로 가져와
-        #    바로 아래 모델 드롭다운에 최신 목록이 채워진다. 수동 갱신 불필요)
-        #   백그라운드 예열만 두면 드롭다운이 curated 목록으로 렌더링된 채 굳어
-        #   "자동으로 안 바뀌네"가 되므로, 이 한 번의 명시적 선택은 동기 대기를 허용한다.
-        status_line = ""
+        # [🔄 자동화] 방금 고른 엔진의 실시간 카탈로그를 지금 불러온다.
         try:
             import asyncio
             from live_model_catalog import LiveModelCatalog
-            loaded_models = await asyncio.wait_for(
+            await asyncio.wait_for(
                 asyncio.to_thread(LiveModelCatalog.get_models_blocking, new_engine, True),
                 timeout=30.0,
             )
-            st = LiveModelCatalog.get_status(new_engine)
-            icon = "🟢" if st.get("live") else ("🔄" if st.get("refreshing") else "🟡")
-            status_line = (
-                f"{icon} **{new_engine.upper()}** 실시간 카탈로그 **{len(loaded_models)}개** 자동 로드"
-                f" (출처: {st.get('source')})"
-            )
-            if st.get("new_count"):
-                newest = [m for m, _ in st.get("newest", [])[:5]]
-                status_line += (
-                    f"\n🆕 **신규 {st['new_count']}개** 자동 반영: "
-                    + ", ".join(f"`{m}`" for m in newest)
-                )
         except Exception as e:
             name = type(e).__name__
             if name == "TimeoutError":
-                status_line = f"⏳ **{new_engine.upper()}** 카탈로그 조회가 30초를 넘어 백그라운드에서 계속합니다."
                 try:
                     from live_model_catalog import LiveModelCatalog
                     LiveModelCatalog.warmup([new_engine])
@@ -2074,7 +2184,6 @@ class EngineSelectDropdown(Select):
                     pass
             else:
                 logger.debug(f"[AutoCatalog] live fetch on engine switch failed: {e}")
-                status_line = f"⚠️ **{new_engine.upper()}** 카탈로그 조회 실패: {e}"
 
         # Set default model of new engine if current model doesn't belong to it
         presets = get_engine_models(new_engine)
@@ -2084,48 +2193,41 @@ class EngineSelectDropdown(Select):
                 first_model = presets[0][0]
                 GlobalModelManager.set_role_model(view.selected_role, first_model)
 
+        view.model_page = 0
         view.update_components()
         embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
         await _safe_edit_view(interaction, embed, view)
-        if status_line:
-            try:
-                await interaction.followup.send(status_line, ephemeral=True)
-            except Exception:
-                pass
+        # Note: redundant ephemeral status_line message removed to prevent message accumulation
 
 
 class ModelPresetDropdown(Select):
     """
     Dropdown for choosing a model for the selected engine.
 
-    [🔄 자동화] The visible window is deliberately **not** "the first N of the
-    catalog". Discord hard-caps a Select at 25 options and a live catalog is
-    ordered `curated → newly discovered`, so a naive `[:24]` slice made every
-    brand-new upstream model permanently invisible — the precise regression this
-    automation removes (OpenCode reports 38 live models against 35 curated ones,
-    so all 9 new ones used to fall off the end of the list).
-
-    Window assembly:
-        1. newly-discovered live models (🆕)  ← what the user was missing
-        2. curated models in their hand-tuned order
-        3. the active model is always pinned in, never scrolled out of reach
-    Anything past the cap stays reachable through the `🔍 검색` button / the
-    in-list `🔍 전체 …개 모델 검색` entry.
+    [🔄 저비용 ➔ 고성능 정렬 & 전체 리스트 페이징]
+    1. 사용자의 명시적 요청: 저렴한 모델일수록 위에, 고성능 모델일수록 아래에 표기.
+    2. 따로 검색하지 않고도 전체 카탈로그(84개 등)를 드롭다운 목록에서 바로 확인/선택할 수 있도록
+       페이지 단위(◀ 이전 / 다음 ▶) 네비게이션 옵션 제공.
     """
 
     MAX_OPTIONS = 25  # Discord Select hard limit
 
-    def __init__(self, selected_role: str):
+    def __init__(self, selected_role: str, page: int = 0):
         role_cfg = GlobalModelManager.get_role_config(selected_role)
         curr_engine = role_cfg.get("engine", "agy").lower()
         if curr_engine in ("openrouter", "hermes"):
             curr_engine = "hermes"
         curr_model = role_cfg.get("model", "")
         is_image_role = (selected_role or "").lower().strip() == "image"
+        is_vision_role = (selected_role or "").lower().strip() == "vision"
 
         # 🎨 Image generator 역할은 일반 채팅 모델이 아니라 실제 이미지 생성 모델을 고른다.
         if is_image_role:
             preset_data = list(IMAGE_MODEL_PRESETS)
+            new_ids: set = set()
+        elif is_vision_role:
+            # 🖼️ Vision Analyst 역할은 '이미지 입력을 지원하는' 멀티모달 모델만 고른다.
+            preset_data = list(VISION_MODEL_PRESETS)
             new_ids: set = set()
         else:
             preset_data = get_engine_models(curr_engine)
@@ -2136,53 +2238,90 @@ class ModelPresetDropdown(Select):
                 logger.debug(f"[AutoCatalog] new-model lookup failed: {e}")
                 new_ids = set()
 
-        # ---- 1. 노출 순서 결정 (신규 우선 → curated 순 → 현재 모델 고정) ----
         label_map = {mid: lbl for mid, lbl in preset_data}
-        # (a) 자동 발견된 신규 모델을 최우선 노출
-        ordered: List[Tuple[str, str]] = [(m, l) for m, l in preset_data if m in new_ids]
-        # (b) 나머지는 curated(수동 튜닝) 순서를 그대로 유지
-        ordered += [(m, l) for m, l in preset_data if m not in new_ids]
-        # (c) 현재 사용 중인 모델은 신규 모델이 많아 밀려나도 **반드시** 맨 앞에 고정한다.
-        #     사용자가 지금 무엇을 돌리고 있는지 드롭다운에서 즉시 확인·유지할 수 있어야 하고,
-        #     카탈로그에 아직 없는 커스텀 모델이면 '직접 입력' 으로 표기한다.
-        if curr_model:
-            pinned_label = label_map.get(curr_model, "직접 입력된 커스텀 모델")
-            ordered = [(curr_model, pinned_label)] + [(m, l) for m, l in ordered if m != curr_model]
 
-        # ---- 2. 검색 진입점 포함 여부를 먼저 결정해 슬롯을 정확히 확보한다 ----
-        #  카탈로그가 25개를 넘으면 나머지 모델은 '검색' 으로만 도달할 수 있으므로
-        #  마지막 1칸은 반드시 검색 항목으로 예약한다 (그림처럼 넘기면 접근 불가).
-        need_search = len(ordered) > self.MAX_OPTIONS - 1
-        model_slots = self.MAX_OPTIONS - 1 if need_search else self.MAX_OPTIONS
+        # ---- 1. 노출 순서: 저비용/경량 상단 ➔ 고성능/대형 하단 정렬 ----
+        if curr_engine == "agy":
+            ordered = _sort_agy_models(preset_data)
+        else:
+            ordered = sorted(preset_data, key=lambda pair: get_model_cost_tier(pair[0], pair[1]))
+
+        # 중복 제거 (순서 보존)
+        dedup_ordered: List[Tuple[str, str]] = []
+        seen_ids = set()
+        for mid, lbl in ordered:
+            if mid not in seen_ids:
+                dedup_ordered.append((mid, lbl))
+                seen_ids.add(mid)
+        ordered = dedup_ordered
+
+        total_models = len(ordered)
+        need_paging = total_models > self.MAX_OPTIONS
+
+        # ---- 2. 페이징 계산 (전체 목록을 검색 없이 바로 열람 가능) ----
+        PAGE_CHUNK = 22
+        total_pages = max(1, (total_models + PAGE_CHUNK - 1) // PAGE_CHUNK)
+        cur_page = max(0, min(page, total_pages - 1))
+        start_idx = cur_page * PAGE_CHUNK
+        end_idx = min(start_idx + PAGE_CHUNK, total_models)
+
+        page_models = ordered[start_idx:end_idx]
 
         options: List[discord.SelectOption] = []
-        seen: set = set()
-        for mid, label in ordered:
-            if mid in seen:
-                continue
-            if len(options) >= model_slots:
+
+        # (a) 이전 페이지 버튼
+        if cur_page > 0:
+            options.append(
+                discord.SelectOption(
+                    label=f"◀ [{cur_page}/{total_pages}p] 이전 페이지 ({max(1, start_idx - PAGE_CHUNK + 1)}~{start_idx}번)",
+                    value=f"__page_{cur_page - 1}__",
+                    description="더 저렴/경량 모델 목록으로 이동 (클릭 즉시 전환)",
+                    emoji="📄",
+                )
+            )
+
+        # (b) 현재 페이지 모델들
+        for mid, label in page_models:
+            if len(options) >= self.MAX_OPTIONS - 2 and (cur_page < total_pages - 1 or need_paging):
                 break
-            seen.add(mid)
-            marker = "🆕 신규 · " if mid in new_ids else ""
+            marker = "🆕 " if mid in new_ids else ""
             is_default = (mid == curr_model)
+            tier_num, _ = get_model_cost_tier(mid, label)
+            tier_prefix = f"[T{tier_num}] " if not is_image_role and not is_vision_role else ""
+
             if is_default and mid not in label_map:
-                opt_label = f"{mid[:75]} (현재 사용자 지정)"
+                opt_label = f"{mid[:70]} (현재)"
             else:
                 opt_label = mid[:100]
+
+            clean_desc = f"{marker}{tier_prefix}{label}"[:100]
             options.append(
                 discord.SelectOption(
                     label=opt_label,
                     value=mid,
-                    description=f"{marker}{label}"[:100],
+                    description=clean_desc,
                     default=is_default,
                 )
             )
 
-        # ---- 3. 검색 진입점 ----
-        if need_search:
+        # (c) 다음 페이지 버튼
+        if cur_page < total_pages - 1:
+            next_start = end_idx + 1
+            next_end = min(end_idx + PAGE_CHUNK, total_models)
             options.append(
                 discord.SelectOption(
-                    label=f"🔍 전체 {len(preset_data)}개 모델 검색...",
+                    label=f"▶ [{cur_page + 2}/{total_pages}p] 다음 페이지 ({next_start}~{next_end}번)",
+                    value=f"__page_{cur_page + 1}__",
+                    description="더 고성능/대형 모델 목록으로 이동 (클릭 즉시 전환)",
+                    emoji="📄",
+                )
+            )
+
+        # (d) 검색 진입점 (단위 테스트 호환 및 필요시 키워드 검색 지원)
+        if len(options) < self.MAX_OPTIONS:
+            options.append(
+                discord.SelectOption(
+                    label=f"🔍 전체 {total_models}개 모델 검색...",
                     value="__search__",
                     description="키워드로 전체 실시간 카탈로그 검색 모달 열기",
                     emoji="🔍",
@@ -2190,7 +2329,7 @@ class ModelPresetDropdown(Select):
             )
 
         disp_eng = "HERMES (OpenRouter)" if curr_engine == "hermes" else curr_engine.upper()
-        new_badge = f" · 🆕신규 {len(new_ids)}" if new_ids else ""
+        page_indicator = f" (p.{cur_page + 1}/{total_pages})" if total_pages > 1 else ""
         if not options:
             options = [discord.SelectOption(
                 label="🔄 카탈로그 조회 중…",
@@ -2198,7 +2337,7 @@ class ModelPresetDropdown(Select):
                 description="잠시 후 🔄 새로고침 을 눌러주세요",
             )]
         super().__init__(
-            placeholder=f"📦 [{disp_eng}] 전체 {len(preset_data)}개{new_badge} · {len(options)}개 표시",
+            placeholder=f"📦 [{disp_eng}] {start_idx + 1}~{end_idx}/{total_models}개 (저비용➔고성능{page_indicator})",
             min_values=1,
             max_values=1,
             options=options[:25],
@@ -2215,6 +2354,17 @@ class ModelPresetDropdown(Select):
                 )
             except Exception as e:
                 logger.debug(f"Search modal from preset dropdown failed: {e}")
+            return
+
+        if chosen.startswith("__page_"):
+            try:
+                target_page = int(chosen.replace("__page_", "").rstrip("_"))
+                view.model_page = target_page
+                view.update_components()
+                embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
+                await _safe_edit_view(interaction, embed, view)
+            except Exception as e:
+                logger.debug(f"Preset page navigation failed: {e}")
             return
 
         try:
@@ -2272,12 +2422,18 @@ class ModelDashboardView(View):
     """
     Main Interactive View for the !model command.
     """
+    _active_dashboards: List['ModelDashboardView'] = []
+
     def __init__(self, selected_role: str = "auditor", user_id: Optional[int] = None):
         super().__init__(timeout=600)
         self.selected_role = selected_role
         self.user_id = user_id
+        self.model_page: int = 0
         self.message: Optional[discord.Message] = None
         self.update_components()
+        ModelDashboardView._active_dashboards.append(self)
+        if len(ModelDashboardView._active_dashboards) > 10:
+            ModelDashboardView._active_dashboards = ModelDashboardView._active_dashboards[-10:]
 
     def update_components(self):
         self.clear_items()
@@ -2306,6 +2462,8 @@ class ModelDashboardView(View):
             eng_for_count = role_cfg.get("engine", "agy")
             if (self.selected_role or "").lower().strip() == "image":
                 total_models = len(IMAGE_MODEL_PRESETS)
+            elif (self.selected_role or "").lower().strip() == "vision":
+                total_models = len(VISION_MODEL_PRESETS)
             else:
                 total_models = len(get_engine_models(eng_for_count))
         except Exception:
@@ -2365,8 +2523,8 @@ class ModelDashboardView(View):
         # Row 2: Engine Select Dropdown (엔진/라우터 선택) -> width 5 전용 Row
         self.add_item(EngineSelectDropdown(self.selected_role))
 
-        # Row 3: Model Preset Dropdown (모델 프리셋 선택)
-        self.add_item(ModelPresetDropdown(self.selected_role))
+        # Row 3: Model Preset Dropdown (모델 프리셋 선택, 페이지 연동)
+        self.add_item(ModelPresetDropdown(self.selected_role, page=self.model_page))
 
         # Row 4: Persona Select Dropdown (직업/전문 역할 선택)
         self.add_item(PersonaSelectDropdown(self.selected_role))
@@ -2505,6 +2663,11 @@ class ModelDashboardView(View):
 
     async def _close_callback(self, interaction: discord.Interaction):
         try:
+            if self in ModelDashboardView._active_dashboards:
+                ModelDashboardView._active_dashboards.remove(self)
+        except Exception:
+            pass
+        try:
             if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
                 if not interaction.response.is_done():
                     await interaction.response.defer()
@@ -2525,6 +2688,11 @@ class ModelDashboardView(View):
                 pass
 
     async def on_timeout(self):
+        try:
+            if self in ModelDashboardView._active_dashboards:
+                ModelDashboardView._active_dashboards.remove(self)
+        except Exception:
+            pass
         for item in self.children:
             item.disabled = True
         if hasattr(self, "message") and self.message:
@@ -2533,6 +2701,18 @@ class ModelDashboardView(View):
             except Exception:
                 pass
 
+
+async def _sync_active_dashboards_on_change():
+    for v in list(ModelDashboardView._active_dashboards):
+        try:
+            if getattr(v, "message", None):
+                v.update_components()
+                embed = GlobalModelManager.build_dashboard_embed(v.selected_role)
+                await v.message.edit(embed=embed, view=v)
+        except Exception as e:
+            logger.debug(f"Failed to auto-update active dashboard message: {e}")
+
+GlobalModelManager.register_change_callback(_sync_active_dashboards_on_change)
 
 # Initialize singleton immediately upon import
 GlobalModelManager.initialize()

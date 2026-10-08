@@ -167,6 +167,18 @@ AGY Agent는 "코드 다 짰습니다"라는 AI의 말만 믿지 않습니다. �
 
 ---
 
+### 10. 🔬 자율 E2E 검증 루프 (Autonomous E2E Verification Loop)
+> **"E2E는 스크린샷 몇 장으로 끝나지 않는다. 협업 모드에서 실제 테스트를 돌리고, 부족한 점을 스스로 찾아 다음 라운드에 반영한다."**
+
+`!mode 2 / 2+ / 3 / 3+` 협업 파이프라인의 Coder 턴 종료 직후, 시스템이 스스로:
+* **실제 테스트 실행**: 워크스페이스에서 `pytest`·`npm test`·`gradle test`·`cargo test`·`go test` 를 자동 탐지해 실제로 실행합니다(셸 주입 없는 argv, 타임아웃 보호).
+* **스크린샷 실측 기록**: 표준 스크린샷 디렉토리의 신선한 캡처를 수집하고 빈 화면(blank) 프레임을 계측합니다.
+* **결함 자율 규명 + 환류**: 테스트 실패/런타임 에러/실 화면 증거 결손을 구조화된 결함으로 도출하여 QA·Auditor 프롬프트에 주입하고, QA가 승인해도 차단 결함이 남아 있으면 Coder에게 기계적으로 반려·수정 지시(`[🔬 AUTONOMOUS-E2E-FIX]`)합니다.
+* **정직성**: pytest exit 5(테스트 0건)·의존성 미비는 실패로 위장하지 않고 '미검증 갭'으로 정직하게 기록합니다.
+* 물리 증거: `reports/gate4/autonomous_e2e_report.json` · 스위치: `AUTONOMOUS_E2E_LOOP_ENABLED=0`(비활성), `AUTONOMOUS_E2E_MAX_ROUNDS`.
+
+---
+
 ## 🛡️ 가시적 실체 구현 & 안티 모킹(Anti-Mocking) 헌법
 
 AGY Agent의 코드베이스에는 엄격한 개발 헌법(`PROJECT_CONSTITUTION.md`)과 물리적 검증기(`evidence_validator.py`)가 상시 작동합니다:
@@ -232,6 +244,7 @@ agy_agent/
 ├── bot.py                        # 🚀 디스코드 봇 메인 게이트웨이 & 이벤트 라우터
 ├── commander.py                  # 👑 Commander (의도 분석 및 지능형 배차 사령관)
 ├── planner_visual_gap_analyzer.py # 📸 Commander 기획용 스크린샷 실측 제품 결손 분석기
+├── autonomous_e2e_loop.py        # 🔬 협업 모드 실 테스트 실행 + 스크린샷 실측 + 결함 환류 자율 E2E 루프
 ├── product_refinement_governor.py # 🧭 심도 우선(Depth-First) 제품 완성도 거버너
 ├── trio_agent_runner.py          # 👥 3-Agent 파이프라인 (Coder ↔ QA ↔ Auditor)
 ├── mode_classifier.py            # 🧠 딥러닝/LLM 기반 질문/개발 모드 자동 분류기

@@ -319,12 +319,15 @@ class BaseEngineAdapter:
         engine_idle_limit = max(900.0, float(getattr(config, "WATCHDOG_SILENCE_TIMEOUT", 1800)))
         if str(session_role or "").lower().strip().startswith("qa") or str(session_role or "").lower().strip() in ("reviewer", "qa_bot", "auditor"):
             engine_idle_limit = max(engine_idle_limit, float(getattr(config, "EXTENDED_QA_TIMEOUT", 4000.0)))
+        # [⏱️ coder/qa/auditor 타임아웃 해제] timeout 0 이하 = 무제한 → 실행/무응답 상한 모두 미적용.
+        if not timeout:
+            engine_idle_limit = None
 
         try:
             while True:
                 # Enforce unresponsiveness deadline and total execution deadline
                 now = time.time()
-                if now - start_time > timeout:
+                if timeout and now - start_time > timeout:
                     logger.warning(f"Engine {self.name} exceeded overall timeout ({timeout}s). Terminating...")
                     stderr_lines.append(f"⚠️ 실행 제한 시간({int(timeout)}초) 초과로 안전 종료되었습니다.")
                     # [🛡️ 프리징 차단] 프로세스를 죽이지 않고 break 하면 아래 proc.wait() 가 무한 대기한다.
@@ -339,7 +342,7 @@ class BaseEngineAdapter:
                         stderr_lines.append("⛔ stderr 모델/라우터 오류 감지 → 무응답 대기 대신 즉시 회수")
                         await _terminate_process_tree(proc)
                         break
-                    if idle_sec > engine_idle_limit:
+                    if engine_idle_limit is not None and idle_sec > engine_idle_limit:
                         logger.warning(f"Engine {self.name} unresponsive for {idle_sec:.0f}s (> {engine_idle_limit:.0f}s). Terminating unresponsive process...")
                         stderr_lines.append(f"⚠️ 무응답 상태 지속({int(idle_sec)}초)으로 안전 종료되었습니다.")
                         await _terminate_process_tree(proc)
@@ -751,6 +754,9 @@ class OpenRouterAdapter(HermesAdapter):
 
     async def execute_direct_api(self, prompt: str, model: Optional[str] = None, timeout: float = 600.0) -> Tuple[int, str, List[str]]:
         """Direct fallback execution via OpenRouter Chat Completions API."""
+        # [⏱️ 타임아웃 해제] 0 이하 = 무제한 → urllib 기본 소켓 타임아웃 사용.
+        if not timeout or timeout <= 0:
+            timeout = None
         clean_key = self._get_clean_key()
         if not clean_key:
             logger.warning("OpenRouter API key missing or invalid in execute_direct_api")
@@ -1272,6 +1278,53 @@ def _opencode_event_hint(etype: Optional[str], part: dict) -> str:
     return ""
 
 
+def _cmdc_extract_text(content: Any) -> str:
+    """
+    Command Code `message_update`/`message_end` 의 누적 content 에서 텍스트만 뽑아낸다.
+
+    실제 페이로드는 문자열이 아니라 파트 리스트다:
+    `[{"type":"thinking","thinking":"..."},{"type":"text","text":"..."}]`.
+    기존 파서가 `isinstance(content, str)` 만 검사해 항상 빈 값으로 버리던 결함을 보정한다.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: List[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and part.get("text"):
+                    chunks.append(str(part["text"]))
+            elif isinstance(part, str):
+                chunks.append(part)
+        return "".join(chunks)
+    return ""
+
+
+def _cmdc_event_hint(inner_type: Optional[str], event: dict) -> str:
+    """
+    [🖥️ 사람이 읽는 진행 표기] Command Code 이벤트를 채널에 보여줄 문구로 변환한다.
+
+    실제 cmdc NDJSON 은 도구 수명주기를 `tool_queued → tool_running → tool_update →
+    tool_completed` 로 내보낸다. 기존 파서는 `tool_call`/`tool_start` 만 찾아
+    어떤 도구도 표기하지 못했고, 그 결과 상태 메시지가 "작업 시작 중..." 에서
+    멈춘 것처럼 보였다. 여기서 실제 이벤트를 단계 문구로 매핑한다.
+    """
+    tool_name = event.get("toolName") or event.get("name") or "tool"
+    if inner_type == "tool_queued":
+        return f"🔧 **도구 준비**: `{str(tool_name)[:60]}`"
+    if inner_type == "tool_running":
+        desc = event.get("description")
+        hint = f"🔧 **도구 실행 중**: `{str(tool_name)[:60]}`"
+        if desc:
+            hint += f" — {str(desc)[:80]}"
+        return hint
+    if inner_type == "tool_update":
+        return f"⚙️ **도구 실행 중**: `{str(tool_name)[:60]}`"
+    if inner_type == "tool_completed":
+        return f"✅ **도구 완료**: `{str(tool_name)[:60]}`"
+    return ""
+
+
 class OpenCodeAdapter(BaseEngineAdapter):
     engine_id = "opencode"
     name = "OpenCode CLI"
@@ -1288,43 +1341,48 @@ class OpenCodeAdapter(BaseEngineAdapter):
     ]
     install_command = "curl -fsSL https://opencode.ai/install | bash"
     auth_info = "opencode auth login (프로바이더 인증) 또는 OPENCODE_API_KEY"
-    # 정적 폴백 카탈로그 (실시간 조회 실패 시 사용되는 최신 전체 모델 카탈로그)
+    # 정적 폴백 카탈로그 — 라우터(`opencode models`)가 실제 제공하는 모델만 담는다.
+    # (Zen API 만 반환하는 유령 모델은 제외 → `!model` 목록과 실행 가능 모델을 일치시킨다)
     _STATIC_MODELS = [
         "opencode-go/deepseek-v4.1-flash",
         "opencode-go/deepseek-v4-pro",
         "opencode-go/glm-5.3-flash",
         "opencode-go/glm-5.3",
+        "opencode-go/glm-5.2",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/mimo-v2.6-pro",
+        "opencode-go/mimo-v2.5-pro",
+        "opencode-go/mimo-v2.5",
         "opencode-go/qwen3.8-flash",
         "opencode-go/qwen3.8-max",
+        "opencode-go/qwen3.7-plus",
         "opencode-go/gpt-6-luna",
         "opencode-go/gpt-5.6-luna",
         "opencode-go/kimi-k3",
         "opencode-go/kimi-k2.7-code",
         "opencode-go/grok-4.7",
+        "opencode-go/grok-4.6",
         "opencode-go/minimax-m3",
-        "opencode-go/qwen3.7-max",
-        "opencode-go/qwen3.7-plus",
-        "opencode-go/qwen3.6-plus",
+        "opencode-go/minimax-m2.7",
         "opencode-go/longcat-2.0",
+        "opencode-go/longcat-2.5-preview-free",
         "opencode-go/space-bunny-free",
         "opencode-go/hy4-preview",
+        "opencode-go/hy3",
         "opencode-go/muse-spark-1.3-contributor",
+        "opencode-go/muse-spark-1.2-contributor",
         "opencode-go/deepseek-v4-flash",
         "opencode-go/deepseek-v4-flash-vision-exp",
-        "opencode-go/omen-alpha",
-        "opencode-go/mimo-v2.5-pro",
-        "opencode-go/mimo-v2.5",
-        "opencode-go/minimax-m2.7",
-        "opencode-go/minimax-m2.5",
-        "opencode-go/kimi-k2.6",
-        "opencode-go/glm-5.2",
-        "opencode-go/glm-5.1",
-        "opencode-go/grok-4.6",
-        "opencode-go/hy3",
-        "opencode-go/muse-spark-1.2-contributor",
-        "opencode-go/deepseek-flash",
+        "opencode/big-pickle",
+        "opencode/fledge-alpha-free",
+        "opencode/space-bunny-free",
+        "opencode/mimo-v2.6-flash-free",
+        "opencode/muse-spark-1.3-contributor-free",
+        "opencode/ling-3.0-flash-fin-free",
+        "opencode/ling-3.1-flash-free",
+        "opencode/longcat-2.5-preview-free",
+        "opencode/nemotron-3-ultra-free",
+        "opencode/nemotron-3.5-lightning-free",
     ]
     _models_cache: Tuple[float, List[str]] = (0.0, [])
     _MODELS_CACHE_TTL = 600.0
@@ -1332,11 +1390,11 @@ class OpenCodeAdapter(BaseEngineAdapter):
     @property
     def supported_models(self) -> List[str]:
         """
-        [🔄 자동화] OpenCode 실시간 모델 카탈로그를 반환합니다.
+        [🔄 자동화] OpenCode 라우터가 실제 제공하는 모델 카탈로그를 반환합니다.
 
-        `live_model_catalog` 가 'opencode models' CLI 와 Zen Go API 결과를
-        **합집합으로 병합**하여 관리하므로(무료 `opencode/*` 티어 누락 방지),
-        여기서는 그 단일 소스를 그대로 사용합니다.
+        `live_model_catalog` 가 라우터 자신의 카탈로그(`opencode models`)만을
+        단일 소스로 사용하므로, 여기서도 그 결과를 그대로 사용합니다.
+        (Zen API 만 반환하는 유령 모델은 `!model` 목록에서 제외된다.)
         실패/미로그인 시에는 curated 정적 폴백을 반환합니다.
         """
         try:
@@ -1754,11 +1812,14 @@ class OpenCodeAdapter(BaseEngineAdapter):
 
             # [🛡️ 적응형 무응답 타임아웃] config.WATCHDOG_SILENCE_TIMEOUT 과 통합
             opencode_idle_limit = max(900.0, float(getattr(config, "WATCHDOG_SILENCE_TIMEOUT", 1800)))
+            # [⏱️ coder/qa/auditor 타임아웃 해제] timeout 0 이하 = 무제한 → 실행/무응답 상한 미적용.
+            if not timeout:
+                opencode_idle_limit = None
 
             try:
                 while True:
                     now = time.time()
-                    if now - start_time > timeout:
+                    if timeout and now - start_time > timeout:
                         stderr_lines.append(f"⚠️ 실행 제한 시간({int(timeout)}초) 초과로 안전 종료되었습니다.")
                         # [🛡️ 3603초 프리징 차단] 죽이지 않고 break 하면 아래 proc.wait() 가 무한 대기한다.
                         await _terminate_process_tree(proc)
@@ -1774,7 +1835,7 @@ class OpenCodeAdapter(BaseEngineAdapter):
                             stderr_lines.append("⛔ stderr 모델/라우터 오류 감지 → 즉시 회수")
                             await _terminate_process_tree(proc)
                             break
-                        if idle_sec > opencode_idle_limit:
+                        if opencode_idle_limit is not None and idle_sec > opencode_idle_limit:
                             stderr_lines.append(f"⚠️ 무응답 상태 지속({int(idle_sec)}초)으로 안전 종료되었습니다.")
                             # [🛡️ 프리징 차단] 프로세스 트리 + 유한 wait 로 자원 회수.
                             await _terminate_process_tree(proc)
@@ -2120,9 +2181,17 @@ class CommandCodeAdapter(BaseEngineAdapter):
             stderr_lines: List[str] = []
             captured_sid: Optional[str] = None
             session_not_found = False
+            fatal_error: Optional[str] = None
+            stderr_fatal = False
             final_text: Optional[str] = None
+            timed_out = False
+            # [🖥️ 사람이 읽는 진행 표기] 모델이 아직 text 를 내지 않은 구간(추론/도구 대기)에서
+            # 원시 JSON 대신 현재 단계를 보여준다. 4초 스로틀과 함께 상태 메시지가
+            # "작업 시작 중..." 에 고정되지 않게 하는 핵심 표기 경로다.
+            last_event_hint = ""
 
             async def read_stderr():
+                nonlocal stderr_fatal
                 while True:
                     line = await proc.stderr.readline()
                     if not line:
@@ -2132,23 +2201,71 @@ class CommandCodeAdapter(BaseEngineAdapter):
                         stderr_lines.append(decoded)
                         if len(stderr_lines) > 40:
                             stderr_lines.pop(0)
+                        if _is_fatal_engine_error(decoded) or _is_http_400_error(decoded):
+                            stderr_fatal = True
 
             stderr_task = asyncio.create_task(read_stderr())
             start_time = time.time()
+            last_activity_time = time.time()
             last_update_time = time.time()
+            # [🛡️ 적응형 무응답 타임아웃] config.WATCHDOG_SILENCE_TIMEOUT 과 통합.
+            # 비-AGY 엔진은 최소 900초까지 조용히 추론할 수 있다.
+            cmdc_idle_limit = max(900.0, float(getattr(config, "WATCHDOG_SILENCE_TIMEOUT", 1800)))
+            # [⏱️ coder/qa/auditor 타임아웃 해제] timeout 0 이하 = 무제한 → 무응답 상한 미적용.
+            if not timeout:
+                cmdc_idle_limit = None
+
+            async def _emit_progress(elapsed: int, idle: bool = False):
+                if text_parts:
+                    body = "`" + text_parts[-1][:60].replace("`", "") + "`"
+                elif not idle and last_event_hint:
+                    body = last_event_hint
+                else:
+                    body = "⏳ **모델 응답 대기 중...**"
+                await safe_tool_notify(
+                    on_tool_update,
+                    f"{self.icon} **[{self.name} 실행 중 ({elapsed}s)]**\n{body}",
+                )
 
             try:
                 while True:
-                    if timeout and (time.time() - start_time) > timeout:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                        return -1, "", [f"[{self.name}] 실행 제한 시간({timeout}s) 초과"], None, False
-
-                    line = await proc.stdout.readline()
+                    now = time.time()
+                    if timeout and (now - start_time) > timeout:
+                        timed_out = True
+                        stderr_lines.append(f"⚠️ 실행 제한 시간({int(timeout)}초) 초과로 안전 종료되었습니다.")
+                        await _terminate_process_tree(proc)
+                        break
+                    try:
+                        line = await asyncio.wait_for(proc.stdout.readline(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        idle_sec = time.time() - last_activity_time
+                        # [🛡️ 400 Fast-Fail] stderr 로 라우터/모델 오류가 확인되면
+                        # 무응답 30분을 기다리지 않고 즉시 회수한다.
+                        if stderr_fatal:
+                            fatal_error = "stderr fatal model/router error"
+                            stderr_lines.append("⛔ stderr 모델/라우터 오류 감지 → 즉시 회수")
+                            await _terminate_process_tree(proc)
+                            break
+                        if cmdc_idle_limit is not None and idle_sec > cmdc_idle_limit:
+                            timed_out = True
+                            stderr_lines.append(f"⚠️ 무응답 상태 지속({int(idle_sec)}초)으로 안전 종료되었습니다.")
+                            await _terminate_process_tree(proc)
+                            break
+                        if proc.returncode is not None:
+                            break
+                        # [📡 생존 표시] stdout 이 조용해도(긴 추론/도구 대기) 상태를 갱신해
+                        # "작업 시작 중..." 에서 멈춘 것처럼 보이지 않게 한다.
+                        await _emit_progress(int(time.time() - start_time), idle=True)
+                        continue
                     if not line:
                         break
+
+                    last_activity_time = time.time()
+                    try:
+                        session.touch("engine_stdout")
+                    except Exception:
+                        pass
+
                     raw_str = line.decode("utf-8", errors="replace").strip()
                     if not raw_str:
                         continue
@@ -2157,53 +2274,105 @@ class CommandCodeAdapter(BaseEngineAdapter):
                         ev_data = json.loads(raw_str)
                     except json.JSONDecodeError:
                         text_parts.append(raw_str)
+                        if _is_fatal_engine_error(raw_str):
+                            fatal_error = raw_str
+                            await _terminate_process_tree(proc)
+                            break
                         continue
 
-                    ev_type = ev_data.get("type")
-                    if ev_type == "result":
+                    # [🛡️ 오류 이벤트] cmdc 는 실패 시 `{"error": {...}}` 를 최상위로 내보낸다
+                    # (type 키가 없음). 세션 소실/라우터 오류를 즉시 식별한다.
+                    err_obj = ev_data.get("error")
+                    if err_obj:
+                        err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
+                        err_msg = str(err_msg or raw_str)
+                        low_err = err_msg.lower()
+                        stderr_lines.append(f"Command Code Error: {err_msg}")
+                        if "session" in low_err and ("not found" in low_err or "invalid" in low_err):
+                            session_not_found = True
+                        if _is_fatal_engine_error(err_msg) or _is_http_400_error(err_msg):
+                            fatal_error = err_msg
+                            stderr_lines.append(f"⛔ Command Code 치명적 모델/라우터 오류 감지 → 즉시 회수: {err_msg[:200]}")
+                            await _terminate_process_tree(proc)
+                            break
+                        continue
+
+                    top_type = ev_data.get("type")
+                    if top_type == "result":
                         captured_sid = ev_data.get("sessionId") or captured_sid
                         ft = ev_data.get("finalText")
                         if ft:
                             final_text = ft
-                    elif ev_type == "event":
-                        inner_ev = ev_data.get("event", {})
+                    elif top_type == "text":
+                        t = ev_data.get("text", "")
+                        if t:
+                            text_parts.append(str(t))
+                    elif top_type == "event":
+                        inner_ev = ev_data.get("event", {}) or {}
                         inner_type = inner_ev.get("type")
                         if inner_type == "run_start":
                             captured_sid = inner_ev.get("sessionId") or captured_sid
+                        elif inner_type == "run_end":
+                            result = inner_ev.get("result") or {}
+                            ft = result.get("finalText")
+                            if ft:
+                                final_text = ft
+                            captured_sid = (result.get("nextState") or {}).get("sessionId") or captured_sid
                         elif inner_type == "text_delta":
                             delta = inner_ev.get("delta", "")
                             if delta:
-                                text_parts.append(delta)
-                        elif inner_type in ("tool_call", "tool_start"):
-                            tool_name = inner_ev.get("toolName") or inner_ev.get("name") or "tool"
-                            await safe_tool_notify(on_tool_update, f"🔧 **[Command Code]** `{tool_name}` 실행 중...")
-                        elif inner_type == "message_update":
-                            content = inner_ev.get("content", "")
-                            if content and isinstance(content, str):
-                                if time.time() - last_update_time >= 5.0:
-                                    last_update_time = time.time()
-                                    snippet = content.strip().splitlines()[-1][:60]
-                                    if snippet:
-                                        await safe_tool_notify(on_tool_update, f"⚙️ {snippet}...")
-                    elif ev_type == "text":
-                        t = ev_data.get("text", "")
-                        if t:
-                            text_parts.append(t)
+                                text_parts.append(str(delta))
+                                last_event_hint = ""
+                        elif inner_type in ("message_update", "message_end"):
+                            # 누적 content(파트 리스트)에서 텍스트만 추출해 진행 힌트로 쓴다.
+                            # 누적본이므로 text_parts 에 덧붙이지 않는다(중복 방지).
+                            snippet = _cmdc_extract_text(inner_ev.get("content")).strip()
+                            if snippet:
+                                last_event_hint = "✍️ `" + snippet.splitlines()[-1][:60].replace("`", "") + "`"
+                        elif inner_type in ("tool_queued", "tool_running", "tool_update", "tool_completed"):
+                            hint = _cmdc_event_hint(inner_type, inner_ev)
+                            if hint:
+                                last_event_hint = hint
+                                # 도구 시작/완료는 즉시 표기해 실시간 작업 상황을 보여준다.
+                                if inner_type in ("tool_queued", "tool_running", "tool_completed"):
+                                    await safe_tool_notify(on_tool_update, hint)
+                        elif inner_type == "thinking_start":
+                            last_event_hint = "🧠 **모델 사고 중...**"
 
-                return_code = await proc.wait()
-                await stderr_task
+                    if time.time() - last_update_time >= 4.0:
+                        last_update_time = time.time()
+                        await _emit_progress(int(time.time() - start_time))
 
-                output_text = final_text if final_text else "".join(text_parts)
-                return return_code, output_text, stderr_lines, captured_sid, session_not_found
-
+                await asyncio.wait_for(proc.wait(), timeout=15.0)
+                await asyncio.wait_for(stderr_task, timeout=5.0)
             except asyncio.CancelledError:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                await _terminate_process_tree(proc)
                 raise
+            except asyncio.TimeoutError:
+                timed_out = True
+                await _terminate_process_tree(proc)
             finally:
+                await _terminate_process_tree(proc)
                 session.current_process = None
+
+            if fatal_error:
+                if _is_recoverable_session_error(str(fatal_error)):
+                    stderr_lines.append(
+                        "💡 누적 대화 컨텍스트가 모델 한도를 넘었을 수 있습니다. "
+                        "`!clear` 로 세션을 초기화하면 즉시 복구됩니다."
+                    )
+                else:
+                    stderr_lines.append(
+                        "💡 모델 ID/라우터 설정을 점검하세요: `!engine` 으로 엔진을, "
+                        "`cmdc --list-models` 로 유효 모델을 확인할 수 있습니다."
+                    )
+                return -2, "".join(text_parts).strip(), stderr_lines, captured_sid, session_not_found
+
+            if timed_out:
+                return -1, (final_text or "".join(text_parts)).strip(), stderr_lines, captured_sid, session_not_found
+
+            output_text = final_text if final_text else "".join(text_parts)
+            return proc.returncode, output_text, stderr_lines, captured_sid, session_not_found
 
         rc, out_txt, errs, new_sid, not_found = await _run_once(use_session=bool(session_id))
         if rc != 0 and session_id and (not_found or any("session" in e.lower() for e in errs)):
@@ -2530,6 +2699,14 @@ class EngineManager:
         except Exception:
             pass
 
+        # 🔍 개선점 탐색 계약(판정기 → 결함 탐지기 + 개선점 탐색기)을 QA 프롬프트에 강제 주입한다.
+        discovery_block = ""
+        try:
+            from convergence_policy import build_improvement_discovery_instruction
+            discovery_block = "\n\n" + build_improvement_discovery_instruction()
+        except Exception:
+            discovery_block = ""
+
         return (
             f"[역할: 수석 QA 엔지니어 & 코드 감사관 (Senior QA Inspector / {engine_name})]\n\n"
             f"당신은 단순한 결함 검사관이 아니라, 전문적 관점에서 Coder가 미처 생각하지 못한 부분까지 설계할 수 있도록 리드하는 시니어 QA 파트너입니다.\n\n"
@@ -2563,7 +2740,7 @@ class EngineManager:
             f"   - 결함/미비점 또는 설계적 재보강이 필요한 경우: 반드시 첫 줄에 `[STATUS: REJECTED]` 표기 및 Coder가 미처 생각지 못한 구체적 개선 가이드(폰트, 나노바나나 에셋, 아키텍처 스펙) 작성\n"
             f"   - 경미한 1~5줄 오타/버그를 직접 수정했다면: 첫 줄에 `[STATUS: APPROVED (QA Direct Patch)]` 표기\n"
             f"   - 모든 기준을 무결하게 통과하고 최선의 설계가 입증된 경우: 첫 줄에 `[STATUS: APPROVED]` 표기 및 종합 코드 리뷰서(전문가 관점 심층 평가 & 차기 고도화 권고) 작성"
-        )
+        ) + discovery_block
 
     @classmethod
     def build_status_embed(cls, current_engine_id: str, channel_id: int, session: Optional[ChannelSession] = None) -> discord.Embed:

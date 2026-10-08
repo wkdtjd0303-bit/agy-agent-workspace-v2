@@ -215,12 +215,16 @@ class TestConvergenceTelemetry(unittest.TestCase):
     def test_records_marker_rate(self):
         ConvergenceTelemetry.record(self.ch, "qa1", 2, "marker", "observed")
         ConvergenceTelemetry.record(self.ch, "qa1", 0, "marker", "force_accept")
+        # 개선점 탐색 계약 마커도 방출되면 경고가 없어야 한다(계약 전면 준수).
+        ConvergenceTelemetry.record_improvements(self.ch, 3)
         s = ConvergenceTelemetry.summary(self.ch)
         self.assertEqual(s["observations"], 2)
         self.assertEqual(s["marker_present"], 2)
         self.assertEqual(s["marker_emission_rate"], 1.0)
         self.assertEqual(s["force_accepts"], 1)
         self.assertTrue(s["contract_active"])
+        self.assertEqual(s["improvement_observed"], 1)
+        self.assertEqual(s["total_improvements"], 3)
         self.assertEqual(s["warnings"], [])
 
     def test_warns_when_marker_never_emitted(self):

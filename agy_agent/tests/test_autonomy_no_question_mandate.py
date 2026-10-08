@@ -97,7 +97,7 @@ class TestDispatchLevelInjection(unittest.IsolatedAsyncioTestCase):
 
             async def execute(
                 self, session=None, prompt=None, on_tool_update=None,
-                model=None, role=None, conversation_id_attr=None,
+                model=None, role=None, conversation_id_attr=None, timeout=None,
             ):
                 captured["prompt"] = prompt
                 return (0, "ok", [])
@@ -125,7 +125,7 @@ class TestDispatchLevelInjection(unittest.IsolatedAsyncioTestCase):
 
             async def execute(
                 self, session=None, prompt=None, on_tool_update=None,
-                model=None, role=None, conversation_id_attr=None,
+                model=None, role=None, conversation_id_attr=None, timeout=None,
             ):
                 captured["prompt"] = prompt
                 return (0, "ok", [])

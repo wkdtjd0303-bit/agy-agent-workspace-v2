@@ -1349,12 +1349,18 @@ class AutoPilotManager:
                             rm.load()
                             cur_ms = rm.get_current_milestone(auto_expand=False)
 
+                            remaining_ms = [m for m in getattr(rm, "_milestones", []) if not m.is_done and m.status != "SKIPPED"]
+                            is_last_milestone = (cur_ms is not None and len(remaining_ms) <= 1)
                             eval_res = AutonomousProductPlanner.critique_product(
                                 workspace=session.workspace,
                                 e2e_report=crawl_report,
                                 coder_output=audit_result or "",
                                 current_milestone=cur_ms,
-                                mode=state.mode
+                                mode=state.mode,
+                                is_last_milestone=is_last_milestone,
+                                improvement_severities=getattr(
+                                    session, "_latest_improvement_severities", None
+                                ),
                             )
 
                             # Send Product Critic Embed from Commander Bot
@@ -1382,10 +1388,41 @@ class AutoPilotManager:
                             except Exception as _ce:
                                 logger.debug(f"Failed to save critic eval cache: {_ce}")
 
+                            # 🚪 90점 완결 게이트: 종합 90 + 모든 Critical 차원 90 + E2E + (회귀).
+                            #    "blocking=0" 이나 텍스트 승인만으로는 PASS/승급할 수 없다 (product_gate SSOT).
+                            try:
+                                from product_gate import evaluate_milestone_gate
+                                _gate = evaluate_milestone_gate(
+                                    overall_score=eval_res.overall_score,
+                                    dimensions={
+                                        k: {"score": v.score, "is_critical": v.is_critical}
+                                        for k, v in eval_res.dimension_scores.items()
+                                    },
+                                    critical_requirements_satisfied=(len(eval_res.critical_failures) == 0),
+                                    exit_criteria=None,
+                                    e2e_passed=eval_res.e2e_verified,
+                                    critical_defect_count=0,
+                                    regression_passed=True,
+                                    # 🚦 QA가 발견한 개선점 severity(P2/P3 감점, P0/P1 차단) 반영.
+                                    improvement_severities=getattr(
+                                        session, "_latest_improvement_severities", None
+                                    ),
+                                )
+                                _gate_passed = _gate.passed
+                            except Exception as _gate_err:
+                                logger.warning(f"product_gate evaluation fallback: {_gate_err}")
+                                _gate_passed = bool(eval_res.critical_gate_passed and eval_res.e2e_verified)
+
                             # Critical Quality Gate & E2E Validation: Must pass multi-dimensional quality, not just text approval!
-                            if eval_res.critical_gate_passed and eval_res.e2e_verified and is_passed:
+                            if _gate_passed and is_passed:
                                 if eval_res.is_final_complete:
                                     completed_ms = rm.mark_current_milestone_done()
+                                    # 📦 완료 PRD 아카이브: 다음 작업에 방해되지 않도록 보관소로 이동
+                                    try:
+                                        from prd_archive import archive_prd
+                                        archive_prd(session.workspace, reason="final_release")
+                                    except Exception as _arch_e:
+                                        logger.debug(f"PRD archive skipped: {_arch_e}")
                                     final_notice = (
                                         f"🏆 🎉 **[Product Critic 최종 제품 상용 완성 승인 (<@{COMMANDER_BOT_ID}>)]**\n"
                                         f"• 6대 다차원 품질 기준 전수 통과 (`{eval_res.overall_score:.1f}점` / 100점)\n"

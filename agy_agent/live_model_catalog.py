@@ -72,13 +72,6 @@ ModelPair = Tuple[str, str]  # (model_id, human_label)
 # -----------------------------------------------------------------------------
 # helpers
 # -----------------------------------------------------------------------------
-def _mask(key: Optional[str]) -> str:
-    """Return a safe, loggable representation of an API key."""
-    if not key:
-        return "<none>"
-    return f"...{key[-4:]}" if len(key) > 4 else "<set>"
-
-
 def _read_env_key(*names: str) -> str:
     """
     Read the first non-empty key from the environment, then from `.env`.
@@ -211,15 +204,14 @@ def _order_by_seed(live: List[ModelPair], seed: List[ModelPair]) -> List[ModelPa
 # -----------------------------------------------------------------------------
 def _discover_opencode(seed: List[ModelPair]) -> List[ModelPair]:
     """
-    OpenCode = union of:
-      1. `opencode models` CLI  — the authoritative catalog, includes the
-         free `opencode/*` tier.
-      2. OpenCode Zen Go API    — `opencode-go/*` paid tier.
+    OpenCode = the router's own authoritative catalog: `opencode models` CLI.
 
-    Both are queried and merged. Previously the API result short-circuited
-    the CLI, so the free tier silently disappeared from `!model`.
+    [🎯 라우터 정합성] 이전에는 OpenCode Zen Go API(`/zen/go/v1/models`)를 CLI 와
+    **합집합으로 병합**했다. 그러나 Zen API 는 라우터가 실제로 라우팅하지 않는 모델까지
+    반환한다(실측: API opencode-go 36개 vs 라우터 29개 → 7개 유령 모델이 `!model` 에 노출).
+    라우터가 실제 제공하는 모델만 보여주기 위해 CLI 카탈로그만 authoritative 로 사용한다.
+    CLI 조회가 실패하면 curated seed 로 폴백한다(fail-open).
     """
-    from_cli: List[ModelPair] = []
     binary = _resolve_binary(
         "OPENCODE_PATH",
         [
@@ -229,49 +221,21 @@ def _discover_opencode(seed: List[ModelPair]) -> List[ModelPair]:
             "/usr/bin/opencode",
         ],
     )
-    if binary:
-        out = _run_cli(binary, ["models"])
-        for line in out.splitlines():
-            mid = line.strip()
-            # `opencode models` prints one bare model id per line.
-            if mid and "/" in mid and not mid.lower().startswith(("warning", "error")):
-                from_cli.append((mid, _pretty_model_label(mid, seed)))
-    else:
-        logger.debug("[LiveCatalog] opencode CLI not found; Zen API only")
-
-    from_api: List[ModelPair] = []
-    key = _read_env_key("OPENCODE_API_KEY")
-    if not key:
-        # Fall back to the multi-key store used by telemetry/quota guards.
-        try:
-            from telemetry_status_manager import _get_opencode_go_api_key  # type: ignore
-
-            key = _get_opencode_go_api_key()
-        except Exception as exc:
-            logger.debug(f"[LiveCatalog] opencode key lookup skipped: {exc}")
-    if key:
-        payload = _http_json(
-            "https://opencode.ai/zen/go/v1/models",
-            headers={"Authorization": f"Bearer {key}", "User-Agent": "opencode/agent"},
-        )
-        for item in ((payload or {}).get("data") or []):
-            raw = (item or {}).get("id")
-            if not raw:
-                continue
-            # The Zen API reports bare ids; OpenCode requires provider/model.
-            mid = raw if "/" in raw else f"opencode-go/{raw}"
-            from_api.append((mid, _pretty_model_label(mid, seed)))
-    else:
-        logger.debug(f"[LiveCatalog] no OpenCode key; CLI only (key={_mask(key)})")
-
-    merged = _dedupe_union(from_cli, from_api)
-    if not merged:
-        # fail-open: 어느 소스도 답하지 못하면 curated seed 를 그대로 돌려준다.
-        # (빈 목록을 돌려주면 상위 계층이 'live 조회 실패' 로 오인하고,
-        #  신규/기존 구분 정보까지 잃는다.)
-        logger.debug("[LiveCatalog] opencode: all live sources unavailable; returning seed")
+    if not binary:
+        logger.debug("[LiveCatalog] opencode CLI not found; using seed")
         return list(seed)
-    return _order_by_seed(merged, seed)
+
+    out = _run_cli(binary, ["models"])
+    live: List[ModelPair] = []
+    for line in out.splitlines():
+        mid = line.strip()
+        # `opencode models` prints one bare model id per line.
+        if mid and "/" in mid and not mid.lower().startswith(("warning", "error", "timestamp")):
+            live.append((mid, _pretty_model_label(mid, seed)))
+    if not live:
+        logger.debug("[LiveCatalog] opencode: CLI unavailable; returning seed")
+        return list(seed)
+    return _order_by_seed(live, seed)
 
 
 def _discover_openrouter(seed: List[ModelPair]) -> List[ModelPair]:

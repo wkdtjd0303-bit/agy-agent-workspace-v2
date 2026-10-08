@@ -1,0 +1,30 @@
+{
+  "workspace": "/home/jangsung/Desktop/autocoding/!05_agy_agent/agy_agent",
+  "verdict": "BLOCKED",
+  "ran_tests": false,
+  "round_index": 1,
+  "test_runs": [],
+  "test_run_count": 0,
+  "tests_passed": 0,
+  "tests_failed": 0,
+  "screenshots": [],
+  "screenshot_count": 0,
+  "vision_inspections": [],
+  "vision_inspected_count": 0,
+  "vision_failed_count": 0,
+  "blank_frame_count": 0,
+  "duplicate_frame_count": 0,
+  "defects": [],
+  "blocking_defect_count": 0,
+  "gaps": [],
+  "coverage": {
+    "tests_executed": 0,
+    "screenshots_captured": 0,
+    "screenshots_vision_analyzed": 0,
+    "blocking_defects": 0,
+    "gaps": 0
+  },
+  "summary": "[BLOCKED] 실행 가능한 테스트 명령 없음 · 스크린샷 0장 (전수 비전분석 0장) · 차단 결함 0건 · 개선 갭 0건",
+  "evidence_path": "/home/jangsung/Desktop/autocoding/!05_agy_agent/agy_agent/reports/gate4/autonomous_e2e_report.json",
+  "timestamp": 1791291112.675991
+}

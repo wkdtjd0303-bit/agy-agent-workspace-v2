@@ -116,6 +116,8 @@ class HelpManager:
             f"• 🎨 **Image generator (실제 AI 이미지 생성 도구)** — 구동: `{GlobalModelManager.get_role_model_display('image')}` (`{getattr(config, 'IMAGE_MODEL', 'gemini-3.8-flash-high')}`)\n"
             f"  └ Coder/QA가 `[IMAGE_REQUEST: ...]`(생성) / `[IMAGE_EDIT: ...]`(수정) 또는 `!image` 로 호출하는 이미지 생성·수정 전용 도구 봇\n"
             f"  └ 실제 이미지 백엔드(OpenRouter Nano Banana 계열 Gemini image): {_image_backend_desc()}",
+            f"• 🖼️ **Vision Analyst (첨부 이미지 분석)** — 구동: `{GlobalModelManager.get_role_model_display('vision')}`\n"
+            f"  └ 사용자가 첨부한 이미지·스크린샷의 OCR/레이아웃/스타일을 정밀 분석해 Coder/QA 프롬프트에 주입 (`{config.COMMAND_PREFIX}model vision <모델>` 로 변경)",
         ]
 
         qa_role_lines = [

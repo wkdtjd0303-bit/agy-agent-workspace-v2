@@ -3,10 +3,12 @@
   "observations": 0,
   "marker_emission_rate": null,
   "contract_active": false,
+  "improvement_observed": 0,
+  "improvements": [],
   "warnings": [
     "관측 데이터 없음 — 수렴 계약이 한 번도 실행되지 않음"
   ],
   "milestone": "",
-  "generated_at": "2026-10-01T13:56:31",
+  "generated_at": "2026-10-06T08:20:37",
   "schema": "convergence_telemetry/v1"
 }

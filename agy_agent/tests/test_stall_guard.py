@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-[StallGuard] 채널 오케스트레이션 교착(정지) 감시 & 자동 해제 회귀 테스트
+[StallGuard] 채널 오케스트레이션 정지(무응답/대기열 교착) 감시 회귀 테스트
 
-검증 대상 (실제 장애: 요청 → 80분 무응답 / 상태 타이머 3506초 고정):
+StallGuard 는 관찰·경보 전용이다. 어떤 경우에도 실행 중인 작업을 강제 회수하지 않는다.
+
+검증 대상:
   1. 하트비트(touch) 문맥 — '진짜 진행' 만 하트비트를 갱신하는가
   2. 대기열 정체(queue_nudge) — 작업 없는데 큐만 쌓이면 재가동하는가
   3. 무응답 경보(stall_warn) — 기준 초과 시 1회 발송 후 중복 발송 금지
-  4. 강제 회수(stall_recover) — 프로세스/태스크/busy/락을 한 번에 해제하는가
-  4-1. 심층 작업 관찰(deep_work_notice) — HARD~DEEP 구간에서 살아있는 태스크를 죽이지 않는가
-  4-2. 죽은 추적 프로세스 — 프로세스가 죽었으면 DEEP 유예 없이 HARD 에서 회수하는가
-  5. 좀비 busy(zombie_recover) — busy 인데 태스크가 죽었으면 즉시 회수하는가
-  6. 대기열 락 타임아웃 — 점유 락 강제 교체로 채널 영구 블락 차단 (bot.py)
-  7. 증거 파일(reports/watchdog/stalls.json) 물리 기록
+  4. 강제 회수 제거 — 임계값을 아무리 넘겨도 태스크/busy/락을 회수하지 않는가
+  5. 대기열 락 타임아웃 — 점유 락 강제 교체로 채널 영구 블락 차단 (bot.py)
+  6. 증거 파일(reports/watchdog/stalls.json) 물리 기록
 """
 
 import asyncio
@@ -77,7 +76,6 @@ class TestStallGuardDetection(unittest.TestCase):
             _FakeSessionManager(sessions),
             notify_fn=lambda ch, text: notifications.append((ch, text)),
             dispatch_fn=lambda ch: dispatches.append(ch),
-            lock_registry=kw.pop("lock_registry", {}),
             evidence_path=evidence_path,
             **kw,
         )
@@ -136,15 +134,13 @@ class TestStallGuardDetection(unittest.TestCase):
             self.assertEqual([e["action"] for e in third], ["stall_warn"])
             self.assertEqual(len(notes), 2)
 
-    def test_hard_recovery_releases_task_busy_and_lock(self):
-        """절대 상한(DEEP) 초과 시 태스크 취소 + busy 해제 + 락 교체 + 알림 + 대기열 재가동."""
+    def test_stall_does_not_recover_task_busy_or_lock(self):
+        """[강제 회수 제거] 임계값을 넘겨도 태스크 취소/busy 해제/락 교체/재가동이 없어야 한다."""
         with tempfile.TemporaryDirectory() as tmp:
-            # 살아있는 태스크는 HARD(900)에서 곧바로 죽이지 않고 DEEP 상한에서 회수한다.
             sess, now = _make_session(progress_age=2000.0, busy_age=2000.0)
             lock_registry = {}
             guard, notes, dispatches = self._guard(
-                [sess], tmp, lock_registry=lock_registry,
-                warn_seconds=300, hard_seconds=900, deep_seconds=1800,
+                [sess], tmp, warn_seconds=300, hard_seconds=900, deep_seconds=1800,
             )
 
             async def scenario():
@@ -155,29 +151,29 @@ class TestStallGuardDetection(unittest.TestCase):
                 await old_lock.acquire()  # 점유된 락(누군가 영구 점유한 상태)
 
                 events = guard.scan(now=now)
-                await asyncio.sleep(0)  # 취소/디스패치 스케줄러 진행
                 await asyncio.sleep(0)
-                return events, old_lock, task
+                await asyncio.sleep(0)
+                # asyncio.run 종료 시 루프가 남은 태스크를 취소하므로 여기서 판정한다.
+                return events, old_lock, task.cancelled()
 
-            events, old_lock, task = asyncio.run(scenario())
+            events, old_lock, cancelled = asyncio.run(scenario())
 
-            self.assertEqual([e["action"] for e in events], ["stall_recover"])
-            self.assertTrue(task.cancelled(), "정지된 오케스트레이션 태스크가 취소되어야 한다")
-            self.assertFalse(sess.is_busy, "busy 점유가 해제되어야 한다")
-            self.assertIsNot(
-                lock_registry[sess.channel_id], old_lock, "점유된 채널 대기열 락이 교체되어야 한다"
+            # 2000초 정지는 경보만 남기고 회수하지 않는다.
+            self.assertEqual([e["action"] for e in events], ["stall_warn"])
+            self.assertFalse(cancelled, "태스크를 취소하면 안 된다")
+            self.assertTrue(sess.is_busy, "busy 점유를 유지해야 한다")
+            self.assertIs(
+                lock_registry[sess.channel_id], old_lock, "대기열 락을 교체하면 안 된다"
             )
-            self.assertFalse(lock_registry[sess.channel_id].locked())
-            self.assertEqual(len(notes), 1, "회수 알림이 채널로 전달되어야 한다")
-            self.assertIn("자동 회수", notes[0][1])
-            self.assertEqual(dispatches, [sess.channel_id], "대기열 재가동이 호출되어야 한다")
-            self.assertEqual(sess.status, "error")
+            self.assertEqual(dispatches, [], "회수로 인한 대기열 재가동이 없어야 한다")
+            self.assertEqual(len(notes), 1, "경보 알림은 전달되어야 한다")
+            self.assertIn("강제 회수", notes[0][1])
 
-    def test_live_task_is_observed_not_killed_between_hard_and_deep(self):
-        """[오판 방지] HARD 초과라도 태스크가 살아있으면 DEEP 상한까지 관찰만 한다.
+    def test_live_task_never_force_recovered_even_past_deep(self):
+        """[오판 방지·강제 회수 제거] HARD/DEEP 를 한참 넘겨도 살아있는 태스크를 죽이지 않는다.
 
-        실제 장애: qa1 코드 리뷰(Thinking 모델)가 15분간 stdout 이 조용했지만
-        정상 동작 중이었는데 900초에 강제 회수됐다. 이제는 deep_work_notice 만 발송한다.
+        실제 장애: qa1 코드 리뷰(Thinking 모델)가 15분간 stdout 이 조용했지만 정상 동작 중이었다.
+        이제는 경보만 발송하고 어떤 임계값에서도 회수하지 않는다.
         """
         with tempfile.TemporaryDirectory() as tmp:
             sess, now = _make_session(progress_age=1000.0, busy_age=1000.0)
@@ -190,26 +186,25 @@ class TestStallGuardDetection(unittest.TestCase):
             )
 
             events = guard.scan(now=now)
-            self.assertEqual([e["action"] for e in events], ["deep_work_notice"])
+            self.assertEqual([e["action"] for e in events], ["stall_warn"])
             self.assertFalse(sess.current_task.cancel_called, "살아있는 태스크를 죽이면 안 된다")
             self.assertTrue(sess.is_busy, "busy 점유를 유지해야 한다")
             self.assertEqual(dispatches, [])
             self.assertEqual(len(notes), 1)
-            self.assertIn("보류", notes[0][1])
+            self.assertIn("강제 회수", notes[0][1])
 
-            # 관찰 알림은 중복 발송하지 않는다.
+            # 경보는 중복 발송하지 않는다.
             self.assertEqual(guard.scan(now=now + 10), [])
 
-            # 절대 상한(DEEP)을 넘기면 그때는 회수한다.
-            events_deep = guard.scan(now=now + 900)  # silence = 1900 > 1800
-            self.assertEqual([e["action"] for e in events_deep], ["stall_recover"])
-            self.assertFalse(sess.is_busy)
+            # 절대 상한(DEEP)을 훨씬 넘겨도 회수하지 않는다.
+            events_deep = guard.scan(now=now + 5000)  # silence = 6000 >> 1800
+            self.assertEqual(events_deep, [])
+            self.assertFalse(sess.current_task.cancel_called)
+            self.assertTrue(sess.is_busy)
+            self.assertEqual(dispatches, [])
 
-    def test_dead_tracked_process_loses_deep_grace(self):
-        """추적 프로세스가 이미 죽었으면 DEEP 유예를 주지 않고 HARD 에서 회수한다.
-
-        (살아있거나 추적 불가한 작업에만 심층 관찰 유예를 준다.)
-        """
+    def test_dead_tracked_process_is_not_recovered(self):
+        """추적 프로세스가 이미 죽었어도 강제 회수하지 않는다 (관찰 전용)."""
         class _DeadProc:
             pid = None
             returncode = 0
@@ -231,27 +226,25 @@ class TestStallGuardDetection(unittest.TestCase):
                 return evs
 
             events = asyncio.run(scenario())
-            # 1000초는 DEEP(1800) 미만이지만 프로세스가 죽었으므로 HARD(900) 에서 회수된다.
-            self.assertEqual([e["action"] for e in events], ["stall_recover"])
-            self.assertIn("고아", events[0]["detail"])
-            self.assertFalse(sess.is_busy)
-            self.assertIsNone(sess.current_process)
-            self.assertEqual(dispatches, [sess.channel_id])
+            self.assertEqual([e["action"] for e in events], ["stall_warn"])
+            self.assertTrue(sess.is_busy, "busy 를 해제하면 안 된다")
+            self.assertIsNotNone(sess.current_process, "프로세스 참조를 지우면 안 된다")
+            self.assertEqual(dispatches, [])
 
     def test_deep_threshold_order_is_enforced(self):
-        """경보 < 심층관찰 < 강제회수(절대 상한) 순서가 항상 유지된다."""
+        """경보 < 심층관찰 < 심층상한 순서가 항상 유지된다 (표시 등급)."""
         with tempfile.TemporaryDirectory() as tmp:
             g = StallGuard(_FakeSessionManager([]), evidence_path=os.path.join(tmp, "x.json"),
                            warn_seconds=5000, hard_seconds=10, deep_seconds=5)
             self.assertGreater(g.deep_seconds, g.hard_seconds)
 
-    def test_zombie_busy_recovered_promptly(self):
-        """busy 인데 오케스트레이션 태스크가 없으면(좀비) 즉시 회수한다."""
+    def test_zombie_busy_is_not_recovered(self):
+        """busy 인데 태스크가 없어도(좀비) 강제 회수하지 않는다 (대기열 디스패치가 별도 정리)."""
         with tempfile.TemporaryDirectory() as tmp:
-            sess, now = _make_session(progress_age=60.0, busy_age=60.0)
+            sess, now = _make_session(progress_age=400.0, busy_age=400.0)
             sess.current_task = None
             guard, notes, dispatches = self._guard(
-                [sess], tmp, zombie_seconds=30, warn_seconds=300, hard_seconds=900
+                [sess], tmp, warn_seconds=300, hard_seconds=900
             )
 
             async def scenario():
@@ -260,9 +253,9 @@ class TestStallGuardDetection(unittest.TestCase):
                 return events
 
             events = asyncio.run(scenario())
-            self.assertEqual([e["action"] for e in events], ["zombie_recover"])
-            self.assertFalse(sess.is_busy)
-            self.assertEqual(dispatches, [sess.channel_id])
+            self.assertEqual([e["action"] for e in events], ["stall_warn"])
+            self.assertTrue(sess.is_busy, "좀비 busy 라도 회수하지 않는다")
+            self.assertEqual(dispatches, [])
 
     def test_stale_idle_queue_is_nudged(self):
         """작업이 비어 있는데 큐의 요청만 오래 방치되면 디스패치를 재호동한다."""
@@ -290,12 +283,12 @@ class TestStallGuardDetection(unittest.TestCase):
             self.assertEqual(len(dispatches), 1)
 
     def test_evidence_file_is_written_physically(self):
-        """감지/조치는 디스크 증거 파일로 남는다 (말이 아닌 파일로 증명)."""
+        """감지/경보는 디스크 증거 파일로 남는다 (말이 아닌 파일로 증명)."""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "stalls.json")
             sess, now = _make_session(progress_age=1000.0, busy_age=1000.0)
             sess.current_task = None
-            guard, _, _ = self._guard([sess], tmp, evidence_path=path, zombie_seconds=30)
+            guard, _, _ = self._guard([sess], tmp, evidence_path=path, warn_seconds=300)
 
             async def scenario():
                 events = guard.scan(now=now)
@@ -308,11 +301,11 @@ class TestStallGuardDetection(unittest.TestCase):
                 payload = json.load(fh)
             self.assertEqual(payload["schema"], "stall_guard/v1")
             self.assertGreaterEqual(payload["total_events"], 1)
-            self.assertIn(payload["events"][-1]["action"], ("stall_recover", "zombie_recover"))
+            self.assertEqual(payload["events"][-1]["action"], "stall_warn")
             self.assertEqual(payload["events"][-1]["channel_id"], sess.channel_id)
 
     def test_threshold_order_is_enforced(self):
-        """경보 < 강제회수 순서가 항상 유지되도록 방어한다."""
+        """경보 < 심층관찰 순서가 항상 유지되도록 방어한다."""
         with tempfile.TemporaryDirectory() as tmp:
             g = StallGuard(_FakeSessionManager([]), evidence_path=os.path.join(tmp, "x.json"),
                            warn_seconds=5000, hard_seconds=10)

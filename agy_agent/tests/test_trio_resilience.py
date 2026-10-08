@@ -564,6 +564,26 @@ class TestEarlyTerminationAndMockCompletionDefense(unittest.TestCase):
         self.assertNotIn("Quote/Reference Bar", missing)
         self.assertNotIn("Reaction & Toolbar", missing)
 
+    def test_validate_requirement_coverage_ignores_new_vision_block_header(self):
+        """새 비전 리포트 헤더(`[🔍 정밀 시각 분석 리포트 (engine)]`)도 요구사항 파싱에서 제외한다."""
+        from autonomy_guard import CollaborationIntelligence
+
+        prompt_with_vision = (
+            "로그인 버튼 색상을 바꿔줘\n\n"
+            "[🔍 정밀 시각 분석 리포트 (`openrouter-qwen/qwen3.8-27b:free`)]:\n"
+            "* 계층 구조:\n"
+            "  1. OCR: LOGIN BUTTON\n"
+            "  2. Layout: 상단 헤더 + 하단 CTA"
+        )
+        coder_output = "로그인 버튼 색상을 변경했습니다."
+
+        passed, missing, details = CollaborationIntelligence.validate_requirement_coverage(
+            prompt_with_vision, coder_output
+        )
+        self.assertTrue(passed)
+        self.assertEqual(missing, [])
+        self.assertNotIn("OCR: LOGIN BUTTON", missing)
+
     def test_validate_requirement_coverage_ignores_system_safety_headers(self):
         """Verify that system safety headers (TOOL USAGE RULES, REQ-001) are not treated as user requirements."""
         from autonomy_guard import CollaborationIntelligence

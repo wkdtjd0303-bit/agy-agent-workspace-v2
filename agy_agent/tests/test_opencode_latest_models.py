@@ -49,7 +49,7 @@ class TestOpenCodeLatestModels(unittest.TestCase):
             "opencode-go/space-bunny-free",
             "opencode-go/hy4-preview",
             "opencode-go/muse-spark-1.3-contributor",
-            "opencode-go/omen-alpha",
+            "opencode-go/qwen3.7-plus",
             "opencode-go/deepseek-v4.1-flash",
             "opencode-go/deepseek-v4-pro",
         ]

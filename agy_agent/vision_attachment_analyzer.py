@@ -17,6 +17,7 @@ Key Capabilities:
 import os
 import io
 import json
+import time
 import base64
 import asyncio
 import logging
@@ -35,12 +36,24 @@ except ImportError:
 logger = logging.getLogger("VisionAttachmentAnalyzer")
 
 class VisionAttachmentAnalyzer:
+    # 기본 비전 모델: `!model vision` 에서 사용자가 지정한 모델을 최우선 사용하고,
+    #  미지정 시 이 상수로 폴백한다.
+    #  · 과거 기본값 `qwen/qwen3.8-27b:free` 는 OpenRouter 에서 무료 제공이 종료되어
+    #    HTTP 404("This model is unavailable for free") 로 실패하므로 유효 슬러그로 교체.
+    #  · 비용 없이 돌리려면 `!model vision` 에서 무료(0원) 비전 모델을 지정하거나
+    #    OPENROUTER_VISION_MODEL 환경변수로 override 하면 된다.
     DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-3.8-flash"
     DEFAULT_AGY_VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.8-flash-high")
     DEFAULT_VISION_MODEL = DEFAULT_OPENROUTER_VISION_MODEL
     MAX_IMAGE_DIMENSION = 1600  # Max dimension for vision processing
     MAX_PDF_PAGES = 20
     MAX_PDF_TEXT_BYTES = 30000
+    # 실제 비전 모델 호출 신뢰성 설정 (일시적 blip 시 조용히 폴백하지 않도록 재시도)
+    VISION_TIMEOUT_SEC = 25.0
+    VISION_MAX_ATTEMPTS = 3
+    VISION_RETRY_BACKOFF_SEC = 1.5
+    # 무료(0원) 비전 모델은 순간 레이트리밋(HTTP 429)이 잦아 더 길게 대기한다.
+    VISION_RATE_LIMIT_BACKOFF_SEC = 5.0
 
     @classmethod
     def _get_openrouter_key(cls) -> str:
@@ -49,6 +62,26 @@ class VisionAttachmentAnalyzer:
             if raw.startswith(prefix):
                 raw = raw[len(prefix):]
         return raw.strip('"\'; ')
+
+    @classmethod
+    def _get_configured_vision_model(cls) -> str:
+        """`!model` 에서 사용자가 지정한 'vision' 역할 모델을 읽는다 (없으면 빈 문자열)."""
+        try:
+            from model_manager import GlobalModelManager
+            return (GlobalModelManager.get_role_model("vision") or "").strip()
+        except Exception as e:
+            logger.debug(f"vision role model lookup skipped: {e}")
+            return ""
+
+    @classmethod
+    def _get_openrouter_vision_model(cls) -> str:
+        """비전 모델 해석 우선순위: `!model vision` 역할 → 환경변수 → 내장 기본값."""
+        configured = cls._get_configured_vision_model()
+        if configured:
+            return configured
+        return (
+            os.getenv("OPENROUTER_VISION_MODEL") or cls.DEFAULT_OPENROUTER_VISION_MODEL
+        ).strip() or cls.DEFAULT_OPENROUTER_VISION_MODEL
 
     @classmethod
     def _prepare_image_base64(cls, image_path: str) -> Tuple[str, str, int, int]:
@@ -183,20 +216,24 @@ class VisionAttachmentAnalyzer:
                 "6. 💡 **프론트엔드/엔지니어링 구현 가이드**: Coder가 실제 소스코드로 구현할 때 반드시 준수해야 할 핵심 지침"
             )
 
-        # 1. Primary engine: OpenRouter Google Gemini 3.8 Flash
+        # 1. Primary engine: OpenRouter (기본: 무료·ZDR qwen 비전 모델)
         api_key = cls._get_openrouter_key()
+        openrouter_error: Dict[str, str] = {}
         if api_key:
             analysis_text = await asyncio.to_thread(
                 cls._call_openrouter_vision,
                 b64_str,
                 mime_type,
                 vision_system_prompt,
-                api_key
+                api_key,
+                openrouter_error
             )
             if analysis_text:
                 return {
                     "success": True,
-                    "engine": "openrouter-gemini-3.8-flash",
+                    "engine": f"openrouter-{cls._get_openrouter_vision_model()}",
+                    "vision_verified": True,
+                    "degraded": False,
                     "filename": filename,
                     "width": orig_w,
                     "height": orig_h,
@@ -216,24 +253,37 @@ class VisionAttachmentAnalyzer:
                 return {
                     "success": True,
                     "engine": "direct-google-genai",
+                    "vision_verified": True,
+                    "degraded": False,
                     "filename": filename,
                     "width": orig_w,
                     "height": orig_h,
                     "analysis": analysis_text
                 }
 
-        # 3. Heuristic fallback
+        # 3. Heuristic fallback (실제 비전 모델 호출 실패 → 메타데이터만 제공됨을 정직하게 고지)
+        if not api_key and not gemini_key:
+            degraded_reason = "비전 API 키 미설정 (OPENROUTER_API_KEY / GEMINI_API_KEY 부재)"
+        elif openrouter_error.get("error"):
+            # 어떤 오류로 실패했는지(예: HTTP 402 크레딧 부족)를 그대로 노출해 원인 파악을 돕는다.
+            degraded_reason = f"비전 API 오류: {openrouter_error['error']} → 메타데이터 폴백"
+        else:
+            degraded_reason = "비전 모델 호출 실패 (재시도 소진) → 메타데이터 폴백"
         return {
             "success": True,
             "engine": "local-heuristic",
+            "vision_verified": False,
+            "degraded": True,
+            "degraded_reason": degraded_reason,
             "filename": filename,
             "width": orig_w,
             "height": orig_h,
             "analysis": (
-                f"🖼️ **[이미지 기본 메타데이터]**\n"
+                f"🖼️ **[이미지 기본 메타데이터 — 정밀 비전 분석 미수행]**\n"
                 f"- 파일명: `{filename}`\n"
                 f"- 해상도: {orig_w}x{orig_h} px\n"
-                f"- 안내: OpenRouter 또는 Gemini API 키 미설정으로 인해 정밀 비전 분석 대신 원본 파일 경로(`{image_path}`)가 에이전트에 전달되었습니다. 에이전트의 `view_file` 도구를 통해 직접 확인할 수 있습니다."
+                f"- 사유: {degraded_reason}\n"
+                f"- 안내: 원본 파일 경로(`{image_path}`)가 에이전트에 전달되었습니다. 에이전트의 `view_file` 도구를 통해 직접 확인할 수 있습니다."
             )
         }
 
@@ -243,12 +293,19 @@ class VisionAttachmentAnalyzer:
         b64_str: str,
         mime_type: str,
         prompt: str,
-        api_key: str
+        api_key: str,
+        error_sink: Optional[Dict[str, str]] = None
     ) -> Optional[str]:
-        """Synchronous worker for OpenRouter vision completion."""
+        """Synchronous worker for OpenRouter vision completion.
+
+        ``error_sink`` 가 주어지면 실패 원인(HTTP 상태 + API 메시지)을 ``error_sink["error"]`` 에
+        기록한다. 그렇지 않으면 호출부가 "재시도 소진"이라는 뭉뚱그린 사유만 보게 되어,
+        크레딧 부족(402) 같은 실제 원인을 파악할 수 없다.
+        """
         url = "https://openrouter.ai/api/v1/chat/completions"
+        model = cls._get_openrouter_vision_model()
         payload = {
-            "model": cls.DEFAULT_VISION_MODEL,
+            "model": model,
             "messages": [
                 {
                     "role": "user",
@@ -263,8 +320,11 @@ class VisionAttachmentAnalyzer:
                     ]
                 }
             ],
-            "max_tokens": 1500,
-            "temperature": 0.2
+            "max_tokens": 2000,
+            "temperature": 0.2,
+            # 무료 추론형 모델(qwen 등)의 추론 토큰이 출력 예산을 잠식해 content=None 이 되는 것을
+            # 막고 응답 지연을 줄인다. 미지원 제공자는 이 필드를 무시한다.
+            "reasoning": {"enabled": False}
         }
 
         req = urllib.request.Request(
@@ -278,16 +338,57 @@ class VisionAttachmentAnalyzer:
             }
         )
 
-        try:
-            with urllib.request.urlopen(req, timeout=25) as res:
-                if res.status == 200:
-                    data = json.loads(res.read().decode("utf-8"))
-                    choices = data.get("choices", [])
-                    if choices:
-                        return choices[0].get("message", {}).get("content", "").strip()
-        except Exception as e:
-            logger.warning(f"OpenRouter vision call failed: {e}")
+        attempts = max(1, int(cls.VISION_MAX_ATTEMPTS))
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=cls.VISION_TIMEOUT_SEC) as res:
+                    if res.status == 200:
+                        data = json.loads(res.read().decode("utf-8"))
+                        choices = data.get("choices", [])
+                        if choices:
+                            # 추론형 모델은 추론 토큰이 예산을 다 쓰면 content 가 None 일 수 있다.
+                            message = choices[0].get("message") or {}
+                            content = (message.get("content") or "").strip()
+                            if content:
+                                return content
+                            last_error = "빈 응답(empty content)"
+                    else:
+                        last_error = f"HTTP {res.status}: {cls._extract_api_error(res.read())}"
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read()
+                except Exception:
+                    body = b""
+                last_error = f"HTTP {e.code}: {cls._extract_api_error(body)}"
+            except Exception as e:
+                last_error = str(e)
+            if attempt < attempts:
+                logger.warning(
+                    f"OpenRouter vision call attempt {attempt}/{attempts} failed ({last_error}); retrying..."
+                )
+                delay = cls.VISION_RETRY_BACKOFF_SEC * attempt
+                if "429" in last_error:
+                    delay = cls.VISION_RATE_LIMIT_BACKOFF_SEC * attempt
+                time.sleep(delay)
+        logger.warning(f"OpenRouter vision call failed after {attempts} attempts: {last_error}")
+        if error_sink is not None:
+            error_sink["error"] = last_error
         return None
+
+    @staticmethod
+    def _extract_api_error(body: bytes) -> str:
+        """OpenRouter 오류 응답 본문에서 사람이 읽을 메시지를 뽑아낸다."""
+        text = (body or b"").decode("utf-8", errors="replace").strip()
+        try:
+            err = json.loads(text).get("error", {})
+            if isinstance(err, dict) and err.get("message"):
+                text = str(err["message"])
+            elif isinstance(err, str):
+                text = err
+        except Exception:
+            pass
+        return " ".join(text.split())[:240] or "(본문 없음)"
 
     @classmethod
     def _call_direct_gemini_vision(

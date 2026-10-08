@@ -121,11 +121,15 @@ class TestLiveModelCatalogProviders(unittest.TestCase):
         lmc.LiveModelCatalog._cache.clear()
         lmc.LiveModelCatalog._refreshing.clear()
 
-    def test_opencode_unions_cli_and_api(self):
-        """핵심 버그 회귀: Zen API 가 CLI 결과를 가려 free 티어가 사라졌었다."""
+    def test_opencode_uses_router_cli_only(self):
+        """[🎯 라우터 정합성] 라우터 CLI(`opencode models`)만이 authoritative.
+
+        Zen Go API 는 라우터가 실제로 라우팅하지 않는 모델까지 반환하므로 무시한다.
+        (실측: API 36개 vs 라우터 29개 → 7개 유령 모델이 `!model` 에 노출되던 버그)
+        """
         seed = [("opencode-go/known", "Known")]
         cli_out = "opencode/space-bunny-free\nopencode/big-pickle\n"
-        api_payload = {"data": [{"id": "known"}, {"id": "brand-new"}, {"id": "openrouter/leak"}]}
+        api_payload = {"data": [{"id": "known"}, {"id": "ghost-only-in-api"}]}
 
         with mock.patch.object(lmc, "_run_cli", return_value=cli_out), \
              mock.patch.object(lmc, "_http_json", return_value=api_payload), \
@@ -133,13 +137,12 @@ class TestLiveModelCatalogProviders(unittest.TestCase):
              mock.patch.object(lmc, "_read_env_key", return_value="secret-key"):
             out = [m for m, _ in lmc._discover_opencode(seed)]
 
-        # CLI 의 free 티어가 살아있고, API 신규분까지 합집합으로 들어온다.
+        # CLI 의 free 티어가 그대로 살아있고,
         self.assertIn("opencode/space-bunny-free", out)
         self.assertIn("opencode/big-pickle", out)
-        self.assertIn("opencode-go/brand-new", out)
-        self.assertIn("opencode-go/known", out)
-        # curated 순서가 앞, 신규는 뒤로 간다.
-        self.assertEqual(out[0], "opencode-go/known")
+        # 라우터(CLI)에 없는 seed 전용/Zen API 전용 모델은 포함되지 않는다.
+        self.assertNotIn("opencode-go/known", out)
+        self.assertNotIn("opencode-go/ghost-only-in-api", out)
 
     def test_opencode_survives_total_source_failure(self):
         with mock.patch.object(lmc, "_run_cli", return_value=""), \

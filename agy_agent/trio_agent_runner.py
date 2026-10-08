@@ -35,6 +35,11 @@ from convergence_policy import (
     ConvergenceTelemetry,
     ConvergenceTracker,
     build_blocking_contract_instruction,
+    build_improvement_discovery_instruction,
+    evaluate_improvement_gate,
+    format_improvement_directive,
+    parse_improvement_count,
+    parse_improvement_severities,
     resolve_blocking_count,
 )
 from discord_screenshot_gallery import (
@@ -407,6 +412,26 @@ def detect_codebase_anchor(workspace: str) -> str:
     return "\n".join(anchor_lines) + "\n\n"
 
 
+# [🧷 서브에이전트 조기 종료 방어] Coder가 서브에이전트/백그라운드 작업을 끝내지 않고
+# 진행 나레이션만 남긴 채 턴을 종료했을 때, 완결까지 대기시키는 재지시 상한. (0이면 비활성)
+SUBAGENT_WAIT_MAX_ROUNDS_ENV = "SUBAGENT_WAIT_MAX_ROUNDS"
+SUBAGENT_WAIT_MAX_ROUNDS_DEFAULT = 2
+
+
+def subagent_wait_max_rounds() -> int:
+    """서브에이전트 완료 대기 재지시 최대 횟수 (환경변수, 기본 2)."""
+    try:
+        raw = os.environ.get(SUBAGENT_WAIT_MAX_ROUNDS_ENV)
+    except Exception:
+        return SUBAGENT_WAIT_MAX_ROUNDS_DEFAULT
+    if raw is None or str(raw).strip() == "":
+        return SUBAGENT_WAIT_MAX_ROUNDS_DEFAULT
+    try:
+        return max(0, int(str(raw).strip()))
+    except Exception:
+        return SUBAGENT_WAIT_MAX_ROUNDS_DEFAULT
+
+
 class TrioAgentRunner:
     resolve_qa_model = QuotaManager.resolve_qa_model
 
@@ -753,6 +778,60 @@ class TrioAgentRunner:
         """[역할 권한 SSOT 위임] QA 가 판정 태그 없이 Coder 처럼 개발 완료를 선언했는지 탐지한다."""
         return role_authority.detect_qa_role_inversion(output)
 
+    # [🧷 서브에이전트 조기 종료 방어] Coder가 서브에이전트/백그라운드 작업 도중
+    # 진행 나레이션만 남기고 턴을 끝냈음을 탐지하는 패턴군.
+    #  - STRONG: 단독으로 '아직 무언가 실행 중/대기 중'을 뜻하는 표현 (예: "while the suite runs")
+    #  - SUBJECT + WEAK: 위임/백그라운드 주체 + 진행 표지 조합 (예: "조사 에이전트가 도는 중")
+    _PENDING_STRONG_PATTERNS = (
+        r"while\b.{0,50}\bruns?\b",
+        r"as\b.{0,50}\bruns?\b",
+        r"도는\s*(동안|중)",
+        r"돌고\s*있",
+        r"결과가\s*도착하면",
+        r"완료를\s*기다",
+        r"완료될\s*때까지",
+        r"waiting\s+for\b",
+        r"still\s+running",
+    )
+    _PENDING_SUBJECT_PATTERNS = (
+        r"서브\s*에이전트", r"sub-?\s*agents?", r"조사\s*에이전트", r"리서치\s*에이전트",
+        r"research\s+agents?", r"explorer\s+agents?", r"worker\s+agents?",
+        r"백그라운드", r"in\s+the\s+background", r"background\s+(task|agent|job|work|worker)s?",
+        r"병렬", r"in\s+parallel",
+    )
+    _PENDING_WEAK_MARKERS = (
+        r"실행\s*중", r"진행\s*중", r"작업\s*중", r"대기\s*중",
+        r"기다리고\s*있", r"기다리는\s*중", r"띄우", r"투입하겠", r"위임하겠", r"위임했",
+        r"delegat", r"will\s+wait", r"let\s+me\s+wait",
+    )
+    # 이미 최종 완결을 명시한 보고는 '대기 중'으로 오탐하지 않는다.
+    _PENDING_COMPLETION_SUPPRESSORS = (
+        "최종 완료", "모두 완료", "모든 작업을 완료", "작업을 완료했습니다",
+        "all tasks complete", "all done", "finally completed",
+    )
+
+    @classmethod
+    def detect_pending_subagent_work(cls, output: str) -> bool:
+        """Coder가 서브에이전트/비동기 작업을 완료하지 않은 채 턴을 종료했는지 판정한다.
+
+        실측 위반 예:
+          - "조사 에이전트가 도는 동안 산출물 형식을 정하기 위해 ..."
+          - "이제 백그라운드에서 두 건이 도는 중입니다"
+          - "병렬로 조사 에이전트를 띄우겠습니다"
+          - "While the suite runs, let me double-check ..."
+        이런 진행 나레이션이 최종 보고로 게시되면 실제 산출물이 유실되므로,
+        완료까지 대기 후 최종 통합을 재지시하는 대상으로 삼는다.
+        """
+        if not output or not isinstance(output, str):
+            return False
+        text = output.lower()
+        if any(done in text for done in cls._PENDING_COMPLETION_SUPPRESSORS):
+            return False
+        if any(re.search(p, text) for p in cls._PENDING_STRONG_PATTERNS):
+            return True
+        has_subject = any(re.search(p, text) for p in cls._PENDING_SUBJECT_PATTERNS)
+        return has_subject and any(re.search(p, text) for p in cls._PENDING_WEAK_MARKERS)
+
     @staticmethod
     def strip_coder_verdict_tags(text: str) -> Tuple[str, List[str]]:
         """[역할 권한 SSOT 위임] Coder 출력에서 QA/Auditor 판정 태그를 물리 제거한다."""
@@ -997,6 +1076,11 @@ class TrioAgentRunner:
                 ConvergenceTracker.reset(channel_id)
         except Exception as _conv_reset_err:
             logger.debug(f"Convergence tracker reset skipped: {_conv_reset_err}")
+        # 🚦 개선점 severity 최신값 초기화(제품 게이트에 전달되는 감점 신호).
+        try:
+            session._latest_improvement_severities = None
+        except Exception:
+            pass
 
         # Multi-QA pipeline activation is strictly constrained to !mode 2+ (pair_quad) / !mode 3+ (mode3_plus).
         # Standard !mode 1, !mode 2 (pair), !mode 3 (mode3) remain pure Coder-QA1-Auditor 3-role pipelines.
@@ -1168,6 +1252,20 @@ class TrioAgentRunner:
             def _vcl_max_rounds() -> int:
                 return 2
 
+        # 🔬 Autonomous E2E Loop 핸들 (!mode 2/2+/3/3+ 협업 전용 · 실패 시 파이프라인은 기존과 동일하게 동작)
+        #    Coder 턴 종료 직후 실제 테스트 실행 + 스크린샷 실측 + 결함 환류 폐루프.
+        try:
+            from autonomous_e2e_loop import (
+                AutonomousE2ELoop as _AEL,
+                autonomous_e2e_max_rounds as _ael_max_rounds,
+            )
+        except Exception as _ael_import_err:
+            logger.debug(f"Autonomous E2E Loop unavailable: {_ael_import_err}")
+            _AEL = None
+
+            def _ael_max_rounds() -> int:
+                return 0
+
         try:
             import sys, importlib
             if "autonomy_guard" in sys.modules and os.environ.get("UNITTEST_RUNNING") != "1":
@@ -1207,6 +1305,10 @@ class TrioAgentRunner:
             visual_craft_block_count = 0
             visual_craft_escalated = False
             visual_craft_audit_count = 0
+            # 🔬 Autonomous E2E Loop (협업 모드 실 테스트 실행 + 결함 환류) 상태
+            autonomous_e2e_block_count = 0
+            autonomous_e2e_escalated = False
+            autonomous_e2e_audit_count = 0
             # 라운드 상한 도달 시 곧바로 종료하지 않고 예/아니요로 계속 여부를 확인한다.
             async for round_num, max_rounds in continual_round_sequence(
                 1, max_rounds, channel=main_channel, batch_size=PAIR_MAX_ROUNDS
@@ -1216,6 +1318,8 @@ class TrioAgentRunner:
                 visual_craft_report = None
                 visual_craft_block = ""
                 visual_craft_domain = ""
+                autonomous_e2e_report = None
+                autonomous_e2e_block = ""
                 # 🖼️ 시각 증거 갤러리 후보: QA1 스킵 경로(전역 비활성/선행 라운드 승인)에서도
                 # 최종 승인 시 미공유 스크린샷 전송 보증 로직이 참조할 수 있도록 라운드 스코프에서 초기화한다.
                 _gallery_candidates: List[str] = []
@@ -1510,31 +1614,52 @@ class TrioAgentRunner:
                             "• 조치: 세션 컨텍스트를 초기화(`!new`)하거나 명령어를 다시 전송해 주십시오."
                         )
 
-                # Guard against Coder prematurely exiting while subagents are still working
-                subagent_delegated = any(kw in latest_coder_output for kw in [
-                    "서브에이전트", "서브 에이전트", "subagent", "sub-agent", "서브에이전트에게",
-                    "위임했습니다", "백그라운드에서 실행", "작업을 지시했습니다"
-                ])
-                if subagent_delegated:
+                # 🧷 [서브에이전트/비동기 작업 조기 종료 방어]
+                # Coder가 "조사 에이전트가 도는 동안 ...", "이제 백그라운드에서 두 건이 도는 중입니다",
+                # "While the suite runs, let me double-check ..." 처럼 진행 나레이션만 남기고 실제
+                # 산출물 통합 없이 턴을 끝내면, 그 나레이션이 최종 보고로 게시되어 작업이 조기 종료된다.
+                # 이런 경우 완결까지 대기·통합을 재지시하고, 해소될 때까지 상한 내에서 반복한다.
+                subagent_wait_round = 0
+                subagent_wait_max = subagent_wait_max_rounds()
+                while (
+                    subagent_wait_round < subagent_wait_max
+                    and cls.detect_pending_subagent_work(latest_coder_output)
+                ):
+                    subagent_wait_round += 1
                     diff_check = EvidenceValidator.inspect_production_diff(session.workspace or "")
-                    if diff_check.get("diff_lines", 0) == 0:
-                        logger.info("TrioAgentRunner: Coder mentioned subagent delegation with 0 diff lines. Waiting and polling Coder for final resolution...")
-                        await safe_send_discord_message(
-                            main_channel,
-                            "⏳ **[서브에이전트 작업 완료 대기]** Coder가 서브에이전트에 위임한 작업의 실제 코드 반영을 기다리고 있습니다..."
+                    logger.info(
+                        "TrioAgentRunner: Coder ended with pending subagent/async work "
+                        f"(wait {subagent_wait_round}/{subagent_wait_max}, "
+                        f"prod_diff_lines={diff_check.get('prod_diff_lines', 0)}). "
+                        "Re-driving Coder to await completion and integrate."
+                    )
+                    await safe_send_discord_message(
+                        main_channel,
+                        f"⏳ **[서브에이전트/비동기 작업 완료 대기 {subagent_wait_round}/{subagent_wait_max}]** "
+                        "Coder가 위임/백그라운드 작업을 끝내지 않은 채 턴을 종료했습니다. "
+                        "실제 완료까지 대기한 뒤 최종 통합을 재지시합니다..."
+                    )
+                    subagent_retry_prompt = (
+                        "⚠️ **[서브에이전트/비동기 작업 완료 대기 및 최종 통합 의무]**\n"
+                        "직전 응답은 서브에이전트/백그라운드 작업이 아직 진행 중인 상태에서 종료되었습니다. "
+                        "이대로 턴을 끝내면 실제 산출물이 유실되므로 다음을 반드시 이행하십시오.\n"
+                        "1. 진행 중인 모든 서브에이전트/백그라운드 작업이 **완전히 끝날 때까지 대기**하십시오.\n"
+                        "2. 그 결과가 소스코드 파일에 실제로 반영되었는지 확인하고, 미반영분은 직접 구현하십시오.\n"
+                        "3. '진행 중' 나레이션만 남기지 말고, 완료된 변경 사항(diff/요약)과 최종 결과만 보고하십시오."
+                    )
+                    async with main_channel.typing():
+                        latest_coder_output = await cls.run_coder_turn(
+                            session=session,
+                            prompt=subagent_retry_prompt,
+                            on_tool_update=on_coder_tool
                         )
-                        subagent_retry_prompt = (
-                            "⚠️ **[서브에이전트 완료 대기 및 최종 통합 의무]**\n"
-                            "서브에이전트에게 작업을 지시했으나 아직 워크스페이스에 실제 코드 변경(Diff)이 발생하지 않았습니다.\n"
-                            "서브에이전트의 작업이 완전히 끝나고 코드가 실제 파일에 저장될 때까지 대기한 후, "
-                            "최종 코드 상태를 확인하고 완성된 결과와 변경 사항을 요약하여 보고하십시오."
-                        )
-                        async with main_channel.typing():
-                            latest_coder_output = await cls.run_coder_turn(
-                                session=session,
-                                prompt=subagent_retry_prompt,
-                                on_tool_update=on_coder_tool
-                            )
+                        if channel_id:
+                            AutonomySafetyLayer.record_llm_call(channel_id)
+                if subagent_wait_round >= subagent_wait_max and cls.detect_pending_subagent_work(latest_coder_output):
+                    logger.warning(
+                        "TrioAgentRunner: Coder still signals pending subagent/async work after "
+                        f"{subagent_wait_max} wait rounds. Proceeding (QA will judge completeness)."
+                    )
 
                 # 🎨 [Image generator Tool] Coder가 이미지 생성을 요청한 경우 즉시 도구 호출
                 try:
@@ -2092,6 +2217,42 @@ class TrioAgentRunner:
                         logger.debug(f"Visual Asset Gate check notice: {_vag_err}")
 
                     # ---------------------------------------------------------
+                    # 🔬 Autonomous E2E Verification Loop (협업 모드 실 테스트 실행 + 결함 환류)
+                    # Coder 턴 종료 직후 프로젝트의 실제 테스트 명령을 자동 탐지·실행하고, 실 화면
+                    # 스크린샷을 실측한 뒤, 테스트 실패/런타임 에러/시각 증거 결손을 QA·Coder에 환류한다.
+                    # ---------------------------------------------------------
+                    autonomous_e2e_block = ""
+                    autonomous_e2e_report = None
+                    if (
+                        _AEL is not None
+                        and mode_registry.is_multi_agent_mode(getattr(session, "mode", ""))
+                        and not is_non_coding
+                        and autonomous_e2e_audit_count < (_ael_max_rounds() + 3)
+                    ):
+                        try:
+                            autonomous_e2e_audit_count += 1
+                            autonomous_e2e_report = await asyncio.to_thread(
+                                _AEL.run,
+                                effective_ws,
+                                round_num,
+                                _round_start_ts,
+                                diff_info.get("changed_files", []),
+                            )
+                            autonomous_e2e_block = _AEL.format_prompt_block(autonomous_e2e_report)
+                            if _AEL.has_blocking_defects(autonomous_e2e_report):
+                                logger.warning(
+                                    f"TrioAgentRunner: Autonomous E2E FAIL (round {round_num}) — "
+                                    f"blocking={len(autonomous_e2e_report.blocking_defects())}, "
+                                    f"summary={autonomous_e2e_report.summary}"
+                                )
+                                await send_transit_notice(
+                                    f"🔬 **[자율 E2E 검증]** 실 테스트/스크린샷 실측에서 차단 결함 "
+                                    f"{len(autonomous_e2e_report.blocking_defects())}건 적발 — QA/Coder 환류"
+                                )
+                        except Exception as _ael_err:
+                            logger.debug(f"Autonomous E2E loop skipped: {_ael_err}")
+
+                    # ---------------------------------------------------------
                     # 🖼️ 시각 증거 스크린샷 디스코드 공유
                     # VCL/비전 검사/E2E 테스트가 사용한 실제 렌더링 화면을 사용자도 직접 볼 수 있게 이미지로 전송한다.
                     # (무결성 검증 통과분만, 사용자 레퍼런스 이미지 제외, 라운드 간 중복 전송 방지)
@@ -2220,6 +2381,7 @@ class TrioAgentRunner:
                         f"**[💼 전문 역할(전공) 집중 검증 영역]**:\n"
                         f"{qa1_persona_focus}\n\n"
                         f"{build_blocking_contract_instruction()}\n\n"
+                        f"{build_improvement_discovery_instruction()}\n\n"
                         f"**[🎯 현실적 판정 원칙]**:\n"
                         f"1. **사용자 체감 우선**: 빌드 성공 여부, 핵심 기능 동작, 명백한 UI 결함(클릭 안 되는 버튼, 화면 잘림, 앱 크래시)을 최우선 검증하십시오.\n"
                         f"2. **정직성 우선**: 계측/테스트를 실행할 수 없으면 `BLOCKED`로 정직하게 기록하십시오. 확인하지 않은 것을 통과로 쓰지 마십시오.\n"
@@ -2234,6 +2396,7 @@ class TrioAgentRunner:
                         + qc_prompt_block
                         + qa_vision_block
                         + visual_craft_block
+                        + autonomous_e2e_block
                         + qa_craft_reference_block
                         + visual_asset_gate_block
                         + f"{diff_summary_text}\n"
@@ -2253,7 +2416,8 @@ class TrioAgentRunner:
                         f"1. **REJECTED**: 위 차단 결함이 1개 이상일 때만 선언하십시오. 첫 줄 `[STATUS: REJECTED]`, 둘째 줄 `[BLOCKING_DEFECTS: N]`(사용자 체감 차단 결함 개수), 이어서 파일/라인 근거와 즉시 구현 가능한 수정 스펙을 작성하십시오.\n"
                         f"2. **QA Direct Patch**: 직접 수정했다면 첫 줄 `[STATUS: APPROVED (QA Direct Patch)]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하십시오.\n"
                         f"3. **APPROVED**: 차단 결함이 0건이면 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 충분히 구체적으로 작성하십시오. 비차단 항목은 [차기 백로그]로만 기록하십시오.\n"
-                        f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`을 표기하십시오."
+                        f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`을 표기하십시오.\n"
+                        f"5. **[개선점 탐색 계약 준수]**: 판정과 무관하게 `**[개선점 탐색]**` 섹션(최소 3개)과 셋째 줄 `[IMPROVEMENTS: N]` 마커를 반드시 표기하십시오. 개선점 0개로 넘기려면 반증 근거를 제시하십시오."
                     )
 
                     try:
@@ -2289,6 +2453,32 @@ class TrioAgentRunner:
                         rerun=(lambda _p, _m=effective_qa_model: cls.run_qa_turn(
                             session=session, prompt=_p, model=_m)),
                     )
+
+                    # 🔍 개선점 탐색 계약 계측: QA가 [IMPROVEMENTS: N]을 실제로 방출하는지 물리 기록.
+                    #    severity(P0~P3) 라벨도 함께 집계하여 게이트 연결/감사 근거로 남긴다.
+                    _imp_severities = None
+                    try:
+                        _imp_count = parse_improvement_count(latest_qa_output)
+                        _imp_severities = parse_improvement_severities(latest_qa_output)
+                        if _imp_count is not None:
+                            ConvergenceTelemetry.record_improvements(
+                                channel_id or 0, _imp_count, _imp_severities
+                            )
+                    except Exception as _imp_err:
+                        logger.debug(f"Improvement discovery telemetry skipped: {_imp_err}")
+
+                    # 🚦 개선점 severity → 품질 게이트 신호.
+                    #    P0/P1 이 남아 있으면 90점 이상이어도 제품 PASS 금지(자동 환류).
+                    _imp_gate = None
+                    try:
+                        _imp_gate = evaluate_improvement_gate(latest_qa_output)
+                        _imp_directive = format_improvement_directive(latest_qa_output, _imp_gate)
+                        # 제품 90점 게이트(auto_pilot)가 P2/P3 감점을 반영할 수 있도록
+                        # severity 분포를 세션에 보존한다.
+                        session._latest_improvement_severities = _imp_gate.severities
+                    except Exception as _imp_gate_err:
+                        logger.debug(f"Improvement gate skipped: {_imp_gate_err}")
+                        _imp_gate, _imp_directive = None, ""
 
                     # Post QA review message to log target channel with safe attachments
                     qa_chunks, qa_file_attachments = await async_prepare_message_payload(
@@ -2466,6 +2656,47 @@ class TrioAgentRunner:
                     except Exception as _vc_gate_err:
                         logger.debug(f"Visual craft enforcement gate skipped: {_vc_gate_err}")
 
+                # 🔬 Autonomous E2E Enforcement Gate (협업 모드 실 테스트/스크린샷 결함 기계적 반려)
+                # QA가 기능만 보고 승인하더라도, 실제 테스트 실패/런타임 에러/실 화면 증거 결손이
+                # 남아 있으면 기계적으로 반려하여 Coder의 실질 수정을 강제한다. (상한 도달 시 에스컬레이션)
+                if qa_approved and autonomous_e2e_report is not None and _AEL is not None:
+                    try:
+                        if _AEL.has_blocking_defects(autonomous_e2e_report):
+                            if autonomous_e2e_block_count < _ael_max_rounds():
+                                autonomous_e2e_block_count += 1
+                                logger.warning(
+                                    f"TrioAgentRunner: QA approved but Autonomous E2E found blocking defects "
+                                    f"[{autonomous_e2e_block_count}/{_ael_max_rounds()}]. Overriding to REJECTED."
+                                )
+                                qa_approved = False
+                                guardian_overridden = True
+                                latest_qa_output = role_authority.format_system_gate_override(
+                                    approved=False,
+                                    title="🔬 **[시스템 게이트 자동 반려 — 자율 E2E 검증 결함 적발]**",
+                                    blocking_defects=len(autonomous_e2e_report.blocking_defects()) or 1,
+                                    detail=(
+                                        "기능 리뷰는 통과했으나, 자율 E2E가 프로젝트의 실제 테스트를 실행하고 "
+                                        "스크린샷을 실측한 결과 차단 결함이 적발되었습니다. "
+                                        "단순 주석/문구가 아니라 실제 프로덕션 코드/런타임을 수정하십시오.\n\n"
+                                        f"{_AEL.build_fix_directive(autonomous_e2e_report)}"
+                                    ),
+                                    original=latest_qa_output,
+                                )
+                                await post_verdict_message(latest_qa_output)
+                            elif not autonomous_e2e_escalated:
+                                autonomous_e2e_escalated = True
+                                logger.warning(
+                                    f"TrioAgentRunner: Autonomous E2E max rounds reached "
+                                    f"({_ael_max_rounds()}). Escalating to Auditor without further auto-fix."
+                                )
+                                await send_transit_notice(
+                                    f"⚠️ **[자율 E2E 상한 도달]** 결함 자동 환류 {_ael_max_rounds()}회 초과 — "
+                                    f"무한 핑퐁 방지를 위해 Auditor/인간 에스컬레이션으로 전환합니다. "
+                                    f"({autonomous_e2e_report.summary})"
+                                )
+                    except Exception as _ael_gate_err:
+                        logger.debug(f"Autonomous E2E enforcement gate skipped: {_ael_gate_err}")
+
                 if qa_approved and not is_anti_mock_clean:
                     logger.warning(f"TrioAgentRunner: QA passed verbally but anti-mocking violations exist: {anti_mock_violations}. Overriding to REJECTED.")
                     qa_approved = False
@@ -2485,6 +2716,32 @@ class TrioAgentRunner:
                     await post_verdict_message(latest_qa_output)
                 elif qa_approved and not any(tag in latest_qa_output for tag in ["[STATUS: APPROVED]", "STATUS: APPROVED"]):
                     latest_qa_output = f"[STATUS: APPROVED]\n{latest_qa_output}"
+
+                # 🚦 개선점 severity 게이트: QA가 승인(APPROVED)했더라도 P0/P1 개선점이
+                #    명시되어 있으면 90점 게이트 원칙상 제품 PASS로 볼 수 없다 → 자동 반려·환류.
+                if qa_approved and not is_non_coding and _imp_gate is not None and not _imp_gate.passed:
+                    logger.warning(
+                        "TrioAgentRunner: QA approved but P0/P1 improvements exist — "
+                        f"overriding to REJECTED. {_imp_gate.reasons}"
+                    )
+                    qa_approved = False
+                    guardian_overridden = True
+                    _imp_blocking_total = (
+                        _imp_gate.severities.get("P0", 0) + _imp_gate.severities.get("P1", 0)
+                    )
+                    latest_qa_output = role_authority.format_system_gate_override(
+                        approved=False,
+                        title="🚦 **[시스템 게이트 자동 반려 — P0/P1 개선점 미해결(품질 게이트 FAIL)]**",
+                        blocking_defects=max(1, _imp_blocking_total),
+                        detail=(
+                            "QA가 승인(APPROVED)을 선언했으나, QA 스스로 P0/P1 심각도로 분류한 개선점이 "
+                            "남아 있습니다. 90점 이상이어도 P0/P1이 존재하면 제품 PASS는 금지됩니다. "
+                            "차기 Coder iteration에서 아래 항목을 반드시 수정한 뒤 동일 QA로 재검증하십시오.\n"
+                            + "\n".join(f"• {it}" for it in _imp_gate.blocking_items)
+                        ),
+                        original=latest_qa_output,
+                    )
+                    await post_verdict_message(latest_qa_output)
 
                 # 🛡️ Collaboration Intelligence Check: Anti-Collusion & Requirement Coverage
                 from autonomy_guard import CollaborationIntelligence
@@ -2597,6 +2854,14 @@ class TrioAgentRunner:
                         if _blk_count is not None:
                             ConvergenceTracker.record(channel_id or 0, _blk_count)
                         _force_accept = ConvergenceTracker.should_force_accept(channel_id or 0)
+                        # 🚦 개선점 severity 게이트: P0/P1 이 남아 있으면 차단 결함이 0이어도
+                        #    수렴(force-accept)하지 않는다 (90점 이상이어도 PASS 금지).
+                        if _force_accept and _imp_gate is not None and not _imp_gate.passed:
+                            logger.info(
+                                "TrioAgentRunner: Force-accept withheld — P0/P1 개선점 미해결 "
+                                f"({_imp_gate.reasons}). Coder 재작업으로 환류."
+                            )
+                            _force_accept = False
                         _escalate = (not _force_accept) and ConvergenceTracker.should_escalate(channel_id or 0)
                         # 📊 수렴 계약 계측: 마커 방출률을 증명하기 위한 물리 기록
                         ConvergenceTelemetry.record(
@@ -2608,17 +2873,25 @@ class TrioAgentRunner:
                                 "TrioAgentRunner: Convergence Contract — QA rejected but "
                                 "[BLOCKING_DEFECTS: 0]; accepting with non-blocking backlog."
                             )
-                            session.set_status("busy", "📉 비차단 항목만 잔존 → 수렴 승인 처리")
+                            session.set_status("busy", "📉 비차단 항목만 잔존 → QA 대화 수렴 처리 (제품 PASS 아님)")
                             qa_approved = True
                             guardian_overridden = True
+                            # ⚠️ 중요: 이 승인은 'QA 리뷰 대화의 수렴'일 뿐이며 제품/마일스톤 PASS가 아니다.
+                            #    제품 완결은 별도의 90점 게이트(Overall>=90, 모든 Critical>=90, Exit Criteria 100%, E2E PASS)를
+                            #    auto_pilot 이 통과해야만 성립한다 (product_gate SSOT).
+                            try:
+                                session.qa_dialogue_converged_without_gate = True
+                            except Exception:
+                                pass
                             latest_qa_output = role_authority.format_system_gate_override(
                                 approved=True,
-                                title="✅ **[시스템 게이트 수렴 승인 — 비차단 항목만 잔존]**",
+                                title="✅ **[QA 대화 수렴 — 비차단 항목만 잔존 (제품 PASS 아님)]**",
                                 blocking_defects=0,
                                 detail=(
                                     "QA가 반려를 선언했으나 `[BLOCKING_DEFECTS: 0]` — 남은 항목은 사용자 체감을 "
-                                    "막지 않는 비차단(스타일/문서/리팩토링) 항목뿐입니다. 수렴 계약에 따라 승인 "
-                                    "처리하고 잔여 항목은 [차기 백로그]로 이관합니다."
+                                    "막지 않는 비차단(스타일/문서/리팩토링) 항목뿐입니다. 수렴 계약에 따라 QA 대화를 "
+                                    "수렴 처리하고 잔여 항목은 백로그로 이관합니다. 단, 이는 제품/마일스톤 PASS가 "
+                                    "아니며, 완결 판정은 90점 게이트가 담당합니다."
                                 ),
                                 original=latest_qa_output,
                             )
@@ -2642,6 +2915,9 @@ class TrioAgentRunner:
 
                 if not qa_approved:
                     feedback_for_coder = f"[qa1 반려 사유]\n{latest_qa_output}"
+                    # 🛠️ 개선점 자동 환류: QA가 발견한 P0/P1/P2 개선점을 차기 Coder iteration에 주입.
+                    if _imp_directive:
+                        feedback_for_coder += f"\n\n{_imp_directive}"
                     # 🖼️ [이미지 도구 지시문 보존] QA가 실제 생성/수정 요청을 냈다면, 이후
                     # 가디언 게이트(시각 계약/교차검증 등)가 본문을 재작성하며 태그를 소실시키지
                     # 않도록 원본 태그를 Coder 피드백에 기계적으로 보존한다.
@@ -2820,16 +3096,19 @@ class TrioAgentRunner:
                                 f"3. **가시적 실체 구현 & 안티 트레이싱 (Anti-Mocking, Anti-Tracing & Provenance)**: 단순 주석, 껍데기 함수, 가짜 모킹이 아닌 실체 코드가 구현되었는가? 사용자가 제공한 참고용 레퍼런스 이미지 표절, 소스코드 내 스크립트 트레이싱(Image.open/cv2.imread/findContours/Base64 임베딩), 또는 이전 라운드 산출물 재탕이 없는가? 순수 절차적(Procedural) 생성 여부 및 외부 텍스처 미사용이 입증되었는가?\n"
                                 f"4. **런타임 결함 및 예외 방어**: 크래시, 무한 루프, null 오류 위험이 없는가?\n"
                                 f"5. **선행 검증 맹점 보완**: 이전 QA들이 간과했을 수 있는 엣지 케이스나 플랫폼 규격 위반 사항이 없는가?\n\n"
+                                f"{build_improvement_discovery_instruction()}\n\n"
                                 f"**[검증 및 판정 규칙 (수렴 & 정직성 계약 준수)]:**\n"
                                 f"0. **차단 결함만 REJECTED 사유**: 빌드/크래시/사용자 요청 미구현/핵심 기능 미동작/Mock·표절/**거짓 증거**. 스타일·문서 포맷·리팩토링 권장·이론적 엣지 케이스는 [차기 백로그]로만 기록하고 REJECTED 사유로 삼지 마십시오.\n"
                                 f"1. 차단 결함이 있으면: 첫 줄 `[STATUS: REJECTED]`, 둘째 줄 `[BLOCKING_DEFECTS: N]` + Coder가 즉시 구현할 구체적 개선 지침(설계 대안/폰트·스타일/아키텍처).\n"
                                 f"2. 차단 결함이 0건이면: 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]` + 독립 검증 통과 내역 및 **[전문가 관점 심층 평가 & 차기 고도화 권고]**.\n"
-                                f"3. 사용자 요청이 정보 확인, 기획 자문, 시스템 상태 조회, 인사/테스트 답변인 경우: 답변이 부합하면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`."
+                                f"3. 사용자 요청이 정보 확인, 기획 자문, 시스템 상태 조회, 인사/테스트 답변인 경우: 답변이 부합하면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`.\n"
+                                f"4. **[개선점 탐색 계약 준수]**: 판정과 무관하게 `**[개선점 탐색]**` 섹션(최소 3개)과 셋째 줄 `[IMPROVEMENTS: N]` 마커를 반드시 표기하십시오."
                             )
 
                             try:
                                 async with qa_target_channel.typing():
-                                    ext_qa_timeout = getattr(config, "EXTENDED_QA_TIMEOUT", 600.0)
+                                    # [⏱️ coder/qa/auditor 타임아웃 해제] 0 이하 = 무제한.
+                                    ext_qa_timeout = float(getattr(config, "EXTENDED_QA_TIMEOUT", 0.0) or 0.0)
                                     current_ext_output = await asyncio.wait_for(
                                         cls.run_extended_qa_turn(
                                              session=session,
@@ -2837,7 +3116,7 @@ class TrioAgentRunner:
                                             qa_config=qa_cfg,
                                             on_tool_update=on_ext_qa_tool
                                         ),
-                                        timeout=ext_qa_timeout
+                                        timeout=ext_qa_timeout if ext_qa_timeout > 0 else None
                                     )
                                     if channel_id:
                                         AutonomySafetyLayer.record_llm_call(channel_id)
@@ -3061,6 +3340,7 @@ class TrioAgentRunner:
                     f"**[Coder 작업물 요약]:**\n{compact_agent_context(latest_coder_output, max_chars=12000)}\n\n"
                     + f"\n{QualityStateManager.format_state_summary_for_commander(effective_ws)}\n\n"
                     + qa_vision_block
+                    + autonomous_e2e_block
                     + f"{diff_summary_text}\n"
                     f"**[qa1 검증 리포트 요약]:**\n{compact_agent_context(latest_qa_output, max_chars=8000)}\n\n"
                     + ext_qa_report_block

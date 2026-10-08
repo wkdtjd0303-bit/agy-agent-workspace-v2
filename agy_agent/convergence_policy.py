@@ -37,10 +37,22 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # QA/확장 QA 프롬프트에 공통 주입되는 정책 문구의 식별자 (단일 진실 원천)
 BLOCKING_MARKER_SYNTAX = "[BLOCKING_DEFECTS: N]"
+# 개선점 탐색 계약 마커. 승인/반려와 무관하게 QA가 제출한 개선점 수를 기계 판독한다.
+IMPROVEMENT_MARKER_SYNTAX = "[IMPROVEMENTS: N]"
+
+# QA가 승인 여부와 무관하게 반드시 자문해야 하는 5대 질문 (어색함/누락/개선여지/사용자 만족).
+IMPROVEMENT_DISCOVERY_QUESTIONS: Tuple[str, ...] = (
+    "틀린 게 있나? (결함 탐지)",
+    "어색한 게 있나? (시각 위계·정렬/간격·밀도·일관성)",
+    "빠진 게 있나? (누락 상태·피드백·엣지·접근성)",
+    "더 좋아질 수 있나? (더 나은 대안)",
+    "실제 사용자가 만족할까? (사용자 체감)",
+)
 
 # 차단 결함 = 사용자 체감 결함 또는 정직성 위반. 이 항목만 REJECTED 사유가 된다.
 BLOCKING_DEFECT_CATEGORIES = (
@@ -58,6 +70,47 @@ NON_BLOCKING_DEFECT_CATEGORIES = (
     "문서/증거 파일 포맷, 해시·타임스탬프 신선도 등 메타 인프라",
     "사용자 체감과 무관한 이론적 엣지 케이스",
 )
+
+# ── Sequential Milestone Gate 연동 (product_gate SSOT) ─────────────────────
+# 현재 마일스톤의 Exit Criteria에 포함된 필수 항목(UX/시각/안정성/성능/테스트/
+# 에러처리 등)은 "차기 백로그"로 이관할 수 없다. 단순 선택적 개선만 백로그 허용.
+try:
+    from product_gate import (  # noqa: F401
+        FORBIDDEN_BACKLOG_CATEGORIES,
+        IMPROVEMENT_BLOCKING_SEVERITIES,
+        IMPROVEMENT_SEVERITIES,
+        may_defer_to_backlog,
+        improvement_blocking_count,
+        improvement_score_penalty,
+        normalize_severity_counts,
+    )
+except Exception:  # pragma: no cover - product_gate 부재 시에도 import 실패 금지
+    FORBIDDEN_BACKLOG_CATEGORIES = ()  # type: ignore
+    IMPROVEMENT_SEVERITIES = ("P0", "P1", "P2", "P3")  # type: ignore
+    IMPROVEMENT_BLOCKING_SEVERITIES = ("P0", "P1")  # type: ignore
+
+    def normalize_severity_counts(severities=None):  # type: ignore
+        counts = {s: 0 for s in IMPROVEMENT_SEVERITIES}
+        if isinstance(severities, dict):
+            for k, v in severities.items():
+                lvl = str(k).strip().upper()
+                if lvl in counts:
+                    try:
+                        counts[lvl] += max(0, int(v))
+                    except (TypeError, ValueError):
+                        pass
+        return counts
+
+    def improvement_blocking_count(severities=None):  # type: ignore
+        counts = normalize_severity_counts(severities)
+        return sum(counts.get(s, 0) for s in IMPROVEMENT_BLOCKING_SEVERITIES)
+
+    def improvement_score_penalty(severities=None):  # type: ignore
+        return 0.0
+
+    def may_defer_to_backlog(text=None, *, category=None, required_by_exit_criteria=False):  # type: ignore
+        """폴백: product_gate 부재 시 보수적으로 이관을 허용한다(기존 동작 보존)."""
+        return True
 
 _BLOCKING_RE = re.compile(r"\[\s*BLOCKING_DEFECTS\s*[:：]\s*(\d+)\s*\]", re.IGNORECASE)
 
@@ -82,6 +135,188 @@ def parse_blocking_defect_count(qa_output: Optional[str]) -> Optional[int]:
 def has_blocking_marker(qa_output: Optional[str]) -> bool:
     """QA 출력에 차단 결함 마커가 존재하는가."""
     return parse_blocking_defect_count(qa_output) is not None
+
+
+_IMPROVEMENT_RE = re.compile(r"\[\s*IMPROVEMENTS\s*[:：]\s*(\d+)\s*\]", re.IGNORECASE)
+
+
+def parse_improvement_count(qa_output: Optional[str]) -> Optional[int]:
+    """QA 출력에서 ``[IMPROVEMENTS: N]``(개선점 탐색 계약) 마커를 파싱한다.
+
+    마커가 없으면 ``None`` 을 반환한다(계약 미준수/미적용 판단 근거).
+    여러 개면 마지막(최종 판정) 값을 신뢰한다.
+    """
+    if not qa_output or not isinstance(qa_output, str):
+        return None
+    matches = _IMPROVEMENT_RE.findall(qa_output)
+    if not matches:
+        return None
+    try:
+        return max(0, int(matches[-1]))
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 개선점 심각도(severity) 파싱 & 게이트 연결
+#   "발견"에서 "게이트 반영"으로: QA가 라벨링한 P0/P1은 제품 PASS를 차단하고,
+#   P2/P3은 품질 점수를 감점한다 (product_gate SSOT 와 동일 정책).
+# ---------------------------------------------------------------------------
+_IMPROVEMENT_ITEM_RE = re.compile(
+    r"^\s*(?:[-*•]\s*)?\[?\s*(P[0-3])(?![0-9A-Za-z])"
+    r"(?=\s|$|\]|[:：]|\.\s|\-\s|\))\s*\]?\s*[:.\-)]?\s*(.*)$",
+    re.IGNORECASE,
+)
+
+
+def parse_improvement_severities(qa_output: Optional[str]) -> Dict[str, int]:
+    """QA 개선점 섹션에서 ``P0``~``P3`` 심각도 라벨을 집계한다.
+
+    ``- [P1] ...`` / ``P1: ...`` / ``[P2] ...`` 형식을 지원하며, 라벨이 없으면
+    전부 0을 반환한다(무라벨 여부는 :func:`evaluate_improvement_gate` 가 판정).
+    """
+    counts: Dict[str, int] = {s: 0 for s in IMPROVEMENT_SEVERITIES}
+    if not qa_output or not isinstance(qa_output, str):
+        return counts
+    for raw in qa_output.splitlines():
+        line = raw.strip()
+        if len(line) < 2:
+            continue
+        m = _IMPROVEMENT_ITEM_RE.match(line)
+        if not m:
+            continue
+        counts[m.group(1).upper()] += 1
+    return counts
+
+
+def collect_blocking_improvements(qa_output: Optional[str]) -> List[str]:
+    """P0/P1(게이트 FAIL) 개선점 항목을 ``[P1] 내용`` 형태로 수집한다."""
+    out: List[str] = []
+    if not qa_output or not isinstance(qa_output, str):
+        return out
+    for raw in qa_output.splitlines():
+        line = raw.strip()
+        if len(line) < 2:
+            continue
+        m = _IMPROVEMENT_ITEM_RE.match(line)
+        if not m:
+            continue
+        level = m.group(1).upper()
+        if level not in IMPROVEMENT_BLOCKING_SEVERITIES:
+            continue
+        text = (m.group(2) or "").strip()
+        out.append(f"[{level}] {text}".rstrip())
+    return out
+
+
+@dataclass
+class ImprovementGateResult:
+    """개선점 severity 를 품질 게이트 신호로 환산한 결과."""
+
+    passed: bool
+    severities: Dict[str, int]
+    blocking_items: List[str]
+    score_penalty: float
+    total_findings: Optional[int]
+    labeled_findings: int
+    marker_present: bool
+    strict: bool
+    reasons: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "severities": dict(self.severities),
+            "blocking_items": list(self.blocking_items),
+            "score_penalty": self.score_penalty,
+            "total_findings": self.total_findings,
+            "labeled_findings": self.labeled_findings,
+            "marker_present": self.marker_present,
+            "strict": self.strict,
+            "reasons": list(self.reasons),
+        }
+
+
+def evaluate_improvement_gate(
+    qa_output: Optional[str],
+    *,
+    strict: bool = False,
+) -> ImprovementGateResult:
+    """QA가 발견한 개선점을 품질 게이트 통과 여부로 환산한다.
+
+    - P0/P1 존재 → ``passed=False`` (90점 이상이어도 PASS 금지).
+    - P2/P3 존재 → ``score_penalty`` 로 Overall 을 감점.
+    - ``strict=True`` 이고 ``[IMPROVEMENTS: N>0]`` 인데 severity 라벨이 하나도
+      없으면 계약 위반으로 FAIL (개선점마다 severity 필수).
+    """
+    severities = parse_improvement_severities(qa_output)
+    blocking_items = collect_blocking_improvements(qa_output)
+    blocking_total = improvement_blocking_count(severities)
+    penalty = improvement_score_penalty(severities)
+    marker_count = parse_improvement_count(qa_output)
+    labeled = sum(severities.values())
+    total = marker_count if marker_count is not None else (labeled or None)
+
+    reasons: List[str] = []
+    if blocking_total:
+        reasons.append(
+            f"P0/P1 개선점 {blocking_total}건 미해결 — 90점 이상이어도 PASS 불가"
+        )
+    if penalty > 0:
+        reasons.append(f"P2 이하 개선점으로 품질 점수 {penalty:.1f}점 감점")
+    if strict and marker_count and marker_count > 0 and labeled == 0:
+        reasons.append(
+            "개선점 심각도(P0~P3) 미표기 — 계약 위반(개선점마다 severity 필수)"
+        )
+    if strict and marker_count is None:
+        reasons.append("개선점 탐색 마커([IMPROVEMENTS: N]) 미표기 — 계약 미준수")
+
+    return ImprovementGateResult(
+        # 감점/계약위반 이유는 있어도, 순수 '차단'은 P0/P1 과 strict 계약위반만 해당.
+        passed=not (blocking_total or (strict and (marker_count is None or (marker_count > 0 and labeled == 0)))),
+        severities=severities,
+        blocking_items=blocking_items,
+        score_penalty=penalty,
+        total_findings=total,
+        labeled_findings=labeled,
+        marker_present=marker_count is not None,
+        strict=strict,
+        reasons=reasons,
+    )
+
+
+def has_blocking_improvements(qa_output: Optional[str]) -> bool:
+    """P0/P1 개선점이 존재하여 제품 PASS를 차단해야 하는가?"""
+    return bool(improvement_blocking_count(parse_improvement_severities(qa_output)))
+
+
+def format_improvement_directive(
+    qa_output: Optional[str],
+    gate: Optional[ImprovementGateResult] = None,
+) -> str:
+    """발견된 개선점을 Coder 차기 iteration 지시문으로 변환한다.
+
+    개선점 발견 → 다음 Coder 반복에 자동 주입 → 수정 → 동일 QA 재검증 루프의
+    '주입' 단계를 담당한다.
+    """
+    gate = gate or evaluate_improvement_gate(qa_output)
+    items = gate.blocking_items
+    p2 = gate.severities.get("P2", 0)
+    p3 = gate.severities.get("P3", 0)
+    if not items and not p2 and not p3:
+        return ""
+    lines = ["🛠️ **[개선점 자동 환류 — 차기 Coder iteration 필수 반영]**"]
+    if items:
+        lines.append(
+            "아래 P0/P1 개선점은 품질 게이트를 차단합니다. 반드시 수정한 뒤 "
+            "동일 QA 재검증을 통과해야 PASS됩니다:"
+        )
+        lines += [f"• {it}" for it in items]
+    if p2:
+        lines.append(f"• P2(권장) {p2}건: 품질 점수 감점 대상 — 가능한 범위에서 함께 해소하십시오.")
+    if p3:
+        lines.append(f"• P3(선택) {p3}건: 여유가 있으면 반영하십시오.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +428,68 @@ def build_blocking_contract_instruction() -> str:
         "거짓 주장은 즉시 REJECTED입니다.\n"
         f"• **필수 마커**: 판정과 무관하게 둘째 줄에 차단 결함 개수를 `{BLOCKING_MARKER_SYNTAX}` 형식으로 "
         "표기하십시오. (차단 결함이 없으면 0)\n"
-        "• **수렴 지향**: 이전 라운드에서 APPROVED된 항목을 재반려하거나 골대를 이동하지 마십시오."
+        "• **수렴 지향**: 이전 라운드에서 APPROVED된 항목을 재반려하거나 골대를 이동하지 마십시오.\n"
+        "• **⚠️ 수렴 ≠ 제품 PASS**: `[BLOCKING_DEFECTS: 0]` 은 **필요조건일 뿐 충분조건이 아닙니다**. "
+        "제품/마일스톤 완료는 별도의 90점 게이트(Overall>=90, 모든 Critical 차원>=90, Exit Criteria 100%, E2E PASS)를 "
+        "통과해야만 성립합니다.\n"
+        "• **백로그 이관 금지**: 현재 마일스톤의 Exit Criteria에 포함된 필수 항목(UX 개선·시각적 완성도·중요한 edge case·"
+        "안정성·성능·테스트 부족·제품 사용성·핵심 기능 세부 완성·중요한 에러 처리)은 '차기 백로그'로 미룰 수 없습니다. "
+        "단순한 선택적 개선사항만 백로그로 이동 가능합니다."
     )
+
+
+def build_improvement_discovery_instruction() -> str:
+    """QA 프롬프트에 공통 주입되는 '개선점 탐색 계약' 문구 (단일 진실 원천).
+
+    QA를 단순 PASS/FAIL 판정기가 아니라 **결함 탐지기 + 개선점 탐색기**로 만든다.
+    승인 여부와 무관하게 5대 질문에 답하고, 최소 3개 개선점을 제출하게 강제한다.
+    """
+    questions = "\n".join(
+        f"   {idx}. {q}" for idx, q in enumerate(IMPROVEMENT_DISCOVERY_QUESTIONS, 1)
+    )
+    return (
+        "**[🔍 개선점 탐색 계약 (Improvement Discovery Contract — 판정 전 필수)]**:\n"
+        "당신은 'PASS/FAIL 판정기'가 아니라 **결함 탐지기 + 개선점 탐색기**입니다. "
+        "승인/반려 여부와 무관하게, 판정 전에 아래 5대 질문에 반드시 스스로 답하십시오:\n"
+        f"{questions}\n"
+        "• 답변에 `**[개선점 탐색]**` 섹션을 반드시 포함하고, **최소 3개**의 개선점을 "
+        "`- [P0|P1|P2|P3] [위치/대상] 무엇이 · 왜 어색한가 · 사용자 영향 · 구체적 개선안` 형식으로 "
+        "제출하십시오. (시각 위계·정렬/간격·밀도·일관성·누락 상태·피드백·접근성·문구를 우선 탐색)\n"
+        "• **[필수] 개선점마다 심각도(severity) 라벨을 반드시 붙이십시오** — "
+        "P0(치명·기능 불능/데이터 손상), P1(중요·사용자 체감 품질 저해), "
+        "P2(권장·완성도 향상), P3(선택·사소). 라벨 없는 개선점은 계약 위반입니다.\n"
+        "• **품질 게이트 연결(중요)**: P0/P1 개선점이 하나라도 남아 있으면 점수가 90점 이상이어도 "
+        "제품 PASS가 금지되며 REJECTED로 자동 환류됩니다(차기 Coder 반복에 주입되어 수정 후 재검증). "
+        "P2/P3는 품질 점수 감점으로 반영됩니다. [차기 백로그]는 P2/P3에 한합니다.\n"
+        "• **무비판 승인(Rubber-Stamping) 금지**: '개선점 0개'로 넘기려면 이미 최선임을 뒷받침하는 "
+        "**반증 근거(측정값·공개 표준 대조)** 를 제시해야 합니다. 근거 없는 0개는 계약 위반입니다.\n"
+        f"• **필수 마커**: 제출한 개선점 개수를 `{IMPROVEMENT_MARKER_SYNTAX}` 형식으로 표기하십시오. "
+        "(개선점이 없으면 0)"
+    )
+
+
+def convergence_is_sufficient(qa_output_or_count: Any, gate_passed: bool) -> bool:
+    """수렴(force-accept)만으로 제품 PASS가 성립하지 않음을 보장한다.
+
+    QA 대화상 차단 결함 0으로 수렴(`[BLOCKING_DEFECTS: 0]`)했더라도, 제품/마일스톤
+    게이트(90점)를 통과하지 못하면 PASS가 아니다. 즉 blocking=0은 **필요조건**이며
+    **충분조건이 아니다**.
+
+    Args:
+        qa_output_or_count: QA 원문(str) 또는 차단 결함 수(int).
+        gate_passed: product_gate.evaluate_milestone_gate(...).passed 값.
+
+    Returns:
+        수렴 + 게이트 통과가 모두 성립할 때만 True.
+    """
+    if isinstance(qa_output_or_count, int):
+        count: Optional[int] = max(0, qa_output_or_count)
+    elif isinstance(qa_output_or_count, str):
+        count, _src = resolve_blocking_count(qa_output_or_count)
+    else:
+        count = None
+    blocking_zero = (count == 0)
+    return bool(blocking_zero and gate_passed)
 
 
 class ConvergenceTracker:
@@ -306,6 +601,10 @@ class ConvergenceTelemetry:
                 "force_accepts": 0,
                 "escalations": 0,
                 "blocking_counts": [],
+                "improvement_observed": 0,
+                "improvements": [],
+                "improvement_severities": {s: 0 for s in IMPROVEMENT_SEVERITIES},
+                "unlabeled_improvements": 0,
                 "stages": {},
             },
         )
@@ -361,6 +660,37 @@ class ConvergenceTelemetry:
             b["escalations"] += 1
 
     @classmethod
+    def record_improvements(
+        cls,
+        channel_id: int,
+        count: Optional[int],
+        severities: Optional[Dict[str, int]] = None,
+    ) -> None:
+        """QA가 제출한 개선점 수(개선점 탐색 계약)와 심각도 분포를 기록한다.
+
+        ``count`` 가 ``None``(마커 없음 = 계약 미준수)이면 건너뛴다.
+        ``severities`` 가 주어지면 P0~P3 분포를 누적하고, 라벨이 하나도 없는
+        개선점은 ``unlabeled_improvements`` 로 집계한다(계약 위반 감사 근거).
+        """
+        if count is None:
+            return
+        b = cls._bucket(channel_id)
+        b.setdefault("improvement_observed", 0)
+        lst = b.setdefault("improvements", [])
+        b["improvement_observed"] += 1
+        lst.append(max(0, int(count)))
+        agg = b.setdefault("improvement_severities", {s: 0 for s in IMPROVEMENT_SEVERITIES})
+        if severities:
+            labeled = 0
+            for level, n in severities.items():
+                lvl = str(level).strip().upper()
+                if lvl in agg:
+                    agg[lvl] += max(0, int(n))
+                    labeled += max(0, int(n))
+            if max(0, int(count)) > 0 and labeled == 0:
+                b["unlabeled_improvements"] = b.get("unlabeled_improvements", 0) + 1
+
+    @classmethod
     def summary(cls, channel_id: int) -> Dict[str, Any]:
         """사람이 판독 가능한 요약 + 경고 플래그를 반환한다."""
         b = cls._data.get(channel_id)
@@ -370,6 +700,8 @@ class ConvergenceTelemetry:
                 "observations": 0,
                 "marker_emission_rate": None,
                 "contract_active": False,
+                "improvement_observed": 0,
+                "improvements": [],
                 "warnings": ["관측 데이터 없음 — 수렴 계약이 한 번도 실행되지 않음"],
             }
         obs = b["rounds_observed"]
@@ -383,6 +715,25 @@ class ConvergenceTelemetry:
             )
         if obs and b["unresolved"] == obs:
             warnings.append("차단 결함 수를 전혀 판정하지 못함 — 수렴 정책 비활성")
+        imp_observed = b.get("improvement_observed", 0)
+        imp_list = list(b.get("improvements") or [])
+        imp_sev = dict(b.get("improvement_severities") or {s: 0 for s in IMPROVEMENT_SEVERITIES})
+        for s in IMPROVEMENT_SEVERITIES:
+            imp_sev.setdefault(s, 0)
+        unlabeled = int(b.get("unlabeled_improvements", 0) or 0)
+        if obs and imp_observed == 0:
+            warnings.append(
+                "QA가 [IMPROVEMENTS] 개선점 탐색 마커를 한 번도 내보내지 않음 — "
+                "'판정기'로만 동작 중(개선점 탐색 계약 미준수)"
+            )
+        if unlabeled:
+            warnings.append(
+                f"severity 라벨 없는 개선점 제출 {unlabeled}회 — 개선점마다 P0~P3 라벨 필수(계약 위반)"
+            )
+        if sum(imp_sev.get(s, 0) for s in IMPROVEMENT_BLOCKING_SEVERITIES):
+            warnings.append(
+                "P0/P1(게이트 차단) 개선점이 관측됨 — 제품 PASS 전 해소 필요"
+            )
         return {
             "channel_id": channel_id,
             "observations": obs,
@@ -394,6 +745,12 @@ class ConvergenceTelemetry:
             "force_accepts": b["force_accepts"],
             "escalations": b["escalations"],
             "blocking_counts": list(b["blocking_counts"]),
+            "improvement_observed": imp_observed,
+            "improvements": imp_list,
+            "total_improvements": sum(imp_list),
+            "improvement_severities": imp_sev,
+            "unlabeled_improvements": unlabeled,
+            "blocking_improvements": sum(imp_sev.get(s, 0) for s in IMPROVEMENT_BLOCKING_SEVERITIES),
             "per_stage": b["stages"],
             "contract_active": bool(obs and resolved > 0),
             "warnings": warnings,

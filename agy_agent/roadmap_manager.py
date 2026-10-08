@@ -22,6 +22,14 @@ import config
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 
+# 🔒 순차 완결 잠금 SSOT (product_gate). 부재 시에도 import 실패 금지.
+try:
+    from product_gate import CLEARED_STATUSES, PASS_STATUSES, can_start_milestone, first_startable_index
+except ImportError:  # pragma: no cover
+    from agy_agent.product_gate import (  # type: ignore
+        CLEARED_STATUSES, PASS_STATUSES, can_start_milestone, first_startable_index,
+    )
+
 logger = logging.getLogger("RoadmapManager")
 
 
@@ -47,6 +55,9 @@ class RoadmapMilestone:
     title: str          # e.g. "검색 기능"
     tasks: List[RoadmapTask] = field(default_factory=list)
     status: str = "PENDING"   # PENDING | IN_PROGRESS | DONE | SKIPPED
+    id: str = ""                                    # e.g. "MS-1" (순차 잠금 식별자)
+    exit_criteria: List[str] = field(default_factory=list)
+    dependencies: List[str] = field(default_factory=list)
 
     @property
     def is_done(self) -> bool:
@@ -55,6 +66,11 @@ class RoadmapMilestone:
     @property
     def is_pending(self) -> bool:
         return not self.is_done and self.status != "SKIPPED"
+
+    @property
+    def is_locked(self) -> bool:
+        """PASS(DONE)된 마일스톤은 LOCK되어 임의 변경이 금지된다."""
+        return str(self.status).upper() in PASS_STATUSES
 
     def mark_done(self):
         for t in self.tasks:
@@ -82,6 +98,7 @@ def _parse_roadmap_md(content: str) -> List[RoadmapMilestone]:
         re.IGNORECASE
     )
     task_re = re.compile(r"^\s*-\s*\[([xX\s])\]\s*(.+)$")
+    exit_re = re.compile(r"^\s*-\s*✅\s*(.+)$")
 
     for line in content.splitlines():
         m = milestone_re.match(line.strip())
@@ -107,6 +124,11 @@ def _parse_roadmap_md(content: str) -> List[RoadmapMilestone]:
             current.tasks.append(RoadmapTask(text=text, done=done))
             if current.status == "PENDING" and done:
                 current.status = "IN_PROGRESS"
+            continue
+
+        e = exit_re.match(line)
+        if e and current:
+            current.exit_criteria.append(e.group(1).strip())
 
     if current:
         milestones.append(current)
@@ -115,6 +137,11 @@ def _parse_roadmap_md(content: str) -> List[RoadmapMilestone]:
     for ms in milestones:
         if ms.tasks and all(t.done for t in ms.tasks) and ms.status != "SKIPPED":
             ms.status = "DONE"
+
+    # 순차 잠금 식별자 부여 (없으면 순번 기반)
+    for idx, ms in enumerate(milestones):
+        if not ms.id:
+            ms.id = f"MS-{idx + 1}"
 
     return milestones
 
@@ -357,17 +384,33 @@ class RoadmapManager:
 
     # ── Query ──────────────────────────────────────
 
+    def _is_unlocked(self, index: int) -> bool:
+        """🔒 순차 잠금: 선행 마일스톤이 모두 CLEARED(DONE/PASS/SKIPPED)여야 해금된다."""
+        try:
+            return can_start_milestone(self._milestones, index)
+        except Exception:
+            for prior in self._milestones[:index]:
+                if str(prior.status).upper() not in CLEARED_STATUSES:
+                    return False
+            return True
+
     def get_current_milestone(self, auto_expand: bool = True, active_goal: str = "") -> Optional[RoadmapMilestone]:
-        """IN_PROGRESS 또는 첫 번째 PENDING 마일스톤 반환. 소진 시 자동 확장 지원."""
+        """IN_PROGRESS 또는 첫 번째 PENDING 마일스톤 반환 (🔒 순차 잠금 적용). 소진 시 자동 확장 지원.
+
+        선행 마일스톤이 PASS(90점 완결 게이트)되기 전에는 다음 단계가 '잠금'되어
+        구현 대상으로 선택될 수 없다 (A PASS → B UNLOCK).
+        """
         if not self._loaded:
             self.load()
-        for ms in self._milestones:
-            if ms.status == "IN_PROGRESS":
+        # 🔒 순차 잠금: 해금된 IN_PROGRESS 우선
+        for idx, ms in enumerate(self._milestones):
+            if ms.status == "IN_PROGRESS" and self._is_unlocked(idx):
                 return ms
-        for ms in self._milestones:
-            if ms.is_pending:
+        # 해금된 첫 PENDING
+        for idx, ms in enumerate(self._milestones):
+            if ms.is_pending and self._is_unlocked(idx):
                 return ms
-        if auto_expand:
+        if auto_expand and self.is_roadmap_exhausted():
             new_ms_list = self.auto_expand_roadmap(active_goal=active_goal)
             if new_ms_list:
                 return new_ms_list[0]
@@ -999,10 +1042,16 @@ class RoadmapManager:
             target_ms.tasks = task_objs
             target_ms.status = status
         else:
-            # Mark prior in-progress milestones as DONE
+            # 🔒 순차 잠금: 선행 마일스톤이 '실제 완결(모든 태스크 완료)'된 경우에만 DONE으로 승격한다.
+            #    부분 완성(50~80%) 상태의 마일스톤을 DONE으로 강제 승격하지 않는다 (병렬 부분 완성 금지).
             for prior_ms in self._milestones:
-                if prior_ms.status == "IN_PROGRESS":
+                if prior_ms.status == "IN_PROGRESS" and prior_ms.is_done:
                     prior_ms.status = "DONE"
+                elif prior_ms.status == "IN_PROGRESS":
+                    logger.warning(
+                        f"[RoadmapManager] 🔒 순차 잠금: 선행 마일스톤 {prior_ms.version} '{prior_ms.title}' 가 "
+                        f"아직 완결되지 않아 DONE 승격을 보류합니다 (다음 마일스톤은 대기 상태로 편입)."
+                    )
             target_ms = RoadmapMilestone(
                 version=version,
                 title=title,

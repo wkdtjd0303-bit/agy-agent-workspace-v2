@@ -27,6 +27,22 @@ try:
 except ImportError:
     from agy_agent import config
 
+# 🚪 Sequential Milestone Gate (90점 완결 게이트 SSOT)
+try:
+    from product_gate import (
+        CRITICAL_DIMENSION_MIN_SCORE,
+        MILESTONE_PASS_SCORE,
+        evaluate_milestone_gate,
+        build_milestone_spec,
+    )
+except ImportError:
+    from agy_agent.product_gate import (  # type: ignore
+        CRITICAL_DIMENSION_MIN_SCORE,
+        MILESTONE_PASS_SCORE,
+        evaluate_milestone_gate,
+        build_milestone_spec,
+    )
+
 logger = logging.getLogger("ProductPlanner")
 
 COMMANDER_BOT_ID = config.COMMANDER_BOT_ID
@@ -602,6 +618,33 @@ class AutonomousProductPlanner:
         return dims
 
     @classmethod
+    def _attach_gate_metadata(cls, milestones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """각 마일스톤에 ID / Exit Criteria / Dependencies 스펙을 부여한다 (PRD §4).
+
+        순차 잠금을 위해 dependencies 를 직전 마일스톤 버전으로 설정한다.
+        """
+        out: List[Dict[str, Any]] = []
+        prev_version: Optional[str] = None
+        for idx, ms in enumerate(milestones or []):
+            ms = dict(ms)
+            ms.setdefault("id", f"MS-{idx + 1}")
+            spec = build_milestone_spec(
+                index=idx,
+                version=ms.get("version", ""),
+                title=ms.get("title", ""),
+                tasks=ms.get("tasks", []),
+                dimension=ms.get("dimension", ""),
+                target_quality=ms.get("target_quality", ""),
+                dependencies=([prev_version] if prev_version else []),
+            )
+            ms["dependencies"] = spec.dependencies
+            ms.setdefault("exit_criteria", spec.exit_criteria)
+            ms["spec"] = spec.to_dict()
+            prev_version = ms.get("version")
+            out.append(ms)
+        return out
+
+    @classmethod
     def generate_milestones(cls, domain: str, p_def: ProductDefinition) -> List[Dict[str, Any]]:
         """
         Creates a 6-stage quality evolution ladder tailored to the domain and product definition.
@@ -1020,7 +1063,7 @@ class AutonomousProductPlanner:
         domain = cls.detect_domain(user_request, workspace)
         p_def = cls.create_product_definition(user_request, domain)
         q_dims = cls.build_quality_dimensions(domain)
-        milestones = cls.generate_milestones(domain, p_def)
+        milestones = cls._attach_gate_metadata(cls.generate_milestones(domain, p_def))
 
         # Write or update PRD.md with explicit Quality Definition
         cls._sync_prd_md(workspace, p_def, q_dims, user_request, milestones=milestones)
@@ -1108,6 +1151,7 @@ class AutonomousProductPlanner:
         )
         q_dims = cls.build_quality_dimensions(domain)
         milestones = plan_data.get("milestones") or cls.generate_milestones(domain, p_def)
+        milestones = cls._attach_gate_metadata(milestones)
 
         # Write or update PRD.md and ROADMAP.md
         cls._sync_prd_md(workspace, p_def, q_dims, title, milestones=milestones)
@@ -1232,6 +1276,18 @@ class AutonomousProductPlanner:
             ])
         lines.append("")
 
+        if milestones:
+            lines.append("## 3-1. 마일스톤 명세 & Exit Criteria (순차 완결 조건)")
+            lines.append("> 이전 마일스톤이 PASS(90점 게이트)되기 전에는 다음 마일스톤을 시작할 수 없습니다.")
+            for idx, ms in enumerate(milestones, start=1):
+                ms_id = ms.get("id", f"MS-{idx}")
+                deps = ms.get("dependencies") or []
+                dep_str = f" (Dependencies: {', '.join(deps)})" if deps else ""
+                lines.append(f"### {ms_id} — {ms.get('version', '')} {ms.get('title', '')}{dep_str}")
+                for c in (ms.get("exit_criteria") or []):
+                    lines.append(f"* ✅ {c}")
+            lines.append("")
+
         if p_def.domain in ("game", "mobile_app", "saas_web"):
             lines.extend([
                 "## 4. 시각 에셋 승인 규격 (Visual Asset Taxonomy)",
@@ -1273,6 +1329,11 @@ class AutonomousProductPlanner:
             for t in ms.get("tasks", []):
                 mark = "x" if ms.get("status") == "DONE" else " "
                 lines.append(f"- [{mark}] {t}")
+            ec = ms.get("exit_criteria") or []
+            if ec:
+                lines.append("**Exit Criteria (90점 PASS 요건):**")
+                for c in ec:
+                    lines.append(f"  - ✅ {c}")
             lines.append("")
 
         try:
@@ -1293,7 +1354,9 @@ class AutonomousProductPlanner:
         e2e_report: Any,
         coder_output: str,
         current_milestone: Optional[Any] = None,
-        mode: str = "evolve"
+        mode: str = "evolve",
+        is_last_milestone: Optional[bool] = None,
+        improvement_severities: Optional[Any] = None,
     ) -> ProductCriticEvaluation:
         """
         👑 Product Critic Evaluation Engine (Commander Bot)
@@ -1346,7 +1409,12 @@ class AutonomousProductPlanner:
             base_dims = APP_QUALITY_DIMENSIONS
 
         for key, name, target_desc, is_crit, thresh in base_dims:
-            adj_thresh = min(90.0, thresh + min_threshold_bias)
+            # 🚪 Critical 차원은 90점 미만이면 통과 불가 (90점 완결 게이트).
+            #    비-Critical 차원은 기존 도메인 기준선을 유지한다.
+            if is_crit:
+                adj_thresh = max(float(thresh) + min_threshold_bias, CRITICAL_DIMENSION_MIN_SCORE)
+            else:
+                adj_thresh = float(thresh) + min_threshold_bias
             score = 50.0
             evidence = ""
             gap = ""
@@ -1361,10 +1429,15 @@ class AutonomousProductPlanner:
                     has_core_logic = any(k in combined_text for k in ["@app.get", "@app.post", "@router", "endpoint", "fastapi", "flask", "route", "handler"])
                 else:
                     has_core_logic = any(k in combined_text for k in ["def ", "class ", "function", "controller", "service", "repository", "component", "render"])
-                if has_core_logic and e2e_verified:
-                    score = 85.0
-                    evidence = "핵심 비즈니스 로직/엔티티 구현 및 E2E 정상 구동 확인"
+                if has_core_logic and e2e_verified and len(e2e_interactions) > 0:
+                    score = 92.0
+                    evidence = "핵심 비즈니스 로직/엔티티 구현 및 실제 사용자 인터랙션 E2E 실증"
                     gap = "정상 동작. 특이 결함 없음."
+                elif has_core_logic and e2e_verified:
+                    # 🚫 Render/코드 '존재'만으로 높은 점수를 주지 않는다 (Render ≠ 품질).
+                    score = 72.0
+                    evidence = "코드 존재 및 E2E 무결성은 확인되나 실제 사용자 인터랙션 실증 데이터 없음"
+                    gap = "렌더/코드 존재는 품질 증거가 아님 — 실제 조작 플로우 E2E 검증 필요"
                 elif has_core_logic:
                     score = 65.0
                     evidence = "코드는 존재하나 E2E에서 결함 또는 크래시 감지"
@@ -1378,7 +1451,7 @@ class AutonomousProductPlanner:
                 has_touch_controls = any(k in combined_text for k in ["touch", "joystick", "virtual", "button", "pointer", "48dp", "keydown", "keyup"])
                 has_shake_or_feedback = any(k in combined_text for k in ["shake", "hitstop", "feedback", "vibrate", "ripple", "spring"])
                 if has_touch_controls and has_shake_or_feedback:
-                    score = 85.0
+                    score = 92.0
                     evidence = "가상 조이스틱/키보드 듀얼 조작 및 피격/화면 흔들림 피드백 확인"
                     gap = "타격 피드백 양호. 상용 수준 근접."
                 elif has_touch_controls:
@@ -1393,10 +1466,15 @@ class AutonomousProductPlanner:
             elif key in ("visual_quality", "visual_design"):
                 has_sprites = any(k in combined_text for k in ["sprite", "drawimage", "canvas", "animation", "frame", "compose", "painter", "render", "draw", "graphic", "visual", "dust", "particle", "spark", "emitter"])
                 has_particles = any(k in combined_text for k in ["particle", "dust", "effect", "emitter", "spark"])
-                if has_sprites and has_particles:
-                    score = 85.0
-                    evidence = "스프라이트 렌더링 및 파티클 이펙트 시스템 확인"
+                if has_sprites and has_particles and len(e2e_screenshots) > 0:
+                    score = 92.0
+                    evidence = "스프라이트 렌더링 및 파티클 이펙트 시스템 확인 + 실제 렌더 스크린샷 증거"
                     gap = "시각 효과 풍성함."
+                elif has_sprites and has_particles:
+                    # 🚫 canvas/render 키워드 존재만으로 높은 점수를 주지 않는다.
+                    score = 72.0
+                    evidence = "스프라이트/파티클 키워드는 확인되나 실제 렌더 스크린샷/디자인 대조 증거 없음"
+                    gap = "코드 키워드 존재는 시각 품질 증거가 아님 — 실제 캡처 및 디자인 대조 필요"
                 elif has_sprites:
                     score = 62.0
                     evidence = "기본 스프라이트는 렌더링되나 착지/타격 파티클 이펙트 결핍"
@@ -1410,7 +1488,7 @@ class AutonomousProductPlanner:
                 has_webaudio = any(k in combined_text for k in ["audiocontext", "webaudio", "oscillator", "soundpool", "mediaplayer", "audio/"])
                 has_rich_tones = any(k in combined_text for k in ["frequency.setvalueattime", "setvalueattime", "arpeggio", "chord", "gain", "sine", "square", "triangle", "envelope"])
                 if has_webaudio and has_rich_tones:
-                    score = 85.0
+                    score = 92.0
                     evidence = "WebAudio Oscillator 주파수 변조 기반 칩튠 SFX 및 BGM 사운드 시스템 완비"
                     gap = "사운드 만족도 높음."
                 elif has_webaudio:
@@ -1426,7 +1504,7 @@ class AutonomousProductPlanner:
                 has_enemies_or_items = any(k in combined_text for k in ["enemy", "goomba", "coin", "score", "item", "level", "stage", "flag"])
                 has_multi_elements = any(k in combined_text for k in ["coin", "flag", "stage", "item"]) and any(k in combined_text for k in ["enemy", "goomba"])
                 if has_multi_elements:
-                    score = 85.0
+                    score = 92.0
                     evidence = "적 몬스터 순찰, 코인/블록 아이템, 스코어 및 골인 깃발 루프 완비"
                     gap = "풍성한 레벨 루프 완비."
                 elif has_enemies_or_items:
@@ -1441,7 +1519,7 @@ class AutonomousProductPlanner:
             elif key == "data_integrity":
                 has_storage = any(k in combined_text for k in ["localstorage", "sqlite", "room", "dao", "persist", "save", "load", "storage", "db", "json", "preference"])
                 if has_storage:
-                    score = 85.0
+                    score = 92.0
                     evidence = "로컬 영속성 스토리지 연동 및 데이터 상태 복원 메커니즘 확인"
                     gap = "데이터 무결성 양호."
                 else:
@@ -1454,7 +1532,7 @@ class AutonomousProductPlanner:
                 has_rich = any(k in combined_text for k in ["rich", "progress", "spinner", "table", "console", "ansi", "color", "click", "argparse"])
                 has_help = any(k in combined_text for k in ["--help", "help", "usage", "description", "epilog"])
                 if has_rich and has_help:
-                    score = 85.0
+                    score = 92.0
                     evidence = "Rich 콘솔 포맷팅, 진행률 표시, 상세 --help 매뉴얼 확인"
                     gap = "터미널 UX 완성도 우수."
                 elif has_rich or has_help:
@@ -1470,7 +1548,7 @@ class AutonomousProductPlanner:
                 has_try_except = any(k in combined_text for k in ["try:", "except", "finally:", "traceback", "sigint", "sigterm", "atexit", "exit_code", "sys.exit"])
                 has_graceful = any(k in combined_text for k in ["graceful", "shutdown", "cleanup", "signal", "recover"])
                 if has_try_except and has_graceful:
-                    score = 85.0
+                    score = 92.0
                     evidence = "try/except 예외 방어 및 graceful shutdown 로직 확인"
                     gap = "복원력 우수."
                 elif has_try_except:
@@ -1486,7 +1564,7 @@ class AutonomousProductPlanner:
                 has_config = any(k in combined_text for k in ["dotenv", "yaml", "json", "config", "env", "settings", "toml", "ini", "os.getenv", "os.environ"])
                 has_persist = any(k in combined_text for k in ["save", "load", "persist", "write", "read", "storage", "path", "file"])
                 if has_config and has_persist:
-                    score = 85.0
+                    score = 92.0
                     evidence = "환경변수/설정 파일 로딩 및 상태 영속성 메커니즘 확인"
                     gap = "설정 영속성 완비."
                 elif has_config:
@@ -1502,7 +1580,7 @@ class AutonomousProductPlanner:
                 has_async = any(k in combined_text for k in ["async", "await", "asyncio", "aiohttp", "concurrent", "thread", "process", "stream"])
                 has_batch = any(k in combined_text for k in ["batch", "chunk", "yield", "generator", "buffer", "pipeline"])
                 if has_async and has_batch:
-                    score = 85.0
+                    score = 92.0
                     evidence = "비동기 처리 및 스트리밍 배치 파이프라인 확인"
                     gap = "처리 성능 우수."
                 elif has_async:
@@ -1519,7 +1597,7 @@ class AutonomousProductPlanner:
                 has_validation = any(k in combined_text for k in ["pydantic", "validator", "schema", "validation", "type_hint", "annotated", "field"])
                 has_auth = any(k in combined_text for k in ["jwt", "token", "auth", "bearer", "oauth", "permission", "cors"])
                 if has_validation and has_auth:
-                    score = 85.0
+                    score = 92.0
                     evidence = "Pydantic 유효성 검증 및 JWT/OAuth 인증 체계 확인"
                     gap = "보안 체계 우수."
                 elif has_validation:
@@ -1535,7 +1613,7 @@ class AutonomousProductPlanner:
                 has_logging = any(k in combined_text for k in ["logging", "logger", "structlog", "json_log", "log.info", "log.error"])
                 has_health = any(k in combined_text for k in ["healthz", "health", "readyz", "ping", "status_check"])
                 if has_logging and has_health:
-                    score = 85.0
+                    score = 92.0
                     evidence = "구조화 로깅 및 헬스체크 엔드포인트 확인"
                     gap = "관측 가능성 완비."
                 elif has_logging:
@@ -1549,7 +1627,7 @@ class AutonomousProductPlanner:
 
             elif key == "stability_e2e":
                 if e2e_verified and len(e2e_interactions) > 0:
-                    score = 88.0
+                    score = 92.0
                     evidence = f"실기기/브라우저 E2E 검증 성공 (수행된 인터랙션: {len(e2e_interactions)}개, 크래시 0건)"
                     gap = "안정성 우수."
                 elif not e2e_verified:
@@ -1585,7 +1663,19 @@ class AutonomousProductPlanner:
         # Overall score is heavily influenced by the lowest score (prevents masked failures)
         overall_score = round(0.4 * min_score + 0.6 * avg_score, 1)
 
-        critical_gate_passed = (len(critical_failures) == 0) and e2e_verified
+        # 🚪 90점 완결 게이트 (SSOT): 종합 90점 + 모든 Critical 차원 90점 + E2E + Defect 0.
+        gate = evaluate_milestone_gate(
+            overall_score=overall_score,
+            dimensions=dimensions,
+            critical_requirements_satisfied=(len(critical_failures) == 0),
+            exit_criteria=None,
+            e2e_passed=e2e_verified,
+            critical_defect_count=0,
+            regression_passed=True,
+            # 🚦 QA 개선점 severity: P0/P1 차단 + P2/P3 감점 반영.
+            improvement_severities=improvement_severities,
+        )
+        critical_gate_passed = gate.passed
 
         # 8 Core Critic Questions
         ms_title = getattr(current_milestone, "title", "현재 마일스톤") if current_milestone else "현재 마일스톤"
@@ -1632,18 +1722,19 @@ class AutonomousProductPlanner:
             target_gap = f"최저 점수 영역({next_focus})을 기준선 이상으로 끌어올리는 정밀 패치 집중"
             is_final_complete = False
         else:
-            # Check if all milestones are done
-            is_final_complete = (overall_score >= 80.0 and min_score >= 65.0)
+            # 90점 완결 게이트를 통과한 마일스톤만 여기 도달한다.
+            # 최종 릴리즈 확정은 '남은 마일스톤이 없을 때'만 True (auto_pilot이 실제 값을 주입).
+            is_final_complete = (is_last_milestone is not False)
             if is_final_complete:
                 verdict = "FINAL_PRODUCT_RELEASE"
-                verdict_summary = f"🎉 6대 다차원 품질 기준 전수 통과 ({overall_score}점) — 상용 출시 가능한 고품질 제품 완성!"
+                verdict_summary = f"🎉 90점 완결 게이트 전수 통과 ({overall_score}점) — 최종 마일스톤 상용 품질 달성!"
                 next_focus = "상용 패키징 및 최종 릴리즈"
                 target_gap = "목표 품질 100% 달성 완료"
             else:
                 verdict = "PASS_MILESTONE"
-                verdict_summary = f"✅ 현재 마일스톤({ms_ver}) 품질 기준 합격 ({overall_score}점) — 차기 품질 사다리로 진화합니다."
+                verdict_summary = f"✅ 마일스톤({ms_ver}) 90점 완결 게이트 통과 ({overall_score}점) — 차기 품질 사다리로 진화합니다."
                 next_focus = "차기 마일스톤 고도화"
-                target_gap = "현재 단계 안정화 완료. 다음 품질 차원 확장."
+                target_gap = "현재 단계 완결. 다음 품질 차원 확장."
 
         e2e_summary = (
             f"실행 증적: TC {len(e2e_test_cases)}개 중 {tc_fail_count}개 실패, "

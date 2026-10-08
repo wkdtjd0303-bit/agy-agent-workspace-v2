@@ -14,8 +14,12 @@ from discord_utils import format_tool_status, cleanse_agent_output
 import role_authority
 
 # [🛡️ 3603초 프리징 차단] 비-AGY 엔진 어댑터의 '하드 상한'에 더하는 여유(초).
-# 어댑터 자체 타임아웃(기본 3600s) + 이 값이 최종 강제 회수 시점이 된다.
+# 어댑터 자체 타임아웃 + 이 값이 최종 강제 회수 시점이 된다. (타임아웃 0=무제한이면 상한 없음)
 _ADAPTER_CEILING_GRACE_SECONDS = float(os.getenv("NON_AGY_ENGINE_CEILING_GRACE", "90") or 90)
+
+# [♻️ 라우터 오류 자동 재개] 비-AGY 엔진이 라우터 오류로 턴을 실패시키면 같은 엔진/모델로
+# 세션을 새로 열어 즉시 재개하는 최대 재시도 횟수. (0 이면 자동 재개 비활성)
+_NON_AGY_RESUME_ATTEMPTS = max(0, int(os.getenv("NON_AGY_RESUME_ATTEMPTS", "2") or 2))
 
 logger = logging.getLogger(__name__)
 
@@ -422,17 +426,19 @@ class AgentRunner:
         어댑터 내부 타임아웃(기본 3600s)을 넘겨도 프로세스가 reap 되지 못해
         채널이 영구 프리징(예: 상태 타이머 3603초 고정)되는 것을 원천 차단한다.
         """
-        engine_timeout = float(getattr(config, "NON_AGY_ENGINE_TIMEOUT", 3600.0))
+        engine_timeout = float(getattr(config, "NON_AGY_ENGINE_TIMEOUT", 0.0))
         # [⏱️ 확장 QA 장기 대기] QA 역할(qa1..qa10/auditor/single_qa2)은 느리게 응답하는
-        # 모델의 정상 생성을 끝까지 기다리도록 EXTENDED_QA_TIMEOUT(기본 4000s) 예산을 보장한다.
+        # 모델의 정상 생성을 끝까지 기다리도록 EXTENDED_QA_TIMEOUT 예산을 보장한다.
         role_str = (role or getattr(session, "role", "") or "").lower().strip()
         is_qa_role = (
             role_str.startswith("qa")
             or role_str in ("reviewer", "qa_bot", "auditor", "single_qa2")
         )
         if is_qa_role:
-            engine_timeout = max(engine_timeout, float(getattr(config, "EXTENDED_QA_TIMEOUT", 4000.0)))
-        ceiling = max(1.0, engine_timeout + _ADAPTER_CEILING_GRACE_SECONDS)
+            engine_timeout = max(engine_timeout, float(getattr(config, "EXTENDED_QA_TIMEOUT", 0.0)))
+        # [⏱️ coder/qa/auditor 타임아웃 해제] 0 이하 = 무제한 → 하드 상한을 걸지 않는다.
+        unlimited = engine_timeout <= 0
+        ceiling = None if unlimited else max(1.0, engine_timeout + _ADAPTER_CEILING_GRACE_SECONDS)
         # [🚫 무질문 자율 진행] build_command 단계에서 지시문을 주입하지 않는 엔진
         # (codex/claude/copilot 등)은 여기서 프롬프트 최상단에 강제 주입하여,
         # 비대면(Discord) 환경에서 에이전트가 사용자에게 되묻고 멈추는 것을 원천 차단한다.
@@ -452,9 +458,8 @@ class AgentRunner:
                 role=role,
                 conversation_id_attr=conversation_id_attr,
             )
-            # QA 역할에만 어댑터 자체 상한을 장기 예산으로 명시 전달한다(비-QA 기본값 불변).
-            if is_qa_role:
-                exec_kwargs["timeout"] = engine_timeout
+            # 어댑터 자체 타임아웃에 이 값을 그대로 전달한다. 0 이하 = 무제한(어댑터 내부 상한 해제).
+            exec_kwargs["timeout"] = engine_timeout
             return await asyncio.wait_for(
                 adapter.execute(**exec_kwargs),
                 timeout=ceiling,
@@ -1092,18 +1097,70 @@ class AgentRunner:
                     role=session_role,
                     conversation_id_attr=conversation_id_attr,
                 )
-                combined_check_text = ((resp or "") + "\n" + "\n".join(errors or [])).lower()
-                is_invalid_tool_error = bool(
-                    combined_check_text and any(marker in combined_check_text for marker in (
+
+                def _eval_adapter_result(code_, resp_, errors_) -> Tuple[str, bool, bool]:
+                    low = ((resp_ or "") + "\n" + "\n".join(errors_ or [])).lower()
+                    invalid = bool(low and any(marker in low for marker in (
                         "invalid tool call",
                         "unknown tool 'terminal'",
                         "unknown tool",
                         "model generated invalid tool call",
                         "invalid_tool_call",
                         "terminal tool is disabled",
-                    ))
-                )
-                has_execution_failure = (code != 0 and not resp) or is_invalid_tool_error
+                    )))
+                    return low, invalid, (code_ != 0 and not resp_) or invalid
+
+                combined_check_text, is_invalid_tool_error, has_execution_failure = _eval_adapter_result(code, resp, errors)
+
+                # [♻️ 라우터 오류 자동 재개] 무료/저속 모델(opencode space-bunny 등)이 라우터
+                # 오류로 턴을 실패시키면, 같은 엔진/모델로 세션을 새로 열어 즉시 재개한다.
+                # (프라이버시 미동의·잘못된 모델 ID·사용자 취소는 재시도로 회복 불가 → 기존 처리로 위임)
+                if has_execution_failure and _NON_AGY_RESUME_ATTEMPTS > 0 and not getattr(session, "is_stopped", False):
+                    from engine_manager import (
+                        _get_engine_conversation_store,
+                        _is_privacy_training_error,
+                        _is_fatal_engine_error,
+                    )
+
+                    def _is_non_recoverable(text_: str) -> bool:
+                        return (
+                            _is_privacy_training_error(text_)
+                            or _is_fatal_engine_error(text_)
+                            or "context canceled" in text_
+                            or "작업이 중단" in text_
+                        )
+
+                    store_key = f"{getattr(adapter, 'engine_id', '')}:{conversation_id_attr or 'conversation_id'}"
+                    for resume_attempt in range(1, _NON_AGY_RESUME_ATTEMPTS + 1):
+                        if _is_non_recoverable(combined_check_text) or getattr(session, "is_stopped", False):
+                            break
+                        # 누적 컨텍스트(과대/손상)로 인한 라우터 오류는 같은 세션을 재사용하면
+                        # 100% 재발하므로 엔진 세션을 비우고 새 세션으로 재개한다.
+                        try:
+                            _get_engine_conversation_store(session).pop(store_key, None)
+                        except Exception:
+                            pass
+                        await safe_tool_notify(
+                            on_tool_update,
+                            f"♻️ **[{adapter.name}] 라우터 오류 감지 → 세션을 새로 열어 즉시 재개합니다 "
+                            f"({resume_attempt}/{_NON_AGY_RESUME_ATTEMPTS})...**",
+                        )
+                        code, resp, errors = await cls._run_adapter_with_hard_ceiling(
+                            adapter,
+                            session=session,
+                            prompt=prompt,
+                            on_tool_update=on_tool_update,
+                            model=effective_model,
+                            role=session_role,
+                            conversation_id_attr=conversation_id_attr,
+                        )
+                        combined_check_text, is_invalid_tool_error, has_execution_failure = _eval_adapter_result(code, resp, errors)
+                        if not has_execution_failure and resp and resp.strip():
+                            logger.info(
+                                f"[AutoResume] Engine '{engine_id}' recovered on attempt "
+                                f"{resume_attempt}/{_NON_AGY_RESUME_ATTEMPTS}."
+                            )
+                            return resp
 
                 if has_execution_failure:
                     if is_review_role:

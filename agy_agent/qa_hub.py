@@ -345,7 +345,7 @@ class AndroidNativeE2EOrchestrator:
             vision_res = await AndroidVisionInspector.analyze_project_screenshots(
                 workspace=android_dir or workspace,
                 app_name=app_display_name,
-                max_screens=6,
+                max_screens=None,  # 전수조사: 신선한 스크린샷 전체를 검사한다(고정 6장 컵 제거)
                 session_start_time=session_start_time
             )
             if vision_res.get("success") and vision_res.get("screenshots"):
@@ -359,6 +359,8 @@ class AndroidNativeE2EOrchestrator:
                 avg_score = int(vision_res.get("average_score", 0))
                 report.dom_insights["vision_score"] = avg_score
                 report.dom_insights["vision_summary"] = vision_res.get("summary_markdown", "")
+                report.dom_insights["vision_verified"] = bool(vision_res.get("vision_verified"))
+                report.dom_insights["vision_failed_screens"] = int(vision_res.get("failed_count", 0))
                 
                 # Add Structured Visual UI/UX Test Cases (Spacing, Typography, 48dp Touch Targets, Aesthetics)
                 report.test_cases.append(TestCaseResult(

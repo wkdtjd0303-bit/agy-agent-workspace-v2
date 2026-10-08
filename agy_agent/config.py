@@ -58,6 +58,12 @@ CLAUDE_PATH = os.getenv("CLAUDE_PATH", "claude")
 OPENCODE_PATH = os.getenv("OPENCODE_PATH", "opencode")
 CMDC_PATH = os.getenv("CMDC_PATH", os.getenv("COMMAND_CODE_PATH", "/home/jangsung/.npm-global/bin/cmdc"))
 COMMAND_CODE_API_KEY = os.getenv("COMMAND_CODE_API_KEY", "")
+# [🔒 ZDR 강제] Command Code CLI Zero Data Retention.
+# CMD_ZDR=1 이면 cmdc 요청은 ZDR 지원 업체로만 라우팅되며,
+# 미지원 시 비-ZDR 로 폴백하지 않고 422(cmd_zdr_no_providers)로 실패한다.
+# 기본 1(활성). cmdc 서브프로세스가 os.environ 을 상속하므로 프로세스 전역에 반영한다.
+CMD_ZDR = os.getenv("CMD_ZDR", "1").strip() or "1"
+os.environ["CMD_ZDR"] = CMD_ZDR
 # OpenCode Go 다중 API 키 (쉼표 구분, 1번 키 한도 소진 시 자동 Failover)
 OPENCODE_API_KEYS: List[str] = [
     k.strip() for k in os.getenv("OPENCODE_API_KEYS", "").split(",") if k.strip()
@@ -293,11 +299,13 @@ COMMANDER_BOT_MENTION = f"<@{COMMANDER_BOT_ID}>"
 AGY_HEADED = os.getenv("AGY_HEADED", "0").lower() in ("1", "true", "yes")
 WATCHDOG_TOOL_TIMEOUT = int(os.getenv("WATCHDOG_TOOL_TIMEOUT", "900"))       # 900s (15 min) for deep builds, subagents & thinking tool runs
 WATCHDOG_SILENCE_TIMEOUT = int(os.getenv("WATCHDOG_SILENCE_TIMEOUT", "1800")) # 1800s (30 min) for deep thinking models
-EXTENDED_QA_TIMEOUT = float(os.getenv("EXTENDED_QA_TIMEOUT", "4000.0"))       # 4000s (~66분, 1시간 6분 40초) 확장 QA(qa2..qa10) 응답 대기 상한 — 느린 모델의 정상 생성도 끝까지 대기
-# [🛡️ 프리징 차단] 비-AGY 엔진(opencode/hermes/codex 등) 어댑터의 '하드 상한'.
-# 어댑터 내부 타임아웃을 넘겨도 프로세스가 reap 되지 않아 채널이 영구 정지(3603초 프리징)하는 것을
-# agent_runner 가 이 값 + 90초의 asyncio.wait_for 로 강제 회수하여 원천 차단한다.
-NON_AGY_ENGINE_TIMEOUT = float(os.getenv("NON_AGY_ENGINE_TIMEOUT", "3600.0"))
+# [⏱️ coder/qa/auditor 타임아웃 해제] 느린 무료 모델(opencode space-bunny 등)의 정상 생성이
+# 초 단위 상한에 걸려 작업이 중단되던 문제를 없애기 위해, 역할 실행 상한을 두지 않는다.
+#   · QA/감사 역할 상한 : EXTENDED_QA_TIMEOUT
+#   · 비-AGY 엔진 하드 상한 : NON_AGY_ENGINE_TIMEOUT
+# 0 이하 = 무제한(타임아웃 미적용). (무응답 교착은 StallGuard 가 별도로 감시한다.)
+EXTENDED_QA_TIMEOUT = float(os.getenv("EXTENDED_QA_TIMEOUT", "0"))
+NON_AGY_ENGINE_TIMEOUT = float(os.getenv("NON_AGY_ENGINE_TIMEOUT", "0"))
 STATE_FILE_PATH = os.getenv(
     "STATE_FILE_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "channel_sessions.json")

@@ -2189,14 +2189,14 @@ async def stall_command(ctx):
     embed = discord.Embed(
         title="🛡️ [StallGuard 채널 정지 감시 현황]",
         description=(
-            "작업 도중 정지(무응답/대기열 교착)를 10초 주기로 감시하고 자동 회수합니다."
+            "작업 도중 정지(무응답/대기열 교착)를 10초 주기로 감시하고 경보합니다 (강제 회수 없음)."
         ),
         color=discord.Color.green()
         if busy_total and all(not l.startswith("🔴") for l in active_lines)
         else (discord.Color.gold() if busy_total else discord.Color.green())
     )
     embed.add_field(
-        name=f"⚙️ 임계값 (경보 {int(_sg.WARN_SECONDS)}s / 심층관찰 {int(_sg.HARD_SECONDS)}s / 강제회수 {int(_sg.DEEP_SECONDS)}s / 대기열 {int(_sg.QUEUE_WAIT_SECONDS)}s)",
+        name=f"⚙️ 임계값 (경보 {int(_sg.WARN_SECONDS)}s / 심층관찰 {int(_sg.HARD_SECONDS)}s / 심층상한 {int(_sg.DEEP_SECONDS)}s / 대기열 {int(_sg.QUEUE_WAIT_SECONDS)}s)",
         value="\n".join(active_lines),
         inline=False
     )
@@ -2714,6 +2714,10 @@ async def bots_command(ctx):
     img_disp = GlobalModelManager.get_role_model_display("image")
     img_model = GlobalModelManager.get_role_model("image") or getattr(config, "IMAGE_MODEL", "gemini-3.8-flash-high")
     img_eng = GlobalModelManager.get_role_engine("image") or getattr(config, "IMAGE_ENGINE", "agy")
+
+    vis_disp = GlobalModelManager.get_role_model_display("vision")
+    vis_model = GlobalModelManager.get_role_model("vision") or "google/gemini-3.8-flash"
+    vis_eng = GlobalModelManager.get_role_engine("vision") or "hermes"
     
     embed = discord.Embed(
         title="🤖 AGY 자율 협업 AI 봇 군단 & 실시간 모델 현황",
@@ -2784,6 +2788,17 @@ async def bots_command(ctx):
             f"• **실제 백엔드**: {'✅ ' if _img_backend_ok else '⚠️ '}{_img_backend_desc}\n"
             f"• **호출 방식**: Coder/QA가 `[IMAGE_REQUEST: ...]` 지시 → 이미지 봇 생성 → Coder가 결과물 바인딩 (`{config.COMMAND_PREFIX}image` 수동 호출 가능)\n"
             f"• **참고**: AI 생성 실패 시 사유를 정직하게 고지하며, 절차적 임시 에셋은 명시 허용 시에만 사용합니다."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name=f"🖼️ Vision Analyst (첨부 이미지 분석) — {vis_disp}",
+        value=(
+            f"• **현재 배정 모델**: `{vis_model}` ({vis_eng.upper()})\n"
+            f"• **주요 역할**: 사용자가 첨부한 이미지·스크린샷의 OCR 텍스트, UI/UX 레이아웃, 스타일 토큰을 정밀 분석해 Coder/QA 프롬프트에 주입\n"
+            f"• **변경 방법**: `{config.COMMAND_PREFIX}model vision <모델>` (예: `{config.COMMAND_PREFIX}model vision google/gemini-3.8-flash`)\n"
+            f"• **참고**: 이미지 생성(🎨 Image generator)과는 별개이며, 분석 실패 시 사유를 정직하게 고지합니다."
         ),
         inline=False
     )
@@ -6159,31 +6174,63 @@ async def on_message(message: discord.Message):
                 vision_status_msg = None
                 try:
                     vision_status_msg = await message.reply(
-                        f"🖼️ **[첨부 이미지 시각 분석(Gemini Vision) 진행 중...]**\n"
+                        f"🖼️ **[첨부 이미지 시각 분석 진행 중...]**\n"
                         f"> 파일명: `{display_name}` · 화면 구성, OCR 텍스트, UI/UX 레이아웃을 정밀 분석하고 있습니다. ⏳"
                     )
                 except Exception:
                     pass
 
                 from vision_attachment_analyzer import VisionAttachmentAnalyzer
-                vision_res = await VisionAttachmentAnalyzer.analyze_image_file(
-                    image_path=ref_file_path,
-                    user_prompt=raw_user_prompt or "첨부된 이미지의 디자인과 레이아웃을 분석하여 구현해줘",
-                    role="general"
+                # [🛑 취소 가능한 비전 분석] 인라인 await 는 !stop/!reset 이 취소할 수 없어
+                # "이미지 시각 분석 진행 중" 상태가 계속 남았다. 태스크로 추적하여
+                # session.stop() 이 즉시 취소하고, 이 메시지의 후속 실행도 함께 중단한다.
+                vision_task = asyncio.ensure_future(
+                    VisionAttachmentAnalyzer.analyze_image_file(
+                        image_path=ref_file_path,
+                        user_prompt=raw_user_prompt or "첨부된 이미지의 디자인과 레이아웃을 분석하여 구현해줘",
+                        role="general"
+                    )
                 )
+                if session:
+                    session.vision_task = vision_task
+                try:
+                    vision_res = await vision_task
+                except asyncio.CancelledError:
+                    # 외부(봇 종료 등) 취소가 아니라 !stop/!reset 에 의한 취소일 때만 삼킨다.
+                    if not vision_task.cancelled():
+                        raise
+                    if vision_status_msg:
+                        try:
+                            await vision_status_msg.edit(
+                                content=f"🛑 **[첨부 이미지 시각 분석 중단됨: `{display_name}`]**"
+                            )
+                        except Exception:
+                            pass
+                    return
+                finally:
+                    if session and getattr(session, "vision_task", None) is vision_task:
+                        session.vision_task = None
 
                 vision_report_text = ""
+                vision_verified = bool(vision_res.get("vision_verified"))
                 if vision_res.get("success") and vision_res.get("analysis"):
                     vision_report_text = vision_res["analysis"]
                     if vision_status_msg:
                         try:
-                            await vision_status_msg.edit(
-                                content=(
+                            if vision_verified:
+                                status_content = (
                                     f"🖼️ **[첨부 이미지 시각 분석 완료: `{display_name}`]**\n"
-                                    f"> 🔍 **Gemini Vision 분석 완료** ({vision_res.get('width')}x{vision_res.get('height')} px)\n"
+                                    f"> 🔍 **비전 분석 완료** (`{vision_res.get('engine') or 'vision'}` · {vision_res.get('width')}x{vision_res.get('height')} px)\n"
                                     f"> 화면 내 텍스트(OCR 전수 추출) 및 레이아웃/스타일 토큰이 에이전트(Coder/QA) 작업에 즉시 주입되었습니다! 🚀"
                                 )
-                            )
+                            else:
+                                status_content = (
+                                    f"🖼️ **[첨부 이미지 처리 완료: `{display_name}`]**\n"
+                                    f"> ⚠️ **비전 모델 미호출 — 메타데이터만 확보** ({vision_res.get('width')}x{vision_res.get('height')} px)\n"
+                                    f"> 사유: {vision_res.get('degraded_reason') or '비전 API 미설정/호출 실패'}. "
+                                    f"원본 파일 경로가 에이전트에 전달되어 직접 확인 모드로 진행합니다."
+                                )
+                            await vision_status_msg.edit(content=status_content)
                         except Exception:
                             pass
                 else:
@@ -6195,7 +6242,12 @@ async def on_message(message: discord.Message):
                         except Exception:
                             pass
 
-                vision_block = f"\n\n**[🔍 Gemini Vision 정밀 시각 분석 리포트]**:\n{vision_report_text}\n" if vision_report_text else ""
+                if vision_report_text and vision_verified:
+                    vision_block = f"\n\n**[🔍 정밀 시각 분석 리포트 (`{vision_res.get('engine') or 'vision'}`)]**:\n{vision_report_text}\n"
+                elif vision_report_text:
+                    vision_block = f"\n\n**[🖼️ 이미지 메타데이터 (정밀 비전 분석 미수행)]**:\n{vision_report_text}\n"
+                else:
+                    vision_block = ""
 
                 is_evaluation_or_question = any(kw in (raw_user_prompt or "").lower() for kw in [
                     "몇점", "몇 점", "어때", "감점", "해결책", "원인", "의견", "어떻게 생각해",
@@ -6206,6 +6258,14 @@ async def on_message(message: discord.Message):
                     f"⚠️ **[레퍼런스 이미지 외곽선 추출(Tracing) 및 모킹 절대 금지]**: 위 이미지는 사용자가 의뢰 시 제공한 원본 레퍼런스입니다.\n"
                     f"이 이미지를 그대로 복사하거나, 스크립트 코드(Image.open, cv2.imread, findContours, np.array 등)에서 열어 외곽선/마스크/픽셀을 추출하여 산출물로 위장하는 행위는 엄격히 금지됩니다. (오직 시각적 파악 및 비교 검증용)"
                 )
+                # ♻️ [중복 판독 방지] 비전 모델이 정밀 분석에 성공한 경우, Coder/QA 가 원본을
+                #    다시 열어 같은 이미지를 두 번 읽는 낭비를 줄이도록 리포트를 우선 신뢰하게 한다.
+                if vision_verified:
+                    anti_tracing_rule += (
+                        f"\n♻️ **[중복 판독 방지]**: 위 시각 분석 리포트가 이미 이미지의 텍스트(OCR)·레이아웃·스타일을 "
+                        f"전수 추출했습니다. 별도의 시각 비교가 꼭 필요한 경우가 아니라면 동일한 원본 이미지를 다시 열어 "
+                        f"중복 분석하지 말고 이 리포트를 신뢰하십시오."
+                    )
 
                 if not raw_user_prompt:
                     attachment_notes.append(
@@ -6502,9 +6562,10 @@ async def start_all_bots():
         logger.info("Starting Server Manager Bot client...")
         tasks.append(server_manager_bot.start(DISCORD_SERVER_MANAGER_BOT_TOKEN))
 
-    # [🛡️ StallGuard] 채널 오케스트레이션 교착(정지) 자동 감시·해제 태스크 상시 가동
+    # [🛡️ StallGuard] 채널 오케스트레이션 정지(무응답/대기열 교착) 감시 태스크 상시 가동
+    # (관찰·경보 전용 — 강제 회수 없음)
     try:
-        from stall_guard import build_guard, WARN_SECONDS, HARD_SECONDS, DEEP_SECONDS, QUEUE_WAIT_SECONDS
+        from stall_guard import build_guard, WARN_SECONDS, QUEUE_WAIT_SECONDS
 
         class _LiveSessions:
             """bot 모듈 글로벌을 매 호출마다 재해석 → !reset/핫리로드 후에도 최신 세션을 본다."""
@@ -6526,13 +6587,11 @@ async def start_all_bots():
             _LiveSessions(),
             notify_fn=_stall_notify,
             dispatch_fn=dispatch_next_in_queue,
-            lock_registry=_channel_queue_locks,
         )
         tasks.append(_stall_guard.run())
         logger.info(
-            f"[StallGuard] 기동: 무응답 경보 {int(WARN_SECONDS)}s / 심층 관찰 {int(HARD_SECONDS)}s / "
-            f"강제 회수(절대 상한) {int(DEEP_SECONDS)}s / 대기열 정체 {int(QUEUE_WAIT_SECONDS)}s "
-            f"(증거: reports/watchdog/stalls.json)"
+            f"[StallGuard] 기동(관찰 전용 · 강제 회수 없음): 무응답 경보 {int(WARN_SECONDS)}s / "
+            f"대기열 정체 {int(QUEUE_WAIT_SECONDS)}s (증거: reports/watchdog/stalls.json)"
         )
     except Exception as guard_err:
         logger.warning(f"[StallGuard] 기동 실패(봇은 계속 가동): {guard_err}")

@@ -1,5 +1,5 @@
 {
-  "timestamp": 1790866169,
+  "timestamp": 1791242430,
   "test_suite": "PRD Feature & E2E Requirements Traceability Matrix",
   "total_tests": 7,
   "passed_tests": 7,
@@ -36,8 +36,8 @@
       "details": "데몬 중단 감지 시 10초 내 자동 재기동(RestartSec=10) 및 상태 복구.",
       "evidence_files": [
         "quality_state_manager.py",
-        "qa_hub.py",
-        "help_manager.py"
+        "telemetry_status_manager.py",
+        "qa_hub.py"
       ]
     },
     {
@@ -80,8 +80,8 @@
       "details": "사용자가 플랫폼을 명시하지 않아도 워크스페이스 프로젝트와 실행 환경을 자율 탐색(Web, Android, Windows Native, iOS)하여 적합한 E2E Adapter를 자",
       "evidence_files": [
         "quality_state_manager.py",
-        "windows_vm_manager.py",
-        "platform_discovery_engine.py"
+        "telemetry_status_manager.py",
+        "windows_vm_manager.py"
       ]
     }
   ],

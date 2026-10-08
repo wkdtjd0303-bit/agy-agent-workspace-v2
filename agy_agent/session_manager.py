@@ -182,6 +182,9 @@ class ChannelSession:
     status_desc: str = "정상 대기 중"
     current_process: Any = None
     current_task: Any = None
+    # [🖼️ 첨부 이미지 비전 분석] on_message 인라인에서 돌던 취소 불가능한 분석을
+    # !stop/!reset 이 즉시 취소할 수 있도록 추적하는 태스크.
+    vision_task: Any = None
     # [🛡️ StallGuard 하트비트] 실제 진행 시각과 busy 시작 시각 (정지 감시 기준)
     busy_since: float = 0.0
     last_progress_at: float = 0.0
@@ -262,6 +265,7 @@ class ChannelSession:
         self.last_url: Optional[str] = last_url
         self.current_process: Optional[asyncio.subprocess.Process] = None
         self.current_task: Optional[asyncio.Task] = None
+        self.vision_task: Optional[asyncio.Task] = None
         self.is_busy: bool = is_busy
         # [🛡️ StallGuard] busy 시작 시각 / 실제 진행(하트비트) 시각 / 경보 발송 여부
         self.busy_since: float = time.time() if is_busy else 0.0
@@ -457,6 +461,11 @@ class ChannelSession:
             self.current_task.cancel()
             stopped = True
             self.current_task = None
+
+        if self.vision_task and not self.vision_task.done():
+            self.vision_task.cancel()
+            stopped = True
+            self.vision_task = None
 
         if self.is_busy:
             self.is_busy = False

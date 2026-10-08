@@ -224,6 +224,7 @@ class AndroidVisionInspector:
         logger.info(f"Running Gemini Vision analysis for {app_name} ({sz_kb:.1f}KB): {screenshot_path}")
 
         analysis_text = None
+        engine_used = ""
 
         # 1. Check for direct Gemini API Key (non-blocking thread execution)
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -237,6 +238,8 @@ class AndroidVisionInspector:
                 ui_grounding_metadata=ui_grounding_metadata,
                 user_query=user_query
             )
+            if analysis_text and analysis_text.strip():
+                engine_used = "direct-google-genai"
 
         # 2. If direct API not available or failed, run via AgentRunner with unique ephemeral session
         if not analysis_text:
@@ -267,6 +270,8 @@ class AndroidVisionInspector:
                     ),
                     timeout=60.0
                 )
+                if analysis_text and analysis_text.strip():
+                    engine_used = f"agent-runner:{VISION_MODEL}"
             except asyncio.TimeoutError:
                 logger.warning(f"Vision inspection timed out (60s) for {screenshot_path}")
                 return {
@@ -326,8 +331,32 @@ class AndroidVisionInspector:
             "analysis_text": analysis_text,
             "score": score,
             "size_kb": round(sz_kb, 1),
-            "app_name": app_name
+            "app_name": app_name,
+            "engine": engine_used or "agent-runner",
+            "vision_verified": True
         }
+
+    @staticmethod
+    def _detect_duplicate_frames(image_paths: List[str]) -> List[Tuple[str, str]]:
+        """
+        [전수조사] 연속 스크린샷이 바이트 단위로 100% 동일한 쌍을 검출한다(UI Freeze 후보).
+        파일명이 아니라 실제 SHA-256 페이로드로만 판정한다.
+        """
+        import hashlib
+        pairs: List[Tuple[str, str]] = []
+        prev_hash: Optional[str] = None
+        prev_path: Optional[str] = None
+        for p in image_paths:
+            try:
+                with open(p, "rb") as f:
+                    cur_hash = hashlib.sha256(f.read()).hexdigest()
+            except Exception:
+                prev_hash, prev_path = None, None
+                continue
+            if prev_hash is not None and cur_hash == prev_hash:
+                pairs.append((prev_path or "", p))
+            prev_hash, prev_path = cur_hash, p
+        return pairs
 
     @classmethod
     def select_before_after_pair(cls, images: List[str]) -> Tuple[Optional[str], Optional[str], str, str]:
@@ -433,14 +462,16 @@ class AndroidVisionInspector:
         cls,
         workspace: str,
         app_name: str = "안드로이드 앱",
-        max_screens: int = 6,
+        max_screens: Optional[int] = None,
         session_start_time: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Discovers all real physical UI screenshots across standard project directories,
-        performs Gemini Vision multimodal inspection on key screens, computes average score,
-        and automatically writes Gate 5 visual_qa.json evidence.
+        performs Gemini Vision multimodal inspection on EVERY fresh screen (전수조사),
+        computes an honest average over successfully analyzed screens, and writes Gate 5
+        visual_qa.json evidence.
         Enforces strict session isolation by rejecting any screenshots created prior to session_start_time.
+        ``max_screens`` 가 None/0 이면 신선한 스크린샷 전체를 검사한다(기본값).
         """
         from evidence_validator import EvidenceValidator
 
@@ -509,14 +540,22 @@ class AndroidVisionInspector:
                 "screenshots": []
             }
 
-        # Select up to max_screens of the freshest screenshots that physically exist
-        target_images = [img for img in found_images if os.path.isfile(img)][:max_screens]
+        # 전수조사: max_screens 미지정(None/0)이면 신선한 스크린샷 전체를 검사한다.
+        available_images = [img for img in found_images if os.path.isfile(img)]
+        if max_screens and max_screens > 0:
+            target_images = available_images[:max_screens]
+        else:
+            target_images = available_images
         # Re-sort chronologically for report readability (e.g. 01_home -> 02_viewer -> 03_ocr -> 04_dark)
         target_images.sort(key=lambda p: os.path.basename(p))
 
+        # UI Freeze 전수 검출: 연속 스크린샷이 바이트 단위로 완전 동일하면 화면 멈춤 후보로 적발한다.
+        duplicate_frames = cls._detect_duplicate_frames(target_images)
+
         screen_results = []
         screenshots_tuples = []
-        total_score = 0
+        successful_scores: List[int] = []
+        failed_screens: List[str] = []
 
         for idx, img_path in enumerate(target_images, 1):
             base_label = os.path.splitext(os.path.basename(img_path))[0].replace("_", " ").title()
@@ -528,27 +567,32 @@ class AndroidVisionInspector:
                 res = await cls.analyze_screenshot(img_path, app_name=f"{app_name} - {screen_label}")
                 if res.get("success"):
                     screen_results.append(res)
-                    total_score += res.get("score", 0)
+                    successful_scores.append(int(res.get("score", 0) or 0))
                 else:
-                    err_score = res.get("score", 30)
+                    # 실패 화면에 임의 점수를 부여해 평균을 오염시키지 않는다(정직 평균).
+                    failed_screens.append(img_path)
                     screen_results.append({
                         "success": False,
                         "screenshot_path": img_path,
                         "analysis_text": f"• {screen_label}: 비전 분석 실패 ({res.get('error', '응답 없음')})",
-                        "score": err_score
+                        "score": None
                     })
-                    total_score += err_score
             except Exception as e:
                 logger.warning(f"API Error for {screen_label}: {e}")
+                failed_screens.append(img_path)
                 screen_results.append({
                     "success": False,
                     "screenshot_path": img_path,
                     "analysis_text": f"⚠️ 비전 분석 API 호출 실패 ({e})",
-                    "score": 0
+                    "score": None
                 })
-                total_score += 0
 
-        avg_score = int(round(total_score / max(len(screen_results), 1)))
+        # 정직 평균: 실제 비전 분석에 성공한 화면들의 점수만으로 산출한다.
+        avg_score = (
+            int(round(sum(successful_scores) / len(successful_scores)))
+            if successful_scores else 0
+        )
+        vision_verified = len(successful_scores) > 0
 
         # Build component-level crop assets and Before/After cards via UIVisualDiffer
         crop_assets = []
@@ -611,19 +655,25 @@ class AndroidVisionInspector:
         # Build summary markdown for 3-agent Pair collaboration and Discord embeds
         summary_md_parts = [
             f"### 📱 [{app_name}] Gemini Vision 모바일 UI/UX 심층 시각 감사 리포트",
-            f"• **종합 시각 품질 점수:** 🎨 **{avg_score}/100점** (검사된 화면: {len(target_images)}장, 포커스 크롭: {len(crop_assets)}장)",
+            f"• **종합 시각 품질 점수:** 🎨 **{avg_score}/100점** (검사 대상: {len(target_images)}장 · 분석 성공: {len(successful_scores)}장 · 실패: {len(failed_screens)}장 · 포커스 크롭: {len(crop_assets)}장)",
             f"• **📐 버튼 간격 & 여백:** `{'🟢 균형 우수 (48dp+ 준수)' if avg_score >= 85 else '⚠️ 미세 조정 권장'}`",
             f"• **🔠 타이포그래피 대비율:** `{'🟢 WCAG 4.5:1+ 가독성 확보' if avg_score >= 80 else '⚠️ 대비율 개선 필요'}`",
             f"• **👆 모바일 터치 사용성:** `{'🟢 엄지 터치 최적화' if avg_score >= 85 else '⚠️ 터치 타깃 확대 권장'}`",
             f"• **🎨 심미성 & 비주얼 완성도:** `{'🟢 모던 & 세련된 UI Polish' if avg_score >= 85 else '⚠️ 디자인 일관성 보완'}`\n",
             "**🔍 화면별 세부 시각 분석:**"
         ]
+        if duplicate_frames:
+            summary_md_parts.insert(
+                2,
+                f"• **🚨 UI Freeze 후보:** 연속 바이트 완전 동일 프레임 {len(duplicate_frames)}쌍 검출"
+            )
 
         for s_res in screen_results:
             s_name = os.path.basename(s_res.get("screenshot_path", ""))
             s_text = s_res.get("analysis_text", "")
-            s_score = s_res.get("score", 0)
-            summary_md_parts.append(f"• **`{s_name}`** (점수: {s_score}/100):\n{s_text}\n")
+            s_score = s_res.get("score")
+            score_label = f"{s_score}/100" if isinstance(s_score, int) else "분석 실패"
+            summary_md_parts.append(f"• **`{s_name}`** (점수: {score_label}):\n{s_text}\n")
 
         full_summary_md = "\n".join(summary_md_parts)
 
@@ -638,10 +688,15 @@ class AndroidVisionInspector:
                 "timestamp": datetime.datetime.now().isoformat(),
                 "average_score": avg_score,
                 "screenshots_count": len(found_images),
-                "analyzed_count": len(screen_results),
+                "screenshots_analyzed": len(target_images),
+                "analyzed_count": len(successful_scores),
+                "failed_count": len(failed_screens),
+                "vision_verified": vision_verified,
+                "duplicate_frame_count": len(duplicate_frames),
+                "duplicate_frames": [[os.path.basename(a), os.path.basename(b)] for a, b in duplicate_frames],
                 "screenshots": found_images,
                 "component_crops": crop_assets,
-                "verdict": "PASS" if avg_score >= 80 else "WARN",
+                "verdict": "PASS" if (avg_score >= 80 and vision_verified and not duplicate_frames and not failed_screens) else "WARN",
                 "summary": full_summary_md,
                 # [Anti-Gaming Ground Truth] 실 픽셀 기반 증거 메타데이터 (파일명 아님)
                 "state_diversity": int(state_evidence.get("state_count", 0) or 0),
@@ -704,6 +759,10 @@ class AndroidVisionInspector:
             "app_name": app_name,
             "average_score": avg_score,
             "screens_analyzed": len(screen_results),
+            "analyzed_count": len(successful_scores),
+            "failed_count": len(failed_screens),
+            "vision_verified": vision_verified,
+            "duplicate_frame_count": len(duplicate_frames),
             "screen_results": screen_results,
             "summary_markdown": full_summary_md,
             "screenshots": screenshots_tuples,

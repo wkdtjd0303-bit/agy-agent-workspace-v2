@@ -176,6 +176,33 @@ Coder/QA 본문 지시문                 이미지 봇 (4번째 클라이언트
    - `tests/test_role_authority.py`(시스템) 및 `tests/test_role_authority_enforcement.py`(워크스페이스)에서
      E2E 파이프라인 실주행으로 "Coder 채널 무주체 판정문 0건" 불변식을 검증한다.
 
+## 2.8 🔬 자율 E2E 검증 루프 (Autonomous E2E Verification Loop · 협업 모드 전용)
+
+> 코드: `autonomous_e2e_loop.py` · 연동: `trio_agent_runner.py`
+
+기존 E2E(`cross_platform_e2e_runner`)는 수동 `!e2e` 명령에서만 동작했고, 협업 파이프라인
+내부에서는 시각 스크린샷 몇 장으로 끝났다. 본 루프는 **!mode 2/2+/3/3+ 협업 파이프라인의
+Coder 턴 종료 직후**에 삽입되어, 사용자가 지적하지 않아도 스스로 검증·보강한다.
+
+```text
+Coder 턴 종료
+   │
+   ▼
+[autonomous_e2e_loop.py]
+   1. 실제 테스트 실행   : pytest / npm test / gradle test / cargo / go 자동 탐지·실행 (subprocess, 주입 없는 argv)
+   2. 스크린샷 실측      : reports/gate5/screenshots 등 신선 캡처 수집 + blank 프레임 계측
+   3. 결함 자율 규명     : 테스트 실패/런타임 에러/시각 증거 결손 → 구조화 결함
+   │
+   ├─ QA 프롬프트 + Auditor 프롬프트에 리포트 블록 주입
+   ├─ QA가 APPROVED 해도 BLOCKER/MAJOR 잔존 시 [STATUS: REJECTED] 기계적 반려 (상한 AUTONOMOUS_E2E_MAX_ROUNDS)
+   ├─ Coder 피드백([🔬 AUTONOMOUS-E2E-FIX])으로 실패 로그·수정 스펙 환류 → 다음 라운드 재작업
+   └─ 물리 증거: reports/gate4/autonomous_e2e_report.json
+```
+
+- 상한 도달 시 무한 핑퐁을 멈추고 Auditor/인간 에스컬레이션으로 전환한다.
+- 환경/의존성 미비(pytest exit 5, 모듈 미설치)는 실패가 아니라 '미검증 갭'으로 정직하게 기록한다.
+- `AUTONOMOUS_E2E_LOOP_ENABLED=0` 으로 즉시 비활성화 가능.
+
 ## 3. Bounded Autonomy & 10 Core Safety Guards (AGY 4.x)
 무인 자율 진화(`!auto on evolve`)가 제어 불가능한 무한 루프나 시스템 고갈로 치닫지 않도록 10대 하드 가드레일을 강제합니다:
 
