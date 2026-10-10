@@ -41,22 +41,22 @@ ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
         "icon": "🔵",
         "description": "Google Antigravity 네이티브 통합 개발/검증 엔진",
         "models": [
+            # [🧭 CLI 정합 — 2026-10-08] `agy models`(CLI `/model`) 14개와 1:1 일치.
+            # (tiered/agent/3-flash 변형은 CLI 에 없으므로 제거 — 유령 모델 노출 방지)
             ("gemini-3.8-flash-high", "Gemini 3.8 Flash High (초고속 개발/비전)"),
+            ("gemini-3.8-flash-medium", "Gemini 3.8 Flash Medium (균형 개발)"),
+            ("gemini-3.8-flash-low", "Gemini 3.8 Flash Low (경량/고속)"),
             ("gemini-3.7-flash-high", "Gemini 3.7 Flash High (균형잡힌 코딩)"),
-            ("gemini-3.1-pro-high", "Gemini 3.1 Pro High (심층 추론/검증)"),
-            ("gpt-oss-120b-medium", "GPT-OSS 120B Medium (오픈소스 거대 추론)"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6 Thinking (고난도 추론)"),
-            ("claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking (최상위 추론)"),
-            ("gemini-3.8-flash-tiered", "Gemini 3.8 Flash Tiered (동적 부하분산)"),
-            ("gemini-3.7-flash-tiered", "Gemini 3.7 Flash Tiered"),
             ("gemini-3.7-flash-medium", "Gemini 3.7 Flash Middle (경량 관제)"),
-            ("gemini-3.1-pro-low", "Gemini 3.1 Pro Low (경량 추론)"),
+            ("gemini-3.7-flash-low", "Gemini 3.7 Flash Low (경량 추론)"),
             ("gemini-3.6-flash-high", "Gemini 3.6 Flash High"),
-            ("gemini-3.6-flash-tiered", "Gemini 3.6 Flash Tiered"),
             ("gemini-3.6-flash-medium", "Gemini 3.6 Flash Medium"),
             ("gemini-3.6-flash-low", "Gemini 3.6 Flash Low"),
-            ("gemini-3.5-flash-agent", "Gemini 3.5 Flash High"),
-            ("gemini-3-flash", "Gemini 3 Flash (경량/고속)"),
+            ("gemini-3.1-pro-high", "Gemini 3.1 Pro High (심층 추론/검증)"),
+            ("gemini-3.1-pro-low", "Gemini 3.1 Pro Low (경량 추론)"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6 Thinking (고난도 추론)"),
+            ("claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking (최상위 추론)"),
+            ("gpt-oss-120b-medium", "GPT-OSS 120B Medium (오픈소스 거대 추론)"),
         ]
     },
     "hermes": {
@@ -1942,19 +1942,12 @@ class ModelSearchResultSelect(Select):
 
     async def callback(self, interaction: discord.Interaction):
         new_model = self.values[0]
-        GlobalModelManager.set_role_model(self.selected_role, new_model)
 
-        # 1. 원본 !model 대시보드 메시지 실시간 갱신 (deepseek 등 이전 모델 잔류 방지)
-        if self.parent_view:
-            self.parent_view.update_components()
-            embed = GlobalModelManager.build_dashboard_embed(self.parent_view.selected_role)
-            if getattr(self.parent_view, "message", None):
-                try:
-                    await self.parent_view.message.edit(embed=embed, view=self.parent_view)
-                except Exception as e:
-                    logger.debug(f"Failed to edit parent dashboard message: {e}")
-
-        # 2. 검색 결과 메시지 자체를 제자리에서 변경 안내로 교체 (추가 메시지 증식 방지)
+        # [⏱️ Timeout Guard] 컴포넌트 상호작용은 3초 내 ack 해야 한다. 검색 결과 메시지
+        # 자체를 먼저 제자리에서 변경 안내로 교체해 즉시 응답하고, 모델 반영 및 원본
+        # 대시보드 갱신(추가 REST 호출)은 그 다음에 수행한다.
+        # (기존에는 대시보드 message.edit 를 먼저 await 해서 REST 지연 시
+        #  "어플리케이션이 적시에 응답하지 않았어요" 오류가 발생했다)
         confirm_text = f"✅ **[{self.selected_role.upper()}]** 모델이 `{new_model}`(으)로 변경되었습니다!"
         try:
             if hasattr(interaction, "response") and not interaction.response.is_done():
@@ -1969,6 +1962,18 @@ class ModelSearchResultSelect(Select):
                 await interaction.followup.send(confirm_text, ephemeral=True)
             except Exception:
                 pass
+
+        GlobalModelManager.set_role_model(self.selected_role, new_model)
+
+        # 원본 !model 대시보드 메시지 실시간 갱신 (deepseek 등 이전 모델 잔류 방지)
+        if self.parent_view:
+            self.parent_view.update_components()
+            embed = GlobalModelManager.build_dashboard_embed(self.parent_view.selected_role)
+            if getattr(self.parent_view, "message", None):
+                try:
+                    await self.parent_view.message.edit(embed=embed, view=self.parent_view)
+                except Exception as e:
+                    logger.debug(f"Failed to edit parent dashboard message: {e}")
 
 
 class ModelSearchResultView(View):
@@ -2357,6 +2362,13 @@ class ModelPresetDropdown(Select):
             return
 
         if chosen.startswith("__page_"):
+            # [⏱️ Timeout Guard] 페이지 이동도 ack 를 먼저 보내 3초 타임아웃을 예방한다.
+            try:
+                if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
+                    if not interaction.response.is_done():
+                        await interaction.response.defer()
+            except Exception:
+                pass
             try:
                 target_page = int(chosen.replace("__page_", "").rstrip("_"))
                 view.model_page = target_page

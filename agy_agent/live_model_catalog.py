@@ -497,10 +497,12 @@ _PROVIDERS: Dict[str, Callable[[List[ModelPair]], List[ModelPair]]] = {
 _CURATED_ONLY_ENGINES = {"claude", "copilot"}
 
 # Engines whose live source is the vendor's *own complete* CLI catalog
-# (`opencode models`, `codex debug models`, `cmdc --list-models`). For these the live response is
-# authoritative: merging the curated seed back in would re-surface models the
-# vendor has already retired, which is exactly the "list is out of date" problem this module exists to fix.
-_LIVE_IS_AUTHORITATIVE = {"opencode", "codex", "cmdc", "commandcode"}
+# (`opencode models`, `codex debug models`, `cmdc --list-models`) or an equivalent
+# authoritative registry (`agy` = `AntigravityModelRegistry`, whose catalog is kept
+# 1:1 with the CLI `/model` list). For these the live response is authoritative:
+# merging the curated seed back in would re-surface models the vendor has already
+# retired, which is exactly the "list is out of date" problem this module exists to fix.
+_LIVE_IS_AUTHORITATIVE = {"opencode", "codex", "cmdc", "commandcode", "agy"}
 
 
 def canonical_engine(engine: Optional[str]) -> str:

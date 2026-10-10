@@ -21,6 +21,9 @@ from typing import Dict, Any, List, Optional, Tuple
 logger = logging.getLogger("ModelRegistry")
 
 # Fallback Antigravity 3.x official active catalog matching native Antigravity /model
+# [🧭 CLI 정합 — 2026-10-08] `agy models`(CLI `/model`) 출력과 **정확히 일치**해야 한다.
+# 이전 목록은 CLI 에 없는 tiered/agent/3-flash 변형을 포함해 `!model` 이 CLI `/model`
+# 에 없는 "유령 모델"을 노출했다. (실측 `agy models` = 아래 14개)
 _FALLBACK_OFFICIAL_CATALOG = [
     {
         "label": "Gemini 3.8 Flash (High)",
@@ -31,10 +34,18 @@ _FALLBACK_OFFICIAL_CATALOG = [
         "isExhausted": False,
     },
     {
-        "label": "Gemini 3.8 Flash (Tiered)",
-        "modelId": "gemini-3.8-flash-tiered",
+        "label": "Gemini 3.8 Flash (Medium)",
+        "modelId": "gemini-3.8-flash-medium",
         "category": "gemini",
-        "recommended_roles": ["coder", "vision"],
+        "recommended_roles": ["coder", "qa"],
+        "isAutocompleteOnly": False,
+        "isExhausted": False,
+    },
+    {
+        "label": "Gemini 3.8 Flash (Low)",
+        "modelId": "gemini-3.8-flash-low",
+        "category": "gemini",
+        "recommended_roles": ["qa", "fast_review"],
         "isAutocompleteOnly": False,
         "isExhausted": False,
     },
@@ -47,18 +58,42 @@ _FALLBACK_OFFICIAL_CATALOG = [
         "isExhausted": False,
     },
     {
-        "label": "Gemini 3.7 Flash (Tiered)",
-        "modelId": "gemini-3.7-flash-tiered",
-        "category": "gemini",
-        "recommended_roles": ["coder", "qa_fallback"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
         "label": "Gemini 3.7 Flash (Medium)",
         "modelId": "gemini-3.7-flash-medium",
         "category": "gemini",
         "recommended_roles": ["commander", "orchestrator"],
+        "isAutocompleteOnly": False,
+        "isExhausted": False,
+    },
+    {
+        "label": "Gemini 3.7 Flash (Low)",
+        "modelId": "gemini-3.7-flash-low",
+        "category": "gemini",
+        "recommended_roles": ["qa", "fast_review"],
+        "isAutocompleteOnly": False,
+        "isExhausted": False,
+    },
+    {
+        "label": "Gemini 3.6 Flash (High)",
+        "modelId": "gemini-3.6-flash-high",
+        "category": "gemini",
+        "recommended_roles": ["coder", "qa"],
+        "isAutocompleteOnly": False,
+        "isExhausted": False,
+    },
+    {
+        "label": "Gemini 3.6 Flash (Medium)",
+        "modelId": "gemini-3.6-flash-medium",
+        "category": "gemini",
+        "recommended_roles": ["coder", "qa"],
+        "isAutocompleteOnly": False,
+        "isExhausted": False,
+    },
+    {
+        "label": "Gemini 3.6 Flash (Low)",
+        "modelId": "gemini-3.6-flash-low",
+        "category": "gemini",
+        "recommended_roles": ["qa", "fast_review"],
         "isAutocompleteOnly": False,
         "isExhausted": False,
     },
@@ -79,54 +114,6 @@ _FALLBACK_OFFICIAL_CATALOG = [
         "isExhausted": False,
     },
     {
-        "label": "Gemini 3.6 Flash (High)",
-        "modelId": "gemini-3.6-flash-high",
-        "category": "gemini",
-        "recommended_roles": ["coder", "qa"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
-        "label": "Gemini 3.6 Flash (Tiered)",
-        "modelId": "gemini-3.6-flash-tiered",
-        "category": "gemini",
-        "recommended_roles": ["coder"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
-        "label": "Gemini 3.6 Flash (Medium)",
-        "modelId": "gemini-3.6-flash-medium",
-        "category": "gemini",
-        "recommended_roles": ["coder", "qa"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
-        "label": "Gemini 3.5 Flash (High)",
-        "modelId": "gemini-3.5-flash-agent",
-        "category": "gemini",
-        "recommended_roles": ["coder", "qa"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
-        "label": "Gemini 3 Flash",
-        "modelId": "gemini-3-flash",
-        "category": "gemini",
-        "recommended_roles": ["vision", "planner", "fast_review"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
-        "label": "GPT-OSS 120B (Medium)",
-        "modelId": "gpt-oss-120b-medium",
-        "category": "gpt-oss",
-        "recommended_roles": ["qa_main", "code_review", "auditor"],
-        "isAutocompleteOnly": False,
-        "isExhausted": False,
-    },
-    {
         "label": "Claude Sonnet 4.6 (Thinking)",
         "modelId": "claude-sonnet-4-6",
         "category": "claude",
@@ -139,6 +126,14 @@ _FALLBACK_OFFICIAL_CATALOG = [
         "modelId": "claude-opus-4-6-thinking",
         "category": "claude",
         "recommended_roles": ["architect", "deep_review"],
+        "isAutocompleteOnly": False,
+        "isExhausted": False,
+    },
+    {
+        "label": "GPT-OSS 120B (Medium)",
+        "modelId": "gpt-oss-120b-medium",
+        "category": "gpt-oss",
+        "recommended_roles": ["qa_main", "code_review", "auditor"],
         "isAutocompleteOnly": False,
         "isExhausted": False,
     }
@@ -378,6 +373,7 @@ class AntigravityModelRegistry:
             if not mid:
                 continue
             if mid in merged:
+                # 권위 카탈로그(= `/model` CLI 목록)에 있는 모델만 잔여량/상태로 보강한다.
                 if qm.get("remainingPercentage") is not None:
                     merged[mid]["remainingPercentage"] = qm.get("remainingPercentage")
                 if qm.get("resetTime") is not None:
@@ -387,26 +383,12 @@ class AntigravityModelRegistry:
                 if qm.get("isAutocompleteOnly") is not None:
                     merged[mid]["isAutocompleteOnly"] = qm.get("isAutocompleteOnly")
             else:
-                if not qm.get("isAutocompleteOnly", False):
-                    mid_lower = mid.lower()
-                    if "gemini" in mid_lower:
-                        cat = "gemini"
-                    elif any(k in mid_lower for k in ("claude", "sonnet", "opus")):
-                        cat = "claude"
-                    elif any(k in mid_lower for k in ("gpt-oss", "gpt", "oss")):
-                        cat = "gpt-oss"
-                    else:
-                        cat = "external"
-                    merged[mid] = {
-                        "modelId": mid,
-                        "label": qm.get("label", mid),
-                        "category": cat,
-                        "remainingPercentage": qm.get("remainingPercentage"),
-                        "resetTime": qm.get("resetTime"),
-                        "isExhausted": qm.get("isExhausted", False),
-                        "isAutocompleteOnly": False,
-                        "source": "quota_api"
-                    }
+                # [🧭 CLI 정합 — 2026-10-08] quota API 는 `/model`(CLI) 에 존재하지 않는
+                # tiered/agent/extra-low 변형까지 반환한다. 이런 모델을 카탈로그에 추가하면
+                # `!model` 목록이 CLI `/model` 과 달라지는(유령 모델 노출) 원인이 되므로,
+                # 여기서는 **새 모델을 추가하지 않는다**. 권위 목록은 `_FALLBACK_OFFICIAL_CATALOG`
+                # (= `agy models` 와 1:1) 이며, quota 는 그 목록의 잔여량 보강에만 쓴다.
+                continue
 
         cls._cached_models = list(merged.values())
         cls._last_fetch_time = now
