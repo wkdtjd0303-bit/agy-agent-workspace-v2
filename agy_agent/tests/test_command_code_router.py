@@ -103,3 +103,59 @@ def test_telemetry_status_manager_cmdc_usage():
         assert "5시간 한도" in section
         assert "주간 한도" in section
         assert "cmdc" in section
+
+
+def test_command_code_zdr_enforced_by_default():
+    """Command Code CLI 라우터는 기본적으로 ZDR(Zero Data Retention)을 강제해야 한다."""
+    import os
+    import config
+
+    assert config.CMD_ZDR == "1"
+    assert os.environ.get("CMD_ZDR") == "1"
+
+
+def test_command_code_adapter_propagates_zdr_env():
+    """어댑터가 cmdc 서브프로세스 환경에 CMD_ZDR=1 을 실제로 전달하는지 검증한다."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from engine_manager import EngineManager
+
+    adapter = EngineManager.get_adapter("cmdc")
+    captured = {}
+
+    class _FakeStdout:
+        async def readline(self):
+            return b""
+
+    class _FakeProc:
+        pid = None
+        returncode = 0
+        stdout = _FakeStdout()
+        stderr = _FakeStdout()
+
+        async def wait(self):
+            return 0
+
+    async def _fake_exec(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeProc()
+
+    session = SimpleNamespace(
+        workspace="/tmp/test_ws",
+        current_process=None,
+        engine_conversations={},
+        touch=lambda *a, **k: None,
+    )
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec", new=_fake_exec):
+            return await adapter.execute(
+                session=session,
+                prompt="x",
+                model="deepseek/deepseek-v4.1-flash",
+            )
+
+    asyncio.run(_run())
+
+    assert captured.get("env", {}).get("CMD_ZDR") == "1", f"CMD_ZDR not propagated: {captured.get('env')}"

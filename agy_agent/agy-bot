@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 # Paths
-BASE_DIR = Path("/home/jangsung/Desktop/autocoding/!5_agy_agent")
+BASE_DIR = Path("/home/jangsung/Desktop/autocoding/!05_agy_agent")
 STATE_FILE = BASE_DIR / "state" / "channel_sessions.json"
 ENV_FILE = BASE_DIR / ".env"
 SURFACE_ENV_FILE = Path("/home/jangsung/Desktop/autocoding/!6_colap_agent/!2_surface_status/.env")

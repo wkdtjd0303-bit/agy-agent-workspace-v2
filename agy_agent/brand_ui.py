@@ -54,8 +54,9 @@ def _candidate_asset_paths() -> List[Path]:
 
     # 2) 동일 프로젝트 루트의 assets/
     cands.append(project_root / "assets" / _ASSET_BASENAME)
-    # 3) 심볼릭 링크 워크스페이스(!5_agy_agent)의 assets/
-    cands.append(workspace_root / "!5_agy_agent" / "assets" / _ASSET_BASENAME)
+    cands.append(here.parent / "assets" / _ASSET_BASENAME)
+    # 3) 프로젝트 루트(!05_agy_agent)의 assets/
+    cands.append(workspace_root / "!05_agy_agent" / "assets" / _ASSET_BASENAME)
     # 4) 현재 작업 디렉토리 기준 assets/
     cands.append(Path.cwd() / "assets" / _ASSET_BASENAME)
     # 5) 프로젝트 루트 바로 아래 (생성물이 루트에 떨어진 경우)

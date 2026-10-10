@@ -315,7 +315,7 @@ STATE_FILE_PATH = os.getenv(
 DEFAULT_CHANNEL_WORKSPACES = {
     1538529408703266902: str(Path.home() / "Desktop" / "autocoding" / "!10_ANY QUESTION"),
     1538695974023864400: str(Path.home() / "Desktop" / "autocoding" / "!10_ANY QUESTION"),
-    1539483630089273435: str(Path.home() / "Desktop" / "autocoding" / "!5_agy_agent"),
+    1539483630089273435: str(Path.home() / "Desktop" / "autocoding" / "!05_agy_agent"),
     1538693952310485062: str(Path.home() / "Desktop" / "autocoding" / "!1_vibecoding" / "ministry"),
     1539527192663433308: str(Path.home() / "Desktop" / "autocoding" / "!8_idus_phonecase"),
     1539628752730984469: str(Path.home() / "Desktop" / "autocoding" / "!1_vibecoding" / "rider"),

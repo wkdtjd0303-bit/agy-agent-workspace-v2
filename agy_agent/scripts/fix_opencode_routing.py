@@ -45,7 +45,6 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_TARGETS = [
     _SCRIPT_DIR / "agy_agent" / "agent_runner.py",
     Path("/home/jangsung/Desktop/autocoding/!05_agy_agent/agy_agent/agent_runner.py"),
-    Path("/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/agent_runner.py"),
 ]
 
 # --- 수정 전 (정확히 이 블록을 찾아 교체) ---

@@ -7,10 +7,10 @@ Wants=network-online.target
 # [🛡️ Token Protection Mandate - Solar Pro 4 Architecture Protocol]
 # Continuous background telemetry loop is permanently decommissioned to prevent ghost token consumption.
 Type=oneshot
-WorkingDirectory=/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent
-Environment="PATH=/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/.venv/bin:/home/jangsung/.npm-global/bin:/home/jangsung/.local/bin:/home/jangsung/.gemini/antigravity-cli/bin:/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=/home/jangsung/Desktop/autocoding/!05_agy_agent/agy_agent
+Environment="PATH=/home/jangsung/Desktop/autocoding/!05_agy_agent/agy_agent/.venv/bin:/home/jangsung/.npm-global/bin:/home/jangsung/.local/bin:/home/jangsung/.gemini/antigravity-cli/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/home/jangsung"
-ExecStart=/home/jangsung/Desktop/autocoding/!5_agy_agent/agy_agent/.venv/bin/python3 telemetry_status_manager.py
+ExecStart=/home/jangsung/Desktop/autocoding/!05_agy_agent/agy_agent/.venv/bin/python3 telemetry_status_manager.py
 Restart=no
 StandardOutput=journal
 StandardError=journal
