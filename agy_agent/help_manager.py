@@ -318,11 +318,59 @@ class HelpManager:
 
     @staticmethod
     def get_auto_embed() -> discord.Embed:
+        p = config.COMMAND_PREFIX
         embed = discord.Embed(
-            title="⚠️ [오토파일럿 기능 제거됨]",
-            description="AutoPilot 자율 순환 기능은 토큰 보호를 위해 영구 제거되었습니다.\n대신 `!mode 3` (무인 자율 개발) 모드를 사용하세요.",
-            color=0xFF6B6B
+            title="⏰ [자동 알람 & 스케줄 웨이크업 (!auto)]",
+            description=(
+                "정해진 스케줄마다 **이 채널의 Coder 봇을 자동으로 깨워** 지정된 메시지를 투입합니다.\n"
+                "마케팅 프로젝트의 '매일 아침 자동 브리핑'처럼 매일 반복되는 점검을 사람이 직접 치지 않아도 됩니다.\n"
+                "**※ 모든 설정은 채널별로 독립이며, 기본값은 OFF 입니다.**"
+            ),
+            color=0xF1C40F
         )
+        embed.add_field(
+            name="🎛️ 채널별 자동 알람 제어",
+            value=(
+                f"• `{p}auto` : 현재 채널 설정 현황 + 버튼 제어판 열기\n"
+                f"• `{p}auto on` : 이 채널 자동 알람 **활성화** (다음 예약 시간 자동 계산)\n"
+                f"• `{p}auto off` : 이 채널 자동 알람 **비활성화** (예약 전부 취소)\n"
+                f"• `{p}auto now` : 즉시 1회 테스트 발동\n"
+                f"• `{p}auto reset` : 이 채널 설정 초기화 (기본값: OFF / 매 60분)"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="💬 발동 메시지 지정",
+            value=(
+                f"• `{p}auto message 마케팅 주간 성과 점검하고 개선안 3가지 정리해줘`\n"
+                f"• `✏️ 메시지 설정` 버튼으로도 길게 입력할 수 있습니다.\n"
+                "• 발동 시 이 메시지가 마치 사용자가 방금 입력한 것처럼 Coder 파이프라인에 투입됩니다."
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🕒 스케줄 표현 (채널별)",
+            value=(
+                f"• `{p}auto schedule every 30m` — 30분마다\n"
+                f"• `{p}auto schedule every 2h` / `every 1h30m` — 2시간 / 1시간 30분마다\n"
+                f"• `{p}auto schedule daily 09:00` / `매일 09:00` — 매일 오전 9시\n"
+                f"• `{p}auto schedule weekly mon 09:00` / `매주 월요일 09:00` — 매주 월요일\n"
+                f"• `{p}auto schedule 평일 09:00` — 월~금 오전 9시\n"
+                f"• `{p}auto on every 30m` — 스케줄 지정과 동시에 활성화"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🧠 동작 방식",
+            value=(
+                "• 예약 시간이 되면 봇이 `⏰ [자동 알람 발동]` 배너와 함께 메시지를 투입합니다.\n"
+                "• 해당 채널이 작업 중(busy)이면 발동을 연기하고, 여유가 생기면 이어서 진행합니다.\n"
+                "• 설정은 `state/channel_auto_config.json` 에 채널별로 저장되어 재시작 후에도 유지됩니다.\n"
+                "• 모델(엔진)은 각 채널의 `!model` 설정을 그대로 사용합니다."
+            ),
+            inline=False
+        )
+        embed.set_footer(text="AGY Collaborative System · Category: Automation & Scheduling")
         return embed
 
     @staticmethod

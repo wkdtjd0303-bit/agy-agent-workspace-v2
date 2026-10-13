@@ -317,7 +317,7 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
             description=(
                 f"**선택된 프리셋:** `웹 & SaaS 풀스택 개발 모드`\n\n"
                 f"• 🤖 **채널 동작 모드**: `Auto` (질의는 Single, 기능개발은 3중 Pair 자동 선택)\n"
-                f"• 👑 **오토파일럿**: `ON (Phase 2: 자율 패치)` - 10분 유휴 시 기동\n"
+                f"• ⏰ **자동 알람**: `OFF` (기본) — `{command_prefix}auto on` 으로 스케줄 웨이크업 활성화 가능\n"
                 f"• 🧪 **QA 엔진**: `Playwright` 4대 디바이스 반응형 & 6-TC 인터랙션 검증\n"
                 f"• 🚀 **배포 연동**: Firebase/Vercel 라이브 URL 자동 추출 및 E2E 실시간 순환\n\n"
                 f"💡 *팁: 언제든 `{command_prefix}setup`을 입력해 다른 프리셋으로 즉시 전환할 수 있습니다.*"
@@ -332,7 +332,7 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
             description=(
                 f"**선택된 프리셋:** `모바일 & 안드로이드 네이티브 앱 모드`\n\n"
                 f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 상시 3중 협업)\n"
-                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• ⏰ **자동 알람**: `OFF` (기본) — `{command_prefix}auto on` 으로 스케줄 웨이크업 활성화 가능\n"
                 f"• ⚡ **QA 엔진**: `Robolectric JVM` OS 로직 + `Gemini Vision` UI/UX (버튼 간격/48dp/디자인) 전수 검증\n"
                 f"• 📱 **가상 스튜디오**: `{command_prefix}sim` 60fps 인터랙티브 하드웨어(GPS/블루투스) 시뮬레이션 지원\n"
                 f"• 📦 **바이너리**: 워크스페이스 내 APK 자동 빌드 및 `{command_prefix}apk` 즉시 다운로드"
@@ -347,7 +347,7 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
             description=(
                 "**선택된 프리셋:** `비즈니스 전환율(CRO) & 성장 관찰 모드`\n\n"
                 "• 🤖 **채널 동작 모드**: `Auto` (안전 지향 자율 운영)\n"
-                "• 👑 **오토파일럿**: `ON (Phase 1: 무위험 시각 관찰 & PO 감사)` - 10분 유휴 시 기동\n"
+                "• ⏰ **자동 알람**: `OFF` (기본) — `!auto on` 으로 정기 점검 스케줄 웨이크업 활성화 가능\n"
                 "• 🔍 **성과/품질 진단**: 구매/생성 여정 이탈 요인, 카피라이팅, 신뢰도(Social Proof) 평가\n"
                 "• 🌐 **마케팅 최적화**: 모바일 터치 최적화 & SNS 공유 썸네일(OG Tag) 상시 모니터링"
             ),
@@ -363,7 +363,7 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
                 "• 🔍 **채널 동작 모드**: `Read (지능형 라우팅)` (질문 의도에 따라 아래 두 엔진 중 자동 선택)\n"
                 "• 🧠 **엔진 1 (코드 자문)**: `ConsultingRunner` (코드 수정 없이 기존 코드베이스 아키텍처 심층 분석)\n"
                 "• 📑 **엔진 2 (시장 조사)**: `ResearchRunner` (웹 검색 기반 경쟁사 벤치마킹, 스펙 비교 리포트 작성)\n"
-                "• 🛑 **오토파일럿**: `OFF` (100% 안전한 질의응답 전용 보장)"
+                "• 🛑 **자동 알람**: `OFF` (100% 안전한 질의응답 전용 보장)"
             ),
             color=discord.Color.purple()
         )
@@ -376,7 +376,7 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
             description=(
                 f"**선택된 프리셋:** `게임 (Web Canvas/WebGL · Unity · Godot · Pygame) 모드`\n\n"
                 f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 3중 협업)\n"
-                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• ⏰ **자동 알람**: `OFF` (기본) — `{command_prefix}auto on` 으로 스케줄 웨이크업 활성화 가능\n"
                 f"• 🧪 **QA 엔진**: 실 입력→렌더 루프 검증 + 연속 프레임 캡처 + 60fps 프레임 예산 벤치마크\n"
                 f"• 🕹️ **코어 루프**: 시작→플레이→스코어→난이도 상승→게임오버→즉시 재도전 완결 강제\n"
                 f"• 🎯 **HUD 표준**: 엣지 5% 안전영역 · 거리 가독성 · 색맹 친화(형태+색) · 일시정지/설정 UI"
@@ -391,7 +391,7 @@ def apply_project_preset(channel_id: int, preset_key: str, session_manager, comm
             description=(
                 f"**선택된 프리셋:** `윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6) 모드`\n\n"
                 f"• 👥 **채널 동작 모드**: `Pair` (Coder ↔ QA ↔ Auditor 3중 협업)\n"
-                f"• 👑 **오토파일럿**: `ON (Phase 3: 자율 발전)` - 10분 유휴 시 기동\n"
+                f"• ⏰ **자동 알람**: `OFF` (기본) — `{command_prefix}auto on` 으로 스케줄 웨이크업 활성화 가능\n"
                 f"• 🧪 **QA 엔진**: 단위 테스트 + Windows VM 실 창 프레임버퍼 캡처 (고DPI/리사이즈/다크모드)\n"
                 f"• 🪟 **Fluent Design**: 타이틀바/리사이즈 · 키보드 단축키 · 스냅 레이아웃 · 고DPI 200% 무결성\n"
                 f"• 📦 **바이너리**: `dotnet publish`/`pyinstaller` → `.exe` 및 설치 패키지"
@@ -478,32 +478,32 @@ async def handle_setup_command(message: discord.Message, preset_key: str, sessio
     )
     embed.add_field(
         name="1. 🌐 웹 / SaaS 풀스택",
-        value="• 모드: `Auto` | 오토파일럿: `Phase 2 자율 패치`\n• QA: `Playwright 4대 기기 반응형 & 6-TC`\n• 용도: 웹앱, 대시보드, 풀스택 서비스",
+        value="• 모드: `Auto` | 자동 알람(`!auto`): `채널별 스케줄`\n• QA: `Playwright 4대 기기 반응형 & 6-TC`\n• 용도: 웹앱, 대시보드, 풀스택 서비스",
         inline=False
     )
     embed.add_field(
         name="2. 📱 모바일 / 안드로이드 앱",
-        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `Robolectric JVM OS 가상화 + !sim + APK`\n• 용도: 안드로이드 네이티브 앱, 백그라운드 서비스",
+        value="• 모드: `Pair 3중 협업` | 자동 알람(`!auto`): `채널별 스케줄`\n• QA: `Robolectric JVM OS 가상화 + !sim + APK`\n• 용도: 안드로이드 네이티브 앱, 백그라운드 서비스",
         inline=False
     )
     embed.add_field(
         name="3. 🛍️ 커머스 / AI명함 / 스토어 랜딩",
-        value="• 모드: `Auto` | 오토파일럿: `Phase 1 무위험 시각 관찰`\n• QA: `전환율(CRO) 퍼널 + 카피라이팅 + SEO 썸네일`\n• 용도: AI 스마트 명함, 아이디어스 폰케이스, 랜딩페이지",
+        value="• 모드: `Auto` | 자동 알람(`!auto`): `채널별 스케줄`\n• QA: `전환율(CRO) 퍼널 + 카피라이팅 + SEO 썸네일`\n• 용도: AI 스마트 명함, 아이디어스 폰케이스, 랜딩페이지",
         inline=False
     )
     embed.add_field(
         name="4. 🔍 기획 / 시장 리서치 & 자문",
-        value="• 모드: `Read (읽기 전용)` | 오토파일럿: `OFF`\n• QA: `3중 아키텍트 교차 분석 & 논문/시장 리서치`\n• 용도: 기획서 작성, 방향성 자문, 시장 분석",
+        value="• 모드: `Read (읽기 전용)` | 자동 알람(`!auto`): `OFF`\n• QA: `3중 아키텍트 교차 분석 & 논문/시장 리서치`\n• 용도: 기획서 작성, 방향성 자문, 시장 분석",
         inline=False
     )
     embed.add_field(
         name="5. 🎮 게임 (Web Canvas/WebGL · Unity · Godot · Pygame)",
-        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `실 입력→렌더 루프 + 연속 프레임 캡처 + 60fps 벤치마크`\n• 용도: 캐주얼/아케이드/로그라이크/퍼즐 게임",
+        value="• 모드: `Pair 3중 협업` | 자동 알람(`!auto`): `채널별 스케줄`\n• QA: `실 입력→렌더 루프 + 연속 프레임 캡처 + 60fps 벤치마크`\n• 용도: 캐주얼/아케이드/로그라이크/퍼즐 게임",
         inline=False
     )
     embed.add_field(
         name="6. 🪟 윈도우 네이티브 데스크톱 (WPF/WinUI 3 · PyQt6)",
-        value="• 모드: `Pair 3중 협업` | 오토파일럿: `Phase 3 자율 발전`\n• QA: `단위 테스트 + Windows VM 실 창 프레임버퍼 (고DPI/다크모드)`\n• 용도: 윈도우 데스크톱 유틸리티, 생산성 앱",
+        value="• 모드: `Pair 3중 협업` | 자동 알람(`!auto`): `채널별 스케줄`\n• QA: `단위 테스트 + Windows VM 실 창 프레임버퍼 (고DPI/다크모드)`\n• 용도: 윈도우 데스크톱 유틸리티, 생산성 앱",
         inline=False
     )
     embed.set_footer(text=f"명령어로 직접 설정: {command_prefix}setup web | app | store | read | game | windows")

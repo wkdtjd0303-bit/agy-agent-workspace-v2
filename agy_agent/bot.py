@@ -10,9 +10,10 @@ import tempfile
 import hashlib
 import logging
 import traceback
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 import discord
 from discord.ext import commands
+from discord.ui import View, Button, Modal, TextInput, Select
 import config
 
 from config import (
@@ -942,6 +943,12 @@ def sync_sessions_with_global_model() -> int:
         "qa2_engine": "qa2",
         "auditor_engine": "auditor",
     }
+    # [📺 채널별 모델] 엔진과 함께 모델도 동기화할 세션 필드 → 역할 키
+    model_map = {
+        "engine_model": "coder",
+        "qa_model": "qa1",
+        "qa2_model": "qa2",
+    }
     changed = 0
     try:
         sessions = mgr.get_all_sessions().values()
@@ -949,8 +956,14 @@ def sync_sessions_with_global_model() -> int:
         return 0
     for sess in sessions:
         dirty = False
+        # [📺] 각 세션은 '자기 채널의 오버라이드' 기준으로 해석한다.
+        #   (채널 오버레이가 있으면 그 값이, 없으면 전역 값이 적용된다)
+        try:
+            _cid = int(getattr(sess, "channel_id", 0) or 0)
+        except Exception:
+            _cid = 0
         for attr, role_key in role_map.items():
-            want = (_G.get_role_engine(role_key) or "").lower().strip()
+            want = (_G.get_role_engine(role_key, channel_id=_cid) or "").lower().strip()
             if not want:
                 continue
             cur = (getattr(sess, attr, "") or "").lower().strip()
@@ -963,6 +976,24 @@ def sync_sessions_with_global_model() -> int:
                     dirty = True
                 except Exception:
                     pass
+        # 모델 동기화는 '이 채널에 !model 오버라이드가 있을 때'만 수행한다.
+        # (`!engine qa model X` 로 채널에서 직접 고른 값을 보존하기 위함)
+        try:
+            has_override = bool(_G.get_channel_overrides(_cid)) if _cid else False
+        except Exception:
+            has_override = False
+        if has_override:
+            for attr, role_key in model_map.items():
+                want_model = (_G.get_role_model(role_key, channel_id=_cid) or "").strip()
+                if not want_model:
+                    continue
+                cur_model = (getattr(sess, attr, "") or "").strip()
+                if cur_model != want_model:
+                    try:
+                        setattr(sess, attr, want_model)
+                        dirty = True
+                    except Exception:
+                        pass
         if dirty:
             changed += 1
     if changed and os.environ.get("UNITTEST_RUNNING") != "1":
@@ -1062,6 +1093,12 @@ async def on_ready():
         ensure_evolve_channel_watchdog_running(bot, session_manager, qa_hub_manager)
     except Exception as e:
         logger.debug(f"on_ready evolve watchdog startup notice: {e}")
+
+    # [⏰ !auto] 채널별 자동 알람 / 스케줄 웨이크업 엔진 기동
+    try:
+        await ensure_auto_scheduler_started()
+    except Exception as e:
+        logger.debug(f"on_ready auto scheduler startup notice: {e}")
 
 async def on_qa_ready():
     logger.info(f"QA Bot connected as: {qa_bot.user.name} ({qa_bot.user.id})")
@@ -1198,8 +1235,171 @@ async def brand_command(ctx):
 
 @bot.command(name="auto", aliases=["자율", "오토", "autopilot", "autocode"])
 async def auto_command(ctx, *args):
-    """AutoPilot feature has been removed."""
-    await ctx.send("⚠️ **[!auto 기능 제거됨]** AutoPilot 자율 순환 기능은 토큰 보호를 위해 영구 제거되었습니다.")
+    """
+    ⏰ 채널 전용 AI 자동 알람 / 스케줄 웨이크업 (`!auto`)
+
+    정해진 스케줄마다 이 채널의 Coder 봇을 자동으로 깨워,
+    지정된 메시지를 마치 사용자가 입력한 것처럼 파이프라인에 투입한다.
+    (마케팅 프로젝트의 '매일 아침 자동 브리핑' 등에 사용)
+
+    • `!auto`                  : 현재 채널 설정 현황 + 인터랙티브 제어판
+    • `!auto on` / `!auto off` : 이 채널 자동 알람 활성화 / 비활성화 (기본 = OFF)
+    • `!auto message <내용>`   : 발동 시 투입할 메시지 지정
+    • `!auto schedule <스케줄>`: every 30m · daily 09:00 · weekly mon 09:00 · 평일 09:00
+    • `!auto now`              : 즉시 1회 테스트 발동
+    • `!auto reset`            : 이 채널 설정 초기화
+
+    ※ 모든 설정은 **채널별로 독립**이다.
+    """
+    reload_helper_modules()
+    import auto_scheduler
+    importlib.reload(auto_scheduler)
+    from auto_scheduler import (
+        ChannelAutoScheduler, ScheduleParseError, humanize_schedule,
+    )
+
+    channel_id = ctx.channel.id
+    joined = " ".join(a for a in args if a).strip()
+    low = joined.lower()
+
+    async def _send_status(extra: str = ""):
+        view = AutoDashboardView(channel_id=channel_id, user_id=ctx.author.id)
+        msg = await ctx.send(extra if extra else None, embed=_auto_status_embed(channel_id), view=view)
+        view.message = msg
+        return msg
+
+    # 1) 인자 없음 → 상태 + 제어판
+    if not joined:
+        await _send_status()
+        return
+
+    # 2) ON / OFF
+    if low in ("on", "켜", "켜기", "활성", "활성화", "start", "enable", "가동", "시작"):
+        cfg = ChannelAutoScheduler.set_enabled(channel_id, True)
+        await _send_status(
+            f"🟢 **이 채널의 자동 알람이 활성화되었습니다!**\n"
+            f"스케줄: `{humanize_schedule(cfg)}` · 다음 발동: "
+            f"{ChannelAutoScheduler.summarize(channel_id)['next_run_text']}"
+        )
+        return
+    if low in ("off", "꺼", "끄기", "비활성", "비활성화", "stop", "disable", "중지", "정지"):
+        ChannelAutoScheduler.set_enabled(channel_id, False)
+        await _send_status("🔴 **이 채널의 자동 알람이 비활성화되었습니다.** (예약된 발동이 모두 취소됩니다)")
+        return
+
+    # 3) 메시지 지정
+    for kw in ("message", "msg", "메시지", "내용", "문구"):
+        if low == kw or low.startswith(kw + " "):
+            text = joined[len(kw):].strip()
+            if not text:
+                await ctx.reply("⚠️ 발동 메시지를 함께 입력해주세요. 예: `!auto message 마케팅 주간 성과 점검해줘`")
+                return
+            ChannelAutoScheduler.set_message(channel_id, text)
+            await _send_status("✅ **발동 메시지가 저장되었습니다!**")
+            return
+
+    # 4) 스케줄 지정
+    for kw in ("schedule", "sched", "스케줄", "주기", "시간", "예약"):
+        if low == kw or low.startswith(kw + " "):
+            spec = joined[len(kw):].strip()
+            try:
+                _, desc = ChannelAutoScheduler.set_schedule(channel_id, spec)
+            except ScheduleParseError as e:
+                await ctx.reply(f"⚠️ {e}")
+                return
+            s = ChannelAutoScheduler.summarize(channel_id)
+            extra = (
+                f"🕒 **스케줄이 `{desc}`(으)로 설정되었습니다!**\n"
+                + (f"다음 발동 예정: {s['next_run_text']}" if s["enabled"] else "현재 비활성 상태 — `!auto on` 으로 켜주세요.")
+            )
+            await _send_status(extra)
+            return
+
+    # 5) 즉시 발동(테스트)
+    if low in ("now", "test", "지금", "즉시", "실행", "테스트", "돌려"):
+        result = await ChannelAutoScheduler.trigger_now(channel_id)
+        if result.get("fired"):
+            await ctx.reply("▶️ **즉시 발동했습니다!** 설정된 메시지가 이 채널의 Coder 파이프라인에 투입됩니다.")
+        else:
+            await ctx.reply(
+                "⚠️ 즉시 발동에 실패했습니다(채널이 작업 중이거나 봇을 찾을 수 없음).\n"
+                "잠시 후 다시 시도하거나 `!status` 로 상태를 확인해주세요."
+            )
+        return
+
+    # 6) 초기화
+    if low in ("reset", "초기화", "삭제", "기본", "default", "clear"):
+        ChannelAutoScheduler.reset_channel(channel_id)
+        await ctx.reply("♻️ **이 채널의 자동 알람 설정이 초기화되었습니다.** (기본값: 비활성 / 매 60분)")
+        return
+
+    # 7) `!auto on every 30m` 형태 (on/off + 스케줄 동시 지정)
+    tokens = low.split()
+    if tokens and tokens[0] in ("on", "켜", "활성", "start", "enable", "가동"):
+        schedule_part = " ".join(tokens[1:])
+        if schedule_part:
+            try:
+                _, desc = ChannelAutoScheduler.set_schedule(channel_id, schedule_part)
+                ChannelAutoScheduler.set_enabled(channel_id, True)
+                s = ChannelAutoScheduler.summarize(channel_id)
+                await _send_status(f"🟢 **자동 알람 활성화 + 스케줄 `{desc}` 설정 완료!**\n다음 발동: {s['next_run_text']}")
+                return
+            except ScheduleParseError as e:
+                await ctx.reply(f"⚠️ {e}")
+                return
+
+    # 8) 스케줄 표현만 단독 입력 (`!auto every 30m`, `!auto daily 09:00`)
+    try:
+        _, desc = ChannelAutoScheduler.set_schedule(channel_id, joined)
+        s = ChannelAutoScheduler.summarize(channel_id)
+        await _send_status(
+            f"🕒 **스케줄이 `{desc}`(으)로 설정되었습니다!**\n"
+            + (f"다음 발동 예정: {s['next_run_text']}" if s["enabled"] else "현재 비활성 상태 — `!auto on` 으로 켜주세요.")
+        )
+        return
+    except ScheduleParseError:
+        pass
+
+    # 9) 그 외 → 도움말
+    await ctx.reply(
+        "⚠️ 알 수 없는 `!auto` 명령입니다.\n"
+        f"사용법: `!auto` · `!auto on` · `!auto off` · `!auto message <내용>` · "
+        f"`!auto schedule every 30m` · `!auto now` · `!auto reset`"
+    )
+
+
+def _auto_status_embed(channel_id: int) -> discord.Embed:
+    """`!auto` 상태 임베드(명령어/뷰 공통 SSOT)."""
+    from auto_scheduler import ChannelAutoScheduler
+    s = ChannelAutoScheduler.summarize(channel_id)
+    embed = discord.Embed(
+        title="⏰ 채널 자동 알람 (AI 스케줄 웨이크업)",
+        description=(
+            f"**상태**: {'🟢 활성화 (가동 중)' if s['enabled'] else '🔴 비활성화 (기본값)'}\n"
+            f"**스케줄**: `{s['schedule_desc']}`\n"
+            f"**다음 발동**: {s['next_run_text']}\n"
+            f"**지난 발동**: {s['last_run_text']} (누적 {s['run_count']}회)"
+        ),
+        color=0x2ECC71 if s["enabled"] else 0x95A5A6
+    )
+    embed.add_field(
+        name="💬 발동 메시지",
+        value=f"```\n{s['message'][:700]}\n```",
+        inline=False
+    )
+    embed.add_field(
+        name="💡 사용법",
+        value=(
+            f"`{COMMAND_PREFIX}auto on` · `{COMMAND_PREFIX}auto off` — 활성/비활성\n"
+            f"`{COMMAND_PREFIX}auto message <내용>` — 발동 메시지 변경\n"
+            f"`{COMMAND_PREFIX}auto schedule <스케줄>` — `every 30m` / `daily 09:00` / `weekly mon 09:00` / `평일 09:00`\n"
+            f"`{COMMAND_PREFIX}auto now` — 즉시 1회 테스트 발동\n"
+            f"`{COMMAND_PREFIX}auto reset` — 이 채널 설정 초기화"
+        ),
+        inline=False
+    )
+    embed.set_footer(text=f"채널 ID: {channel_id} · 모든 설정은 채널별로 독립 저장됩니다")
+    return embed
 
 @bot.command(name="commander", aliases=["cmd", "사령관", "라우터", "router"], hidden=True)
 async def commander_command(ctx, action: str = "status", *, test_prompt: str = ""):
@@ -1260,6 +1460,262 @@ async def commander_command(ctx, action: str = "status", *, test_prompt: str = "
         inline=False
     )
     await ctx.send(embed=embed)
+
+
+class _ScheduledWakeMessage:
+    """
+    [⏰ !auto] 스케줄 발동용 경량 메시지 객체.
+
+    실제 디스코드 메시지는 아니지만, `execute_channel_prompt()` 가 요구하는
+    최소 인터페이스(channel/content/author/reply)를 제공한다.
+    이 객체를 통해 예약된 메시지가 '사용자가 방금 입력한 것'처럼 동일 파이프라인을 탄다.
+    """
+
+    def __init__(self, channel: Any, content: str):
+        self.channel = channel
+        self.content = content
+        self.author = getattr(bot, "user", None)
+        self.attachments: list = []
+        self.embeds: list = []
+        self.id = 0
+
+    async def reply(self, *args, **kwargs):
+        return await self.channel.send(*args, **kwargs)
+
+
+# [⏰ !auto] 자동 알람 발동 핸들러 — ChannelAutoScheduler 가 예약시간 도래 시 호출한다.
+async def _fire_auto_channel_wakeup(channel_id: int, message: str, cfg: Dict[str, Any]) -> bool:
+    """
+    예약된 채널을 깨운다. 발동 성공 시 True, 실패/연기 시 False.
+
+    실패 케이스: 봇이 채널을 찾을 수 없음 / 해당 채널이 현재 작업 중(busy)
+    → scheduler 가 next_run 을 뒤로 밀어 다음 tick 에 재시도한다.
+    """
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        logger.warning(f"[AutoScheduler] Channel {channel_id} not found (bot may have been removed from guild).")
+        return False
+
+    try:
+        session = session_manager.get_session(channel_id)
+        if getattr(session, "is_busy", False):
+            logger.info(f"[AutoScheduler] Channel {channel_id} is busy — deferring scheduled wakeup.")
+            return False
+    except Exception:
+        pass
+
+    try:
+        banner = discord.Embed(
+            title="⏰ [자동 알람 발동]",
+            description=(
+                f"예약된 스케줄(채널 `{channel_id}`)이 도래하여 "
+                "지정된 메시지를 Coder 파이프라인에 자동 투입합니다."
+            ),
+            color=0xF1C40F
+        )
+        await channel.send(embed=banner)
+    except Exception as e:
+        logger.warning(f"[AutoScheduler] Failed to send wakeup banner to {channel_id}: {e}")
+        return False
+
+    wake_msg = _ScheduledWakeMessage(channel, message)
+    asyncio.create_task(execute_channel_prompt(wake_msg, message))
+    return True
+
+
+async def ensure_auto_scheduler_started() -> bool:
+    """채널 자동 알람 스케줄러를 기동한다(중복 기동 방지)."""
+    try:
+        from auto_scheduler import ChannelAutoScheduler
+        ChannelAutoScheduler.set_fire_handler(_fire_auto_channel_wakeup)
+        started = await ChannelAutoScheduler.start()
+        if started:
+            enabled = [cid for cid, c in ChannelAutoScheduler.list_configs().items() if c.get("enabled")]
+            logger.info(f"[AutoScheduler] Channel auto-wakeup active channels: {enabled or 'none'}")
+        return started
+    except Exception as e:
+        logger.debug(f"ensure_auto_scheduler_started notice: {e}")
+        return False
+
+
+# [⏰ !auto] 모듈 import 시점에 발동 핸들러를 등록해 둔다.
+#   (`!auto now` 는 스케줄 루프(on_ready)가 아직 기동되지 않아도 즉시 발동 가능해야 한다)
+try:
+    from auto_scheduler import ChannelAutoScheduler as _AutoSchedCls
+    _AutoSchedCls.set_fire_handler(_fire_auto_channel_wakeup)
+except Exception as _e:
+    logger.debug(f"auto scheduler handler pre-registration skipped: {_e}")
+
+
+class AutoMessageModal(Modal):
+    """자동 알람 발동 시 투입할 메시지를 입력하는 모달."""
+    def __init__(self, channel_id: int, current_message: str, parent_view: 'AutoDashboardView'):
+        super().__init__(title="✏️ 자동 알람 메시지 설정")
+        self.channel_id = channel_id
+        self.parent_view = parent_view
+        self.message_input = TextInput(
+            label="발동 시 Coder에게 전달할 메시지",
+            style=discord.TextStyle.paragraph,
+            placeholder="예: 마케팅 주간 성과를 점검하고 이번 주 개선안 3가지를 정리해줘",
+            default=(current_message or "")[:1000],
+            required=True,
+            max_length=1000
+        )
+        self.add_item(self.message_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from auto_scheduler import ChannelAutoScheduler
+        ChannelAutoScheduler.set_message(self.channel_id, self.message_input.value)
+        embed = self.parent_view.build_embed()
+        await _safe_edit_view(interaction, embed, self.parent_view)
+        try:
+            await interaction.followup.send("✅ **발동 메시지가 저장되었습니다!**", ephemeral=True)
+        except Exception:
+            pass
+
+
+class AutoScheduleModal(Modal):
+    """자동 알람 스케줄을 입력하는 모달."""
+    def __init__(self, channel_id: int, parent_view: 'AutoDashboardView'):
+        super().__init__(title="🕒 자동 알람 스케줄 설정")
+        self.channel_id = channel_id
+        self.parent_view = parent_view
+        self.schedule_input = TextInput(
+            label="스케줄 표현",
+            placeholder="every 30m · every 2h · daily 09:00 · weekly mon 09:00 · 평일 09:00",
+            default="every 60m",
+            required=True,
+            max_length=100
+        )
+        self.add_item(self.schedule_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from auto_scheduler import ChannelAutoScheduler, ScheduleParseError
+        try:
+            _, desc = ChannelAutoScheduler.set_schedule(self.channel_id, self.schedule_input.value)
+        except ScheduleParseError as e:
+            try:
+                await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+            except Exception:
+                pass
+            return
+        embed = self.parent_view.build_embed()
+        await _safe_edit_view(interaction, embed, self.parent_view)
+        try:
+            await interaction.followup.send(f"🕒 **스케줄이 `{desc}`(으)로 설정되었습니다!**", ephemeral=True)
+        except Exception:
+            pass
+
+
+class AutoDashboardView(View):
+    """`!auto` 인터랙티브 제어판 (채널별)."""
+    def __init__(self, channel_id: int, user_id: Optional[int] = None):
+        super().__init__(timeout=600)
+        self.channel_id = channel_id
+        self.user_id = user_id
+        self.message: Optional[discord.Message] = None
+        self._render()
+
+    def _render(self):
+        from auto_scheduler import ChannelAutoScheduler
+        self.clear_items()
+        enabled = ChannelAutoScheduler.is_enabled(self.channel_id)
+
+        btn_toggle = Button(
+            label="🔴 비활성화" if enabled else "🟢 활성화",
+            style=discord.ButtonStyle.danger if enabled else discord.ButtonStyle.success,
+            row=0,
+            custom_id="btn_auto_toggle"
+        )
+        btn_toggle.callback = self._toggle_callback
+        self.add_item(btn_toggle)
+
+        btn_msg = Button(label="✏️ 메시지 설정", style=discord.ButtonStyle.primary, row=0, custom_id="btn_auto_message")
+        btn_msg.callback = self._message_callback
+        self.add_item(btn_msg)
+
+        btn_sched = Button(label="🕒 스케줄 설정", style=discord.ButtonStyle.primary, row=0, custom_id="btn_auto_schedule")
+        btn_sched.callback = self._schedule_callback
+        self.add_item(btn_sched)
+
+        btn_now = Button(label="▶️ 지금 실행", style=discord.ButtonStyle.secondary, row=0, custom_id="btn_auto_now")
+        btn_now.callback = self._now_callback
+        self.add_item(btn_now)
+
+        btn_reset = Button(label="♻️ 초기화", style=discord.ButtonStyle.secondary, row=0, custom_id="btn_auto_reset")
+        btn_reset.callback = self._reset_callback
+        self.add_item(btn_reset)
+
+    def build_embed(self) -> discord.Embed:
+        return _auto_status_embed(self.channel_id)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self._render()
+        await _safe_edit_view(interaction, self.build_embed(), self)
+
+    async def _toggle_callback(self, interaction: discord.Interaction):
+        from auto_scheduler import ChannelAutoScheduler
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            pass
+        new_state = not ChannelAutoScheduler.is_enabled(self.channel_id)
+        ChannelAutoScheduler.set_enabled(self.channel_id, new_state)
+        await self._refresh(interaction)
+        try:
+            await interaction.followup.send(
+                "🟢 **자동 알람을 활성화했습니다!**" if new_state else "🔴 **자동 알람을 비활성화했습니다.**",
+                ephemeral=True
+            )
+        except Exception:
+            pass
+
+    async def _message_callback(self, interaction: discord.Interaction):
+        from auto_scheduler import ChannelAutoScheduler
+        try:
+            await interaction.response.send_modal(
+                AutoMessageModal(self.channel_id, ChannelAutoScheduler.get_config(self.channel_id).get("message", ""), self)
+            )
+        except Exception as e:
+            logger.debug(f"Auto message modal failed: {e}")
+
+    async def _schedule_callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.send_modal(AutoScheduleModal(self.channel_id, self))
+        except Exception as e:
+            logger.debug(f"Auto schedule modal failed: {e}")
+
+    async def _now_callback(self, interaction: discord.Interaction):
+        from auto_scheduler import ChannelAutoScheduler
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            pass
+        result = await ChannelAutoScheduler.trigger_now(self.channel_id)
+        try:
+            if result.get("fired"):
+                await interaction.followup.send("▶️ **즉시 발동했습니다!**", ephemeral=True)
+            else:
+                await interaction.followup.send("⚠️ 발동 실패(채널 작업 중이거나 봇 미연결).", ephemeral=True)
+        except Exception:
+            pass
+
+    async def _reset_callback(self, interaction: discord.Interaction):
+        from auto_scheduler import ChannelAutoScheduler
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            pass
+        ChannelAutoScheduler.reset_channel(self.channel_id)
+        await self._refresh(interaction)
+        try:
+            await interaction.followup.send("♻️ **이 채널의 자동 알람 설정을 초기화했습니다.**", ephemeral=True)
+        except Exception:
+            pass
+
 
 @bot.command(name="export", aliases=["대화백업", "backup", "chatexport", "chatlog", "대화기록", "내보내기", "채팅저장", "백업"], hidden=True)
 async def export_command(ctx, *args):
@@ -2540,28 +2996,97 @@ async def engine_command(ctx, *args):
 @bot.command(name="model", aliases=["모델", "modelselect"], hidden=True)
 async def model_command(ctx, *args):
     """
-    Real-time Global AI Model & Multi-QA Pipeline Controller.
-    Opens interactive dashboard or processes CLI shortcuts.
+    Real-time AI Model & Multi-QA Pipeline Controller — **채널별 설정 지원**.
+
+    • 인자 없음 / `!model status` : 이 채널 기준 관제 대시보드(버튼·드롭다운)
+    • `!model <role> [model|on|off|persona ...]` : 해당 역할 설정 변경
+    • `!model reset [role]` : 이 채널의 전용 설정을 지우고 전역 기본값으로 복귀
+
+    [📺 채널 스코프] 이 채널에서 바꾼 설정은 이 채널에만 저장된다.
+    다른 채널은 그대로 전역 설정을 사용하며, `!model reset` 으로 언제든 복귀 가능.
     """
     reload_helper_modules()
     import model_manager
     importlib.reload(model_manager)
     from model_manager import GlobalModelManager, ModelDashboardView
 
-    if not args:
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
-        view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
-        msg = await ctx.send(embed=embed, view=view)
+    # [📺 채널 스코프 진입] 이후 모든 getter/setter 는 이 채널 기준으로 동작한다.
+    _ch_tok = GlobalModelManager.set_active_channel(ctx.channel.id)
+    try:
+        return await _model_command_impl(ctx, args, GlobalModelManager, ModelDashboardView)
+    finally:
+        if _ch_tok is not None:
+            GlobalModelManager.reset_active_channel(_ch_tok)
+
+
+async def _model_command_impl(ctx, args, GlobalModelManager, ModelDashboardView):
+    channel_id = ctx.channel.id
+    _ch_tok = GlobalModelManager.set_active_channel(channel_id)
+    try:
+        return await _model_command_body(ctx, args, GlobalModelManager, ModelDashboardView, channel_id)
+    finally:
+        if _ch_tok is not None:
+            GlobalModelManager.reset_active_channel(_ch_tok)
+
+
+async def _model_command_body(ctx, args, GlobalModelManager, ModelDashboardView, channel_id: int):
+    # 모든 대시보드는 '이 채널' 기준으로 렌더링/조작한다.
+    def _dash(role: str = "auditor"):
+        embed = GlobalModelManager.build_dashboard_embed(selected_role=role, channel_id=channel_id)
+        view = ModelDashboardView(selected_role=role, user_id=ctx.author.id, channel_id=channel_id)
+        return embed, view
+
+    async def _send_dash(prefix_text: str = "", role: str = "auditor"):
+        embed, view = _dash(role)
+        msg = await ctx.send(prefix_text if prefix_text else None, embed=embed, view=view)
         view.message = msg
+        return msg
+
+    if not args:
+        await _send_dash()
         return
 
     sub_cmd = args[0].lower().strip()
-    if sub_cmd in ("list", "status", "목록", "현황", "보기", "대시보드", "dashboard"):
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
-        view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
-        msg = await ctx.send(embed=embed, view=view)
-        view.message = msg
+
+    # [📺 채널 전용 설정 해제] `!model reset [role]`
+    if sub_cmd in ("reset", "초기화", "삭제", "global", "전역", "기본", "default", "clear"):
+        if len(args) > 1:
+            t_role = args[1].lower().strip()
+            alias_map = {
+                "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
+                "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
+                "이미지": "image", "그림": "image", "관제": "commander"
+            }
+            t_role = alias_map.get(t_role, t_role)
+            ok = GlobalModelManager.clear_channel_override(channel_id, t_role)
+            if ok:
+                sync_sessions_with_global_model()
+                await _send_dash(
+                    f"♻️ **[{t_role.upper()}]** 채널 전용 설정을 해제하고 전역 기본값으로 되돌렸습니다!"
+                )
+            else:
+                await _send_dash(
+                    f"ℹ️ **[{t_role.upper()}]** 에는 이 채널 전용 설정이 없습니다(이미 전역 설정 사용 중)."
+                )
+            return
+        ok = GlobalModelManager.clear_channel_override(channel_id)
+        if ok:
+            sync_sessions_with_global_model()
+            await _send_dash("♻️ **이 채널의 모든 모델 전용 설정을 해제**하고 전역 기본값으로 되돌렸습니다!")
+        else:
+            await _send_dash("ℹ️ 이 채널에는 전용 설정이 없습니다(전역 설정 사용 중).")
         return
+
+    if sub_cmd in ("list", "status", "목록", "현황", "보기", "대시보드", "dashboard"):
+        await _send_dash()
+        return
+
+    role_alias_map = {
+        "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
+        "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
+        "이미지": "image", "그림": "image", "관제": "commander"
+    }
+    scope_word = "이 채널"  # 모든 변경은 채널 전용 오버라이드로 저장됨
 
     if sub_cmd in ("all", "전체"):
         if len(args) > 1 and args[1].lower() in ("off", "disable", "끄기", "중지"):
@@ -2571,92 +3096,71 @@ async def model_command(ctx, *args):
             GlobalModelManager.set_all_qa_enabled(True)
             action_desc = "🟢 **qa1 ~ qa6 전원 활성화 완료!** (6중 전수 교차 검증 가동)"
         await sync_all_bot_presences()
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
-        view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
-        msg = await ctx.send(f"{action_desc}", embed=embed, view=view)
-        view.message = msg
+        sync_sessions_with_global_model()
+        await _send_dash(action_desc)
         return
 
     if sub_cmd in ("qa1_only", "fast", "기본만", "단일qa"):
         GlobalModelManager.set_only_primary_qa()
         await sync_all_bot_presences()
-        embed = GlobalModelManager.build_dashboard_embed(selected_role="qa1")
-        view = ModelDashboardView(selected_role="qa1", user_id=ctx.author.id)
-        msg = await ctx.send("⚡ **qa1만 가동 모드 적용 완료!** (qa2~qa6 자동 패스로 토큰/시간 절약)", embed=embed, view=view)
-        view.message = msg
+        sync_sessions_with_global_model()
+        await _send_dash(
+            "⚡ **qa1만 가동 모드 적용 완료!** (qa2~qa6 자동 패스로 토큰/시간 절약)", role="qa1"
+        )
         return
 
     # Direct Persona sub-command: !model persona <role> <persona> or !model 직업 <role> <persona>
     if sub_cmd in ("persona", "job", "직업", "역할", "specialty"):
         if len(args) >= 3:
-            t_role = args[1].lower().strip()
-            alias_map = {
-                "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
-                "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
-                "이미지": "image", "그림": "image", "관제": "commander"
-            }
-            t_role = alias_map.get(t_role, t_role)
+            t_role = role_alias_map.get(args[1].lower().strip(), args[1].lower().strip())
             p_val = " ".join(args[2:]).strip()
             GlobalModelManager.set_role_persona(t_role, p_val)
-            p_info = GlobalModelManager.get_role_persona_info(t_role)
-            desc = f"💼 **[{t_role.upper()}]** 직업/역할이 **{p_info.get('icon')} {p_info.get('name')}**(으)로 설정되었습니다!"
+            p_info = GlobalModelManager.get_role_persona_info(t_role, channel_id=channel_id)
+            desc = f"💼 **[{t_role.upper()}]** 직업/역할이 **{p_info.get('icon')} {p_info.get('name')}**(으)로 설정되었습니다! ({scope_word} 전용)"
             await sync_all_bot_presences()
-            embed = GlobalModelManager.build_dashboard_embed(selected_role=t_role)
-            view = ModelDashboardView(selected_role=t_role, user_id=ctx.author.id)
-            msg = await ctx.send(desc, embed=embed, view=view)
-            view.message = msg
+            await _send_dash(desc, role=t_role)
             return
         elif len(args) == 2:
-            t_role = args[1].lower().strip()
-            alias_map = {
-                "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
-                "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
-                "이미지": "image", "그림": "image", "관제": "commander"
-            }
-            t_role = alias_map.get(t_role, t_role)
-            embed = GlobalModelManager.build_dashboard_embed(selected_role=t_role)
-            view = ModelDashboardView(selected_role=t_role, user_id=ctx.author.id)
-            msg = await ctx.send(f"💼 **[{t_role.upper()}]** 직업/역할 설정 창을 엽니다.", embed=embed, view=view)
-            view.message = msg
+            t_role = role_alias_map.get(args[1].lower().strip(), args[1].lower().strip())
+            await _send_dash(f"💼 **[{t_role.upper()}]** 직업/역할 설정 창을 엽니다.", role=t_role)
+            return
+        elif len(args) == 2:
+            t_role = role_alias_map.get(args[1].lower().strip(), args[1].lower().strip())
+            await _send_dash(f"💼 **[{t_role.upper()}]** 직업/역할 설정 창을 엽니다.", role=t_role)
             return
 
     # Targeting specific role: !model <role> ...
     target_role = sub_cmd
-    all_roles = GlobalModelManager.get_all_roles()
+    all_roles = GlobalModelManager.get_all_roles(channel_id=channel_id)
     if target_role not in all_roles:
-        alias_map = {
-            "qa": "qa1", "solar": "qa2", "deepseek": "qa3", "qwen": "qa4",
-            "llama": "qa5", "ling": "qa6", "개발": "coder", "감사": "auditor",
-            "이미지": "image", "그림": "image", "관제": "commander"
-        }
-        target_role = alias_map.get(target_role, target_role)
+        target_role = role_alias_map.get(target_role, target_role)
 
     if target_role in all_roles:
         if len(args) == 2:
             second = args[1].lower().strip()
             if second in ("on", "enable", "켜기", "활성", "1"):
                 GlobalModelManager.set_role_enabled(target_role, True)
-                desc = f"🟢 **[{target_role.upper()}]** 에이전트가 전역 **활성화**되었습니다! (파이프라인 검증 수행)"
+                desc = f"🟢 **[{target_role.upper()}]** 에이전트가 **활성화**되었습니다! (파이프라인 검증 수행)"
             elif second in ("off", "disable", "끄기", "비활성", "0"):
                 GlobalModelManager.set_role_enabled(target_role, False)
-                desc = f"🔴 **[{target_role.upper()}]** 에이전트가 전역 **비활성화**되었습니다! (파이프라인에서 자동 건너뜀)"
+                desc = f"🔴 **[{target_role.upper()}]** 에이전트가 **비활성화**되었습니다! (파이프라인에서 자동 건너뜀)"
             elif second in ("general", "designer", "security", "chaos", "sre", "architect",
                             "디자이너", "디자인", "보안", "보안전문가", "카오스", "엣지", "성능", "아키텍트", "기본", "기본값"):
                 GlobalModelManager.set_role_persona(target_role, second)
-                p_info = GlobalModelManager.get_role_persona_info(target_role)
+                p_info = GlobalModelManager.get_role_persona_info(target_role, channel_id=channel_id)
                 desc = f"💼 **[{target_role.upper()}]** 직업/역할이 **{p_info.get('icon')} {p_info.get('name')}**(으)로 설정되었습니다!"
             else:
                 GlobalModelManager.set_role_model(target_role, args[1].strip())
-                resolved_mod = GlobalModelManager.get_role_model(target_role)
-                disp_mod = GlobalModelManager.get_role_model_display(target_role)
-                desc = f"✅ **[{target_role.upper()}]** 모델이 `{disp_mod}` (`{resolved_mod}`)(으)로 전역 변경되었습니다!"
+                resolved_mod = GlobalModelManager.get_role_model(target_role, channel_id=channel_id)
+                disp_mod = GlobalModelManager.get_role_model_display(target_role, channel_id=channel_id)
+                desc = f"✅ **[{target_role.upper()}]** 모델이 `{disp_mod}` (`{resolved_mod}`)(으)로 변경되었습니다! ({scope_word} 전용)"
         elif len(args) >= 3:
             first_candidate = args[1].lower().strip()
             if first_candidate in ("persona", "job", "직업", "역할", "specialty"):
                 p_val = " ".join(args[2:]).strip()
                 GlobalModelManager.set_role_persona(target_role, p_val)
-                p_info = GlobalModelManager.get_role_persona_info(target_role)
-                desc = f"💼 **[{target_role.upper()}]** 직업/역할이 **{p_info.get('icon')} {p_info.get('name')}**(으)로 설정되었습니다!"
+                p_info = GlobalModelManager.get_role_persona_info(target_role, channel_id=channel_id)
+                desc = f"💼 **[{target_role.upper()}]** 직업/역할이 **{p_info.get('icon')} {p_info.get('name')}**(으)로 설정되었습니다! ({scope_word} 전용)"
             else:
                 valid_engines = {"agy", "hermes", "openrouter", "codex", "copilot", "claude", "opencode", "nous"}
                 if first_candidate in valid_engines:
@@ -2664,30 +3168,30 @@ async def model_command(ctx, *args):
                     mod = " ".join(args[2:]).strip()
                     GlobalModelManager.set_role_engine(target_role, eng)
                     GlobalModelManager.set_role_model(target_role, mod)
-                    resolved_mod = GlobalModelManager.get_role_model(target_role)
-                    disp_mod = GlobalModelManager.get_role_model_display(target_role)
-                    desc = f"✅ **[{target_role.upper()}]** 엔진이 `{eng.upper()}`, 모델이 `{disp_mod}` (`{resolved_mod}`)(으)로 전역 변경되었습니다!"
+                    resolved_mod = GlobalModelManager.get_role_model(target_role, channel_id=channel_id)
+                    disp_mod = GlobalModelManager.get_role_model_display(target_role, channel_id=channel_id)
+                    desc = f"✅ **[{target_role.upper()}]** 엔진이 `{eng.upper()}`, 모델이 `{disp_mod}` (`{resolved_mod}`)(으)로 변경되었습니다! ({scope_word} 전용)"
                 else:
                     mod = " ".join(args[1:]).strip()
                     GlobalModelManager.set_role_model(target_role, mod)
-                    resolved_mod = GlobalModelManager.get_role_model(target_role)
-                    disp_mod = GlobalModelManager.get_role_model_display(target_role)
-                    desc = f"✅ **[{target_role.upper()}]** 모델이 `{disp_mod}` (`{resolved_mod}`)(으)로 전역 변경되었습니다!"
+                    resolved_mod = GlobalModelManager.get_role_model(target_role, channel_id=channel_id)
+                    disp_mod = GlobalModelManager.get_role_model_display(target_role, channel_id=channel_id)
+                    desc = f"✅ **[{target_role.upper()}]** 모델이 `{disp_mod}` (`{resolved_mod}`)(으)로 변경되었습니다! ({scope_word} 전용)"
         else:
             desc = f"ℹ️ **[{target_role.upper()}]** 설정 창을 엽니다."
 
         await sync_all_bot_presences()
-        embed = GlobalModelManager.build_dashboard_embed(selected_role=target_role)
-        view = ModelDashboardView(selected_role=target_role, user_id=ctx.author.id)
-        msg = await ctx.send(desc, embed=embed, view=view)
-        view.message = msg
+        sync_sessions_with_global_model()
+        await _send_dash(desc, role=target_role)
         return
 
     # If unrecognized role, show dashboard with guidance
-    embed = GlobalModelManager.build_dashboard_embed(selected_role="auditor")
-    view = ModelDashboardView(selected_role="auditor", user_id=ctx.author.id)
-    msg = await ctx.send(f"⚠️ 알 수 없는 모델 명령 형식입니다. 아래 대시보드에서 직접 제어하실 수 있습니다.\n*사용법: `{config.COMMAND_PREFIX}model` 또는 `{config.COMMAND_PREFIX}model qa2 off`*", embed=embed, view=view)
-    view.message = msg
+    await _send_dash(
+        f"⚠️ 알 수 없는 모델 명령 형식입니다. 아래 대시보드에서 직접 제어하실 수 있습니다.\n"
+        f"*사용법: `{config.COMMAND_PREFIX}model` · `{config.COMMAND_PREFIX}model qa2 off` · "
+        f"`{config.COMMAND_PREFIX}model reset` (채널 전용 설정 해제)*"
+    )
+
 
 @bot.command(name="bots", aliases=["소개", "봇소개", "agents", "에이전트", "botlist", "botinfo"], hidden=True)
 async def bots_command(ctx):
@@ -4634,6 +5138,31 @@ async def dispatch_next_in_queue(channel_id: int):
 qa_hub_manager.set_on_complete_callback(dispatch_next_in_queue)
 
 async def execute_channel_prompt(message: discord.Message, prompt: str):
+    """
+    [📺 채널 모델 스코프 진입점]
+
+    이 채널의 파이프라인(Coder·QA·Auditor 전체 경로)은 아래 호출을
+    '해당 채널 ID' 컨텍스트에서 실행한다. 덕분에 GlobalModelManager 의 모든
+    getter 는 별도 수정 없이 **이 채널의 `!model` 오버라이드**를 자동 적용한다.
+    """
+    _tok = None
+    try:
+        from model_manager import GlobalModelManager
+        _tok = GlobalModelManager.set_active_channel(message.channel.id)
+    except Exception:
+        _tok = None
+    try:
+        return await _execute_channel_prompt_impl(message, prompt)
+    finally:
+        try:
+            if _tok is not None:
+                from model_manager import GlobalModelManager
+                GlobalModelManager.reset_active_channel(_tok)
+        except Exception:
+            pass
+
+
+async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
     session = session_manager.get_session(message.channel.id)
     session.set_busy(True, "⏳ 작업 준비 중...")
     session.current_task = asyncio.current_task()

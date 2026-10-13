@@ -113,42 +113,60 @@ class TestGlobalModelManager(unittest.IsolatedAsyncioTestCase):
         model_manager.GlobalModelManager.set_role_model("qa2", "upstage/solar-pro4")
 
     async def test_bot_model_command_shortcuts(self):
+        """[📺 채널별 모델] `!model` 단축 명령은 이제 '해당 채널 전용 오버라이드'로 저장된다."""
         import bot
         ctx = MagicMock()
         ctx.author.id = 12345
         ctx.send = AsyncMock()
+        # 고정 채널 ID (MagicMock 기본 __int__ 가 아닌 명시적 값)
+        ctx.channel.id = 424242
+        CH = 424242
+        G = model_manager.GlobalModelManager
 
-        # 1. Open dashboard
+        # 선청소: 이전 테스트 잔여 오버라이드 제거
+        G.clear_channel_override(CH)
+
+        # 1. Open dashboard (채널 스코프 대시보드)
         await bot.model_command(ctx)
         ctx.send.assert_called()
         view_obj = ctx.send.call_args[1].get("view")
         self.assertEqual(view_obj.__class__.__name__, "ModelDashboardView")
+        self.assertEqual(getattr(view_obj, "channel_id", None), CH)
 
-        # 2. Toggle QA2 OFF via CLI shortcut
+        # 2. Toggle QA2 OFF via CLI shortcut → 채널 전용
         await bot.model_command(ctx, "qa2", "off")
-        self.assertFalse(model_manager.GlobalModelManager.is_qa_enabled(2))
+        self.assertFalse(G.is_qa_enabled(2, channel_id=CH))
+        self.assertTrue(G.has_channel_override("qa2", channel_id=CH))
 
         # 3. Toggle QA2 ON via CLI shortcut
         await bot.model_command(ctx, "qa2", "on")
-        self.assertTrue(model_manager.GlobalModelManager.is_qa_enabled(2))
+        self.assertTrue(G.is_qa_enabled(2, channel_id=CH))
 
         # 4. Set QA2 model via CLI shortcut
         await bot.model_command(ctx, "qa2", "openrouter", "upstage/solar-pro4")
-        cfg = model_manager.GlobalModelManager.get_role_config("qa2")
+        cfg = G.get_role_config("qa2", channel_id=CH)
         self.assertEqual(cfg["engine"], "hermes")
         self.assertEqual(cfg["model"], "upstage/solar-pro4")
 
         # 5. Set QA2 persona via CLI shortcut: !model qa2 persona security
         await bot.model_command(ctx, "qa2", "persona", "security")
-        self.assertEqual(model_manager.GlobalModelManager.get_role_persona("qa2"), "security")
+        self.assertEqual(G.get_role_persona("qa2", channel_id=CH), "security")
 
         # 6. Set QA3 persona via Korean shortcut: !model qa3 직업 카오스
         await bot.model_command(ctx, "qa3", "직업", "카오스")
-        self.assertEqual(model_manager.GlobalModelManager.get_role_persona("qa3"), "chaos")
+        self.assertEqual(G.get_role_persona("qa3", channel_id=CH), "chaos")
 
         # 7. Direct top-level persona command: !model persona qa2 designer
         await bot.model_command(ctx, "persona", "qa2", "designer")
-        self.assertEqual(model_manager.GlobalModelManager.get_role_persona("qa2"), "designer")
+        self.assertEqual(G.get_role_persona("qa2", channel_id=CH), "designer")
+
+        # 8. [격리 검증] 다른 채널은 전역 설정 그대로 사용한다
+        self.assertNotIn("qa2", G.get_channel_overrides(999999))
+
+        # 9. `!model reset` → 채널 전용 설정 해제 (전역 복귀)
+        await bot.model_command(ctx, "reset")
+        self.assertEqual(G.get_channel_overrides(CH), {})
+        self.assertFalse(G.has_channel_override("qa2", channel_id=CH))
 
     def test_get_engine_models_dynamic_category_sorting_and_catalog(self):
         from model_manager import get_engine_models

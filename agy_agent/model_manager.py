@@ -19,6 +19,8 @@ import sys
 import re
 import json
 import logging
+import contextvars
+import contextlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
 import discord
@@ -33,6 +35,11 @@ STATE_DIR = BASE_DIR / "state"
 # (운영 기본값은 기존과 100% 동일: 미설정 시 state/global_model_config.json 및 .env)
 CONFIG_FILE = Path(os.getenv("AGY_MODEL_CONFIG_FILE", str(STATE_DIR / "global_model_config.json")))
 ENV_FILE = Path(os.getenv("AGY_ENV_FILE", str(BASE_DIR / ".env")))
+# [📺 채널별 모델 설정] 디스코드 채널마다 역할(model/engine/persona/enabled)을 개별 오버라이드한다.
+#   파일이 없으면 기존 전역(global) 동작과 100% 동일하다 (하위 호환).
+CHANNEL_CONFIG_FILE = Path(
+    os.getenv("AGY_CHANNEL_MODEL_CONFIG_FILE", str(STATE_DIR / "channel_model_config.json"))
+)
 
 # Supported Routers / Engines and their curated presets
 ENGINE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -732,10 +739,175 @@ class GlobalModelManager:
     Central Controller for managing active models, engines, and QA pipeline steps globally.
     Persists configuration to state/global_model_config.json, updates in-memory config,
     and synchronizes with .env file.
+
+    [📺 채널별 오버라이드 레이어]
+    전역 설정 위에 **디스코드 채널 단위 오버라이드**를 겹쳐서 해석한다.
+    - `channel_id` 가 주어지면(또는 실행 컨텍스트에 활성 채널이 설정되면)
+      getter 는 '전역 설정 ∪ 채널 오버라이드' 결과를 돌려준다.
+    - setter 는 채널 컨텍스트가 있을 때 채널 오버라이드 파일에만 기록한다
+      (전역 설정/.env/config 는 건드리지 않는다 → 다른 채널에 영향 0).
+    - 오버라이드가 없는 채널은 기존 전역 동작과 100% 동일하다.
     """
+
     _roles: Dict[str, Dict[str, Any]] = getattr(_existing_gmm, "_roles", {}) if _existing_gmm else {}
     _initialized: bool = getattr(_existing_gmm, "_initialized", False) if _existing_gmm else False
     _on_change_callbacks: List[Any] = getattr(_existing_gmm, "_on_change_callbacks", []) if _existing_gmm else []
+    # [📺 채널별 모델 오버라이드] { "<channel_id>": { "<role>": {engine/model/persona/enabled...} } }
+    #   importlib.reload() 을 넘어 공유되어야 하므로 _roles 와 동일한 핫리로드 안전 패턴을 쓴다.
+    _channel_overrides: Dict[str, Dict[str, Dict[str, Any]]] = (
+        getattr(_existing_gmm, "_channel_overrides", {}) if _existing_gmm else {}
+    )
+    _channel_loaded: bool = getattr(_existing_gmm, "_channel_loaded", False) if _existing_gmm else False
+
+    # [📺 현재 실행 중인 채널 컨텍스트] asyncio 태스크/스레드별로 격리되는 ContextVar.
+    #   execute_channel_prompt(채널 파이프라인) 진입 시 채널 ID 를 등록하면,
+    #   trio_agent_runner·image_creator_hub 등 모든 하위 getter 가 별도 수정 없이
+    #   해당 채널의 오버라이드를 자동 적용한다.
+    _active_channel_ctx: contextvars.ContextVar = contextvars.ContextVar(
+        "agy_active_channel", default=None
+    )
+
+    # ------------------------------------------------------------------
+    # [📺] 채널 컨텍스트 (Ambient Channel Scope)
+    # ------------------------------------------------------------------
+    @classmethod
+    def set_active_channel(cls, channel_id: Optional[int]):
+        """현재 실행 컨텍스트에 채널 ID 를 등록한다. 해제용 토큰을 반환한다."""
+        if channel_id is None:
+            return None
+        try:
+            return cls._active_channel_ctx.set(int(channel_id))
+        except Exception:
+            return None
+
+    @classmethod
+    def reset_active_channel(cls, token) -> None:
+        """set_active_channel 이 돌려준 토큰으로 채널 컨텍스트를 해제한다."""
+        if token is None:
+            return
+        try:
+            cls._active_channel_ctx.reset(token)
+        except Exception:
+            pass
+
+    @classmethod
+    def get_active_channel(cls) -> Optional[int]:
+        val = cls._active_channel_ctx.get()
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except Exception:
+            return None
+
+    @classmethod
+    @contextlib.contextmanager
+    def channel_context(cls, channel_id: Optional[int]):
+        """with GlobalModelManager.channel_context(cid): ... 블록 스코프 채널 바인딩."""
+        token = cls.set_active_channel(channel_id)
+        try:
+            yield channel_id
+        finally:
+            cls.reset_active_channel(token)
+
+    @classmethod
+    def _resolve_channel_id(cls, channel_id: Optional[int]) -> Optional[int]:
+        """명시 인자 → 실행 컨텍스트 순으로 유효 채널 ID 를 해석한다."""
+        if channel_id is not None:
+            try:
+                return int(channel_id)
+            except Exception:
+                return None
+        return cls.get_active_channel()
+
+    # ------------------------------------------------------------------
+    # [📺] 채널 오버라이드 저장소
+    # ------------------------------------------------------------------
+    @classmethod
+    def load_channel_overrides(cls, force: bool = False) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if cls._channel_loaded and not force:
+            return cls._channel_overrides
+        cls._channel_overrides.clear()
+        if CHANNEL_CONFIG_FILE.exists():
+            try:
+                with open(CHANNEL_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for cid, roles in data.items():
+                        if isinstance(roles, dict):
+                            cls._channel_overrides[str(cid)] = {
+                                str(r): dict(v) for r, v in roles.items() if isinstance(v, dict)
+                            }
+            except Exception as e:
+                logger.error(f"Failed to load {CHANNEL_CONFIG_FILE}: {e}")
+        cls._channel_loaded = True
+        return cls._channel_overrides
+
+    @classmethod
+    def save_channel_overrides(cls) -> None:
+        """채널 오버라이드를 원자적으로 저장한다(실패해도 전역 동작은 영향 없음)."""
+        try:
+            CHANNEL_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = CHANNEL_CONFIG_FILE.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cls._channel_overrides, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, CHANNEL_CONFIG_FILE)
+        except Exception as e:
+            logger.error(f"Failed to write {CHANNEL_CONFIG_FILE}: {e}")
+
+    @classmethod
+    def get_channel_overrides(cls, channel_id: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+        """특정 채널에 설정된 역할 오버라이드 사본을 반환한다(없으면 {})."""
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is None:
+            return {}
+        cls.load_channel_overrides()
+        return {
+            role: dict(vals)
+            for role, vals in cls._channel_overrides.get(str(cid), {}).items()
+        }
+
+    @classmethod
+    def has_channel_override(cls, role: str, channel_id: Optional[int] = None) -> bool:
+        return role.lower().strip() in cls.get_channel_overrides(channel_id)
+
+    @classmethod
+    def clear_channel_override(cls, channel_id: Optional[int] = None, role: Optional[str] = None) -> bool:
+        """
+        채널 오버라이드를 제거한다(전역 설정으로 되돌린다).
+        role 지정 시 해당 역할만, 미지정 시 해당 채널의 전체 오버라이드를 제거한다.
+        """
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is None:
+            return False
+        cls.load_channel_overrides()
+        key = str(cid)
+        if key not in cls._channel_overrides:
+            return False
+        if role:
+            r = role.lower().strip()
+            if r in cls._channel_overrides[key]:
+                del cls._channel_overrides[key][r]
+                if not cls._channel_overrides[key]:
+                    cls._channel_overrides.pop(key, None)
+            else:
+                return False
+        else:
+            cls._channel_overrides.pop(key, None)
+        cls.save_channel_overrides()
+        cls.notify_change()
+        return True
+
+    @classmethod
+    def _write_channel_field(cls, channel_id: int, role: str, field: str, value: Any) -> None:
+        """채널 오버라이드 1필드 기록 + 저장 + 변경 알림(전역 config/.env 는 건드리지 않는다)."""
+        cls.load_channel_overrides()
+        key = str(channel_id)
+        entry = cls._channel_overrides.setdefault(key, {}).setdefault(role, {})
+        entry[field] = value
+        cls.save_channel_overrides()
+        cls.notify_change()
+
 
     @classmethod
     def register_change_callback(cls, callback):
@@ -875,12 +1047,12 @@ class GlobalModelManager:
         return clean_part.replace("-", " ").replace("_", " ").title()
 
     @classmethod
-    def get_role_model_display(cls, role: str) -> str:
-        """Returns the formatted display model name for a given role (coder, qa1, auditor, etc.)."""
+    def get_role_model_display(cls, role: str, channel_id: Optional[int] = None) -> str:
+        """Returns the formatted display model name for a given role (channel override aware)."""
         if not cls._initialized:
             cls.initialize()
         role = role.lower().strip()
-        cfg = cls._roles.get(role, {})
+        cfg = cls.get_role_config(role, channel_id=channel_id)
         model_id = cfg.get("model")
         if not model_id:
             try:
@@ -905,6 +1077,10 @@ class GlobalModelManager:
     def initialize(cls):
         """Initializes global model config from disk, falling back to .env / defaults."""
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+        # [📺 채널 오버라이드 선로딩] 기동/Hot-Reload 시 채널별 설정을 먼저 읽어둔다.
+        #   (이후 모든 getter/setter 가 '전역 ∪ 채널 오버라이드' 기준으로 동작한다)
+        cls.load_channel_overrides(force=True)
 
         # [🔁 Hot-Reload Safety] _roles 딕셔너리는 importlib.reload() 를 넘어 공유되는 객체이므로
         # '새 dict 로 교체'하지 않고 제자리(in-place)에서 갱신한다. 새로 교체하면 bot.py 등
@@ -1005,42 +1181,69 @@ class GlobalModelManager:
                 cls._roles[q_key]["engine"] = e_val.strip()
 
     @classmethod
-    def get_all_roles(cls) -> Dict[str, Dict[str, Any]]:
+    def get_all_roles(cls, channel_id: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+        """
+        전체 역할 설정을 반환한다.
+        channel_id(또는 활성 채널 컨텍스트)가 있으면 '전역 ∪ 채널 오버라이드' 병합 뷰.
+        """
         if not cls._initialized:
             cls.initialize()
-        return dict(cls._roles)
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is None:
+            return dict(cls._roles)
+        merged = {k: dict(v) for k, v in cls._roles.items()}
+        for role, override in cls.get_channel_overrides(cid).items():
+            if role in merged:
+                merged[role].update({k: v for k, v in override.items() if v is not None})
+            else:
+                merged[role] = dict(override)
+        return merged
 
     @classmethod
-    def get_role_config(cls, role: str) -> Dict[str, Any]:
+    def get_role_config(cls, role: str, channel_id: Optional[int] = None) -> Dict[str, Any]:
         if not cls._initialized:
             cls.initialize()
         role = role.lower().strip()
         alias_roles = {"qa": "qa1", "개발": "coder", "감사": "auditor"}
         role = alias_roles.get(role, role)
-        return dict(cls._roles.get(role, {}))
+        cfg = dict(cls._roles.get(role, {}))
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            override = cls.get_channel_overrides(cid).get(role)
+            if override:
+                # None 값은 '미지정'으로 보고 병합에서 제외한다(enabled=False 등은 그대로 적용).
+                cfg.update({k: v for k, v in override.items() if v is not None})
+        return cfg
 
     @classmethod
-    def get_role_model(cls, role: str) -> str:
-        """Returns the configured model string for a given role."""
-        return cls.get_role_config(role).get("model", "")
+    def get_role_model(cls, role: str, channel_id: Optional[int] = None) -> str:
+        """Returns the configured model string for a given role (channel override aware)."""
+        return cls.get_role_config(role, channel_id=channel_id).get("model", "")
 
     @classmethod
-    def get_role_engine(cls, role: str) -> str:
-        """Returns the configured engine/router string for a given role."""
-        return cls.get_role_config(role).get("engine", "")
+    def get_role_engine(cls, role: str, channel_id: Optional[int] = None) -> str:
+        """Returns the configured engine/router string for a given role (channel override aware)."""
+        return cls.get_role_config(role, channel_id=channel_id).get("engine", "")
 
     @classmethod
-    def get_role_persona(cls, role: str) -> str:
+    def get_role_persona(cls, role: str, channel_id: Optional[int] = None) -> str:
         """Returns the persona ID assigned to the given role (default: 'general')."""
         if not cls._initialized:
             cls.initialize()
+        if channel_id is None and cls.get_active_channel() is not None:
+            channel_id = cls.get_active_channel()
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            override = cls.get_channel_overrides(cid).get(role.lower().strip(), {})
+            if override.get("persona"):
+                return override["persona"]
         cfg = cls._roles.get(role, {})
         return cfg.get("persona", DEFAULT_ROLES.get(role, {}).get("persona", "general"))
 
     @classmethod
-    def get_role_persona_info(cls, role: str) -> Dict[str, str]:
+    def get_role_persona_info(cls, role: str, channel_id: Optional[int] = None) -> Dict[str, str]:
         """Returns the full persona dictionary for the given role."""
-        p_id = cls.get_role_persona(role)
+        p_id = cls.get_role_persona(role, channel_id=channel_id)
         return QA_PERSONAS.get(p_id, QA_PERSONAS.get("general", {
             "id": "general",
             "name": "기본값 (종합 품질 검증관)",
@@ -1051,8 +1254,11 @@ class GlobalModelManager:
         }))
 
     @classmethod
-    def set_role_persona(cls, role: str, persona_id: str) -> bool:
-        """Sets the persona ID for the given role and persists to disk."""
+    def set_role_persona(cls, role: str, persona_id: str, channel_id: Optional[int] = None) -> bool:
+        """Sets the persona ID for the given role and persists to disk.
+
+        [📺] 채널 컨텍스트가 활성화되어 있으면 해당 채널의 오버라이드에만 기록한다.
+        """
         if not cls._initialized:
             cls.initialize()
         role = role.lower().strip()
@@ -1075,12 +1281,16 @@ class GlobalModelManager:
         resolved_p_id = alias_map.get(p_id_norm, p_id_norm)
         if resolved_p_id not in QA_PERSONAS:
             resolved_p_id = "general"
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            cls._write_channel_field(cid, role, "persona", resolved_p_id)
+            return True
         cls._roles[role]["persona"] = resolved_p_id
         cls.save()
         return True
 
     @classmethod
-    def is_qa_enabled(cls, qa_identifier: Union[int, str]) -> bool:
+    def is_qa_enabled(cls, qa_identifier: Union[int, str], channel_id: Optional[int] = None) -> bool:
         """
         Checks if a specific QA step is active.
         If False, the QA step is completely skipped in the pipeline!
@@ -1094,17 +1304,29 @@ class GlobalModelManager:
             if not role_key.startswith("qa"):
                 role_key = f"qa{role_key}"
 
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            override = cls.get_channel_overrides(cid).get(role_key)
+            if override and "enabled" in override:
+                return bool(override.get("enabled"))
+
         cfg = cls._roles.get(role_key)
         if cfg is None:
             return True
         return bool(cfg.get("enabled", True))
 
     @classmethod
-    def set_role_enabled(cls, role: str, enabled: bool) -> bool:
-        """Enables or disables a role globally."""
+    def set_role_enabled(cls, role: str, enabled: bool, channel_id: Optional[int] = None) -> bool:
+        """Enables or disables a role globally (or for a specific channel when in channel scope)."""
         if not cls._initialized:
             cls.initialize()
         role = role.lower().strip()
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            if role in cls._roles:
+                cls._write_channel_field(cid, role, "enabled", bool(enabled))
+                return True
+            return False
         if role in cls._roles:
             cls._roles[role]["enabled"] = bool(enabled)
             cls.save()
@@ -1188,8 +1410,8 @@ class GlobalModelManager:
         return presets[0][0] if presets else None
 
     @classmethod
-    def set_role_engine(cls, role: str, engine: str) -> bool:
-        """Sets the router/engine for a role globally.
+    def set_role_engine(cls, role: str, engine: str, channel_id: Optional[int] = None) -> bool:
+        """Sets the router/engine for a role globally (or for a specific channel).
 
         [🧭 정합성 가드] 새 엔진이 현재 모델을 지원하지 못하면(예: OpenCode 엔진 + Gemini 모델)
         해당 엔진의 기본 모델로 자동 교체하여 '엔진≠모델' 불일치 상태를 원천 차단합니다.
@@ -1202,6 +1424,22 @@ class GlobalModelManager:
             engine = "hermes"
         elif engine in ("cmdc", "commandcode", "command-code", "command_code", "command"):
             engine = "cmdc"
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            if role not in cls._roles:
+                return False
+            cls._write_channel_field(cid, role, "engine", engine)
+            # 채널 스코프에서도 엔진/모델 정합성을 유지한다.
+            curr_model = cls.get_role_model(role, channel_id=cid)
+            if curr_model and not cls.is_model_compatible_with_engine(engine, curr_model):
+                default_model = cls.default_model_for_engine(engine)
+                if default_model:
+                    logger.warning(
+                        f"[ModelCoherence] Channel {cid} role '{role}': engine '{engine}' cannot run model "
+                        f"'{curr_model}' → auto-replaced with engine default '{default_model}'."
+                    )
+                    cls._write_channel_field(cid, role, "model", default_model)
+            return True
         if role in cls._roles:
             cls._roles[role]["engine"] = engine
             curr_model = cls._roles[role].get("model", "")
@@ -1436,13 +1674,32 @@ class GlobalModelManager:
         return None
 
     @classmethod
-    def set_role_model(cls, role: str, model: str) -> bool:
-        """Sets the model identifier for a role globally with smart normalization and engine auto-harmonization."""
+    def set_role_model(cls, role: str, model: str, channel_id: Optional[int] = None) -> bool:
+        """Sets the model identifier for a role globally (or per-channel) with smart normalization and engine auto-harmonization."""
         if not cls._initialized:
             cls.initialize()
         role = role.lower().strip()
         model = model.strip()
+        cid = cls._resolve_channel_id(channel_id)
         if role in cls._roles and model:
+            if cid is not None:
+                # [📺 채널 스코프] 채널 오버라이드에만 기록한다. 별칭 해석은
+                # '해당 채널에 적용된 엔진'을 기준으로 수행한다.
+                curr_engine = cls.get_role_engine(role, channel_id=cid)
+                resolved_model = cls.resolve_model_id(curr_engine, model)
+                cls._write_channel_field(cid, role, "model", resolved_model)
+
+                # [🧭 Auto-harmonize engine based on model type] — 채널 스코프 전용
+                owner = cls.model_owner_engine(resolved_model)
+                curr_eng = cls.get_role_engine(role, channel_id=cid)
+                if owner and owner != curr_eng and not cls.is_model_compatible_with_engine(curr_eng, resolved_model):
+                    cls._write_channel_field(cid, role, "engine", owner)
+                    logger.info(
+                        f"[ModelCoherence] Channel {cid} role '{role}': model '{resolved_model}' cannot run on "
+                        f"engine '{curr_eng}' → engine auto-harmonized to '{owner}'."
+                    )
+                return True
+
             curr_engine = cls._roles[role].get("engine", "agy")
             resolved_model = cls.resolve_model_id(curr_engine, model)
             cls._roles[role]["model"] = resolved_model
@@ -1467,20 +1724,33 @@ class GlobalModelManager:
         return False
 
     @classmethod
-    def set_all_qa_enabled(cls, enabled: bool) -> None:
-        """Enables or disables all QA stages (QA1..QA6) at once."""
+    def set_all_qa_enabled(cls, enabled: bool, channel_id: Optional[int] = None) -> None:
+        """Enables or disables all QA stages (QA1..QA6) at once (channel scope aware)."""
         if not cls._initialized:
             cls.initialize()
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            for k in cls._roles:
+                if k.startswith("qa"):
+                    cls._write_channel_field(cid, k, "enabled", bool(enabled))
+            return
         for k in cls._roles:
             if k.startswith("qa"):
                 cls._roles[k]["enabled"] = enabled
         cls.save()
 
     @classmethod
-    def set_only_primary_qa(cls) -> None:
-        """Enables QA1 only, disabling QA2..QA6 for high-speed runs."""
+    def set_only_primary_qa(cls, channel_id: Optional[int] = None) -> None:
+        """Enables QA1 only, disabling QA2..QA6 for high-speed runs (channel scope aware)."""
         if not cls._initialized:
             cls.initialize()
+        cid = cls._resolve_channel_id(channel_id)
+        if cid is not None:
+            cls._write_channel_field(cid, "qa1", "enabled", True)
+            for k in cls._roles:
+                if k.startswith("qa") and k != "qa1":
+                    cls._write_channel_field(cid, k, "enabled", False)
+            return
         cls._roles["qa1"]["enabled"] = True
         for k in cls._roles:
             if k.startswith("qa") and k != "qa1":
@@ -1488,23 +1758,24 @@ class GlobalModelManager:
         cls.save()
 
     @classmethod
-    def get_active_extended_qas(cls) -> List[Dict[str, Any]]:
+    def get_active_extended_qas(cls, channel_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Returns active extended QA configurations (QA2..QA10) where enabled=True.
         Directly consumed by trio_agent_runner and config.get_extended_qa_configs().
         """
         if not cls._initialized:
             cls.initialize()
+        cid = cls._resolve_channel_id(channel_id)
         active_list: List[Dict[str, Any]] = []
         for i in range(2, 11):
             q_key = f"qa{i}"
-            cfg = cls._roles.get(q_key)
-            if not cfg or not cfg.get("enabled", True):
+            if not cls.is_qa_enabled(i, channel_id=cid):
                 continue
-            model = cfg.get("model", "").strip()
+            cfg = cls.get_role_config(q_key, channel_id=cid)
+            model = (cfg.get("model") or "").strip()
             if not model:
                 continue
-            raw_eng = cfg.get("engine", "hermes").strip()
+            raw_eng = (cfg.get("engine") or "hermes").strip()
             engine = "hermes" if raw_eng in ("openrouter", "hermes") else raw_eng
             token = os.getenv(f"DISCORD_AGY_QA{i}_BOT_TOKEN") or os.getenv(f"DISCORD_QA{i}_BOT_TOKEN") or ""
             p_id = cfg.get("persona", DEFAULT_ROLES.get(q_key, {}).get("persona", "general"))
@@ -1619,10 +1890,27 @@ class GlobalModelManager:
             logger.error(f"Failed to sync .env file: {e}")
 
     @classmethod
-    def build_dashboard_embed(cls, selected_role: str = "auditor") -> discord.Embed:
-        """Builds a rich, visual overview Embed of all roles and active model statuses."""
+    def build_dashboard_embed(cls, selected_role: str = "auditor", channel_id: Optional[int] = None) -> discord.Embed:
+        """Builds a rich, visual overview Embed of all roles and active model statuses.
+
+        [📺] channel_id(또는 활성 채널 컨텍스트)가 있으면 해당 채널의 오버라이드가
+        적용된 상태로 렌더링하고, 상단에 '이 채널 전용 설정' 배지를 표시한다.
+        """
         if not cls._initialized:
             cls.initialize()
+        cid = cls._resolve_channel_id(channel_id)
+        channel_overrides = cls.get_channel_overrides(cid) if cid is not None else {}
+
+        def _role_cfg(rk: str) -> Dict[str, Any]:
+            """채널 오버라이드가 적용된 역할 설정."""
+            cfg = dict(cls._roles.get(rk, {}))
+            override = channel_overrides.get(rk)
+            if override:
+                cfg.update({k: v for k, v in override.items() if v is not None})
+            return cfg
+
+        def _scope_tag(rk: str) -> str:
+            return " 📺" if rk in channel_overrides else ""
 
         def _short_model(m: str) -> str:
             """Shorten long model identifiers for display."""
@@ -1630,16 +1918,36 @@ class GlobalModelManager:
                 return m.split("/")[-1][:28]
             return m[:28]
 
+        override_count = len(channel_overrides)
+        if cid is not None and override_count:
+            scope_desc = (
+                f"📺 **이 채널(`{cid}`) 전용 설정 {override_count}개 적용 중** — "
+                "아래 값은 이 채널에서만 유효합니다.\n"
+                f"• 전역 기본값으로 되돌리기: `!model reset` · 역할만 되돌리기: `!model reset <역할>`\n"
+                "버튼과 드롭다운으로 모델을 즉시 교체합니다. 변경은 재부팅 없이 실시간 반영됩니다."
+            )
+            title = f"🎛️ 채널 AI 모델 관제 센터 ({override_count}개 채널 전용)"
+        elif cid is not None:
+            scope_desc = (
+                f"📺 채널(`{cid}`)에는 아직 전용 설정이 없어 **전역 설정**을 사용합니다.\n"
+                "여기서 바꾸면 이 채널에만 전용으로 저장됩니다(다른 채널은 그대로).\n"
+                "버튼과 드롭다운으로 모델을 즉시 교체합니다. 변경은 재부팅 없이 실시간 반영됩니다."
+            )
+            title = "🎛️ 채널 AI 모델 관제 센터 (전역 설정 사용 중)"
+        else:
+            scope_desc = "버튼과 드롭다운으로 모델을 즉시 교체합니다. 변경은 재부팅 없이 실시간 반영됩니다."
+            title = "🎛️ 전역 AI 모델 관제 센터"
+
         embed = discord.Embed(
-            title="🎛️ 전역 AI 모델 관제 센터",
-            description="버튼과 드롭다운으로 모델을 즉시 교체합니다. 변경은 재부팅 없이 실시간 반영됩니다.",
+            title=title,
+            description=scope_desc,
             color=0x4285F4
         )
 
         # 1. Core Agents - compact single-line format
         core_lines = []
         for rk in ("coder", "auditor", "image", "vision", "commander"):
-            cfg = cls._roles.get(rk, {})
+            cfg = _role_cfg(rk)
             icon = cfg.get("icon", "🤖")
             name = cfg.get("name", rk)
             st = "🟢" if cfg.get("enabled", True) else "🔴"
@@ -1658,15 +1966,15 @@ class GlobalModelManager:
         inactive_names = []
         for i in range(1, 7):
             rk = f"qa{i}"
-            cfg = cls._roles.get(rk, {})
+            cfg = _role_cfg(rk)
             is_en = cfg.get("enabled", True)
             mod = _short_model(cfg.get("model", "unknown"))
-            p_info = cls.get_role_persona_info(rk)
+            p_info = cls.get_role_persona_info(rk, channel_id=cid)
             p_icon = p_info.get("icon", "🕵️")
             sel_tag = " ← **선택됨**" if rk == selected_role else ""
 
             if is_en:
-                active_lines.append(f"🟢 {p_icon} **qa{i}** · `{mod}`{sel_tag}")
+                active_lines.append(f"🟢 {p_icon} **qa{i}** · `{mod}`{_scope_tag(rk)}{sel_tag}")
             else:
                 inactive_names.append(f"qa{i}")
 
@@ -1681,14 +1989,15 @@ class GlobalModelManager:
         )
 
         # 3. Selected Role Detail Box
-        curr = cls._roles.get(selected_role, {})
+        curr = _role_cfg(selected_role)
         curr_icon = curr.get("icon", "⚙️")
         curr_name = curr.get("name", selected_role)
         curr_status = "🟢 활성" if curr.get("enabled", True) else "🔴 비활성"
         raw_curr_eng = curr.get("engine", "agy").lower()
         curr_eng = "OpenRouter" if raw_curr_eng in ("hermes", "openrouter") else raw_curr_eng.upper()
         curr_mod = curr.get("model", "unknown")
-        curr_p_info = cls.get_role_persona_info(selected_role)
+        curr_p_info = cls.get_role_persona_info(selected_role, channel_id=cid)
+        ch_badge = f" 📺 **이 채널 전용**" if selected_role in channel_overrides else ""
 
         # 🎨 Image generator 역할이면 '실제로 어떤 이미지 모델/백엔드로 생성되는지'를 표시한다.
         #    (agy 라벨 → 실제 Nano Banana ID 해석 결과를 사용자가 바로 볼 수 있게 함)
@@ -1722,7 +2031,7 @@ class GlobalModelManager:
         cat_note = cls._build_catalog_status_note(raw_curr_eng)
 
         embed.add_field(
-            name=f"🎯 선택: {curr_icon} {curr_name}",
+            name=f"🎯 선택: {curr_icon} {curr_name}{ch_badge}",
             value=(
                 f"**상태** {curr_status} · **엔진** `{curr_eng}` · **모델** `{curr_mod}`\n"
                 f"**역할** {curr_p_info.get('icon', '💼')} {curr_p_info.get('name', '기본값')}\n"
@@ -1734,7 +2043,12 @@ class GlobalModelManager:
             inline=False
         )
 
-        embed.set_footer(text="Global Model Manager · 변경 즉시 반영")
+        embed.set_footer(
+            text=(
+                f"채널 전용 설정 {override_count}개 · `!model reset` 으로 전역 복원" if cid is not None
+                else "Global Model Manager · 변경 즉시 반영"
+            )
+        )
         return embed
 
     @classmethod
@@ -1801,8 +2115,9 @@ class CustomModelModal(Modal):
         super().__init__(title="✏️ AI 모델 식별자 직접 지정")
         self.selected_role = selected_role
         self.parent_view = parent_view
+        self.channel_id = getattr(parent_view, "channel_id", None)
 
-        role_cfg = GlobalModelManager.get_role_config(selected_role)
+        role_cfg = GlobalModelManager.get_role_config(selected_role, channel_id=self.channel_id)
         role_name = role_cfg.get("name", selected_role)
 
         self.model_input = TextInput(
@@ -1817,13 +2132,15 @@ class CustomModelModal(Modal):
     async def on_submit(self, interaction: discord.Interaction):
         new_model = self.model_input.value.strip()
         if new_model:
-            GlobalModelManager.set_role_model(self.selected_role, new_model)
-            embed = GlobalModelManager.build_dashboard_embed(self.selected_role)
+            GlobalModelManager.set_role_model(self.selected_role, new_model, channel_id=self.channel_id)
+            embed = GlobalModelManager.build_dashboard_embed(self.selected_role, channel_id=self.channel_id)
             self.parent_view.update_components()
             await _safe_edit_view(interaction, embed, self.parent_view)
             try:
                 await interaction.followup.send(
-                    f"✅ **[{self.selected_role.upper()}]** 모델이 `{new_model}`(으)로 전역 변경되었습니다!",
+                    f"✅ **[{self.selected_role.upper()}]** 모델이 `{new_model}`(으)로 "
+                    + ("이 채널에" if self.channel_id is not None else "전역으로 ")
+                    + "변경되었습니다!",
                     ephemeral=True
                 )
             except Exception:
@@ -1851,6 +2168,7 @@ class ModelSearchModal(Modal):
         super().__init__(title="🔍 모델 검색 (전체 실시간 카탈로그)")
         self.selected_role = selected_role
         self.parent_view = parent_view
+        self.channel_id = getattr(parent_view, "channel_id", None)
         self.query = TextInput(
             label="검색어 (비우면 전체 목록)",
             placeholder="예: claude, deepseek, kimi, :free, gpt-5",
@@ -1864,7 +2182,7 @@ class ModelSearchModal(Modal):
         #   (자동화 이후 OpenRouter 는 수백 개가 되어 '뭘 치지 않아도 목록을 보고 싶다'
         #    는 요구가 자연스럽다. 빈 문자열은 전체 일치로 처리한다.)
         q = (self.query.value or "").strip().lower()
-        role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+        role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
         eng = role_cfg.get("engine", "agy")
         if eng in ("openrouter", "nous"):
             eng = "hermes"
@@ -1963,12 +2281,13 @@ class ModelSearchResultSelect(Select):
             except Exception:
                 pass
 
-        GlobalModelManager.set_role_model(self.selected_role, new_model)
+        _ch = getattr(self.parent_view, "channel_id", None) if self.parent_view else None
+        GlobalModelManager.set_role_model(self.selected_role, new_model, channel_id=_ch)
 
         # 원본 !model 대시보드 메시지 실시간 갱신 (deepseek 등 이전 모델 잔류 방지)
         if self.parent_view:
             self.parent_view.update_components()
-            embed = GlobalModelManager.build_dashboard_embed(self.parent_view.selected_role)
+            embed = GlobalModelManager.build_dashboard_embed(self.parent_view.selected_role, channel_id=_ch)
             if getattr(self.parent_view, "message", None):
                 try:
                     await self.parent_view.message.edit(embed=embed, view=self.parent_view)
@@ -2072,8 +2391,8 @@ class ModelSearchResultView(View):
 
 class RoleSelectDropdown(Select):
     """Dropdown for choosing which agent/role to configure."""
-    def __init__(self, selected_role: str):
-        roles = GlobalModelManager.get_all_roles()
+    def __init__(self, selected_role: str, channel_id: Optional[int] = None):
+        roles = GlobalModelManager.get_all_roles(channel_id=channel_id)
         options = []
         for rk, cfg in roles.items():
             st_icon = "🟢" if cfg.get("enabled", True) else "🔴"
@@ -2098,6 +2417,7 @@ class RoleSelectDropdown(Select):
             options=options,
             row=0
         )
+        self.channel_id = channel_id
 
     async def callback(self, interaction: discord.Interaction):
         try:
@@ -2110,14 +2430,14 @@ class RoleSelectDropdown(Select):
         view.selected_role = self.values[0]
         view.model_page = 0
         view.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(view.selected_role, channel_id=view.channel_id)
         await _safe_edit_view(interaction, embed, view)
 
 
 class EngineSelectDropdown(Select):
     """Dropdown for choosing the router/engine for the selected role."""
-    def __init__(self, selected_role: str):
-        role_cfg = GlobalModelManager.get_role_config(selected_role)
+    def __init__(self, selected_role: str, channel_id: Optional[int] = None):
+        role_cfg = GlobalModelManager.get_role_config(selected_role, channel_id=channel_id)
         curr_engine = role_cfg.get("engine", "agy").lower()
         if curr_engine in ("openrouter", "hermes"):
             curr_engine = "hermes"
@@ -2152,6 +2472,7 @@ class EngineSelectDropdown(Select):
             options=options,
             row=2
         )
+        self.channel_id = channel_id
 
     async def callback(self, interaction: discord.Interaction):
         try:
@@ -2164,12 +2485,12 @@ class EngineSelectDropdown(Select):
         new_engine = self.values[0]
         if new_engine in ("openrouter", "hermes"):
             new_engine = "hermes"
-        
+
         # Get current model before switching engine
-        role_cfg = GlobalModelManager.get_role_config(view.selected_role)
+        role_cfg = GlobalModelManager.get_role_config(view.selected_role, channel_id=view.channel_id)
         curr_model = role_cfg.get("model", "")
-        
-        GlobalModelManager.set_role_engine(view.selected_role, new_engine)
+
+        GlobalModelManager.set_role_engine(view.selected_role, new_engine, channel_id=view.channel_id)
 
         # [🔄 자동화] 방금 고른 엔진의 실시간 카탈로그를 지금 불러온다.
         try:
@@ -2196,11 +2517,11 @@ class EngineSelectDropdown(Select):
             preset_values = [p[0] for p in presets]
             if curr_model not in preset_values:
                 first_model = presets[0][0]
-                GlobalModelManager.set_role_model(view.selected_role, first_model)
+                GlobalModelManager.set_role_model(view.selected_role, first_model, channel_id=view.channel_id)
 
         view.model_page = 0
         view.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(view.selected_role, channel_id=view.channel_id)
         await _safe_edit_view(interaction, embed, view)
         # Note: redundant ephemeral status_line message removed to prevent message accumulation
 
@@ -2217,8 +2538,8 @@ class ModelPresetDropdown(Select):
 
     MAX_OPTIONS = 25  # Discord Select hard limit
 
-    def __init__(self, selected_role: str, page: int = 0):
-        role_cfg = GlobalModelManager.get_role_config(selected_role)
+    def __init__(self, selected_role: str, page: int = 0, channel_id: Optional[int] = None):
+        role_cfg = GlobalModelManager.get_role_config(selected_role, channel_id=channel_id)
         curr_engine = role_cfg.get("engine", "agy").lower()
         if curr_engine in ("openrouter", "hermes"):
             curr_engine = "hermes"
@@ -2348,6 +2669,7 @@ class ModelPresetDropdown(Select):
             options=options[:25],
             row=3
         )
+        self.channel_id = channel_id
 
     async def callback(self, interaction: discord.Interaction):
         view: ModelDashboardView = self.view
@@ -2373,7 +2695,7 @@ class ModelPresetDropdown(Select):
                 target_page = int(chosen.replace("__page_", "").rstrip("_"))
                 view.model_page = target_page
                 view.update_components()
-                embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
+                embed = GlobalModelManager.build_dashboard_embed(view.selected_role, channel_id=view.channel_id)
                 await _safe_edit_view(interaction, embed, view)
             except Exception as e:
                 logger.debug(f"Preset page navigation failed: {e}")
@@ -2386,16 +2708,16 @@ class ModelPresetDropdown(Select):
         except Exception:
             pass
         new_model = chosen
-        GlobalModelManager.set_role_model(view.selected_role, new_model)
+        GlobalModelManager.set_role_model(view.selected_role, new_model, channel_id=view.channel_id)
         view.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(view.selected_role, channel_id=view.channel_id)
         await _safe_edit_view(interaction, embed, view)
 
 
 class PersonaSelectDropdown(Select):
     """Dropdown for choosing the job/persona (직업/전문 역할) of the selected agent."""
-    def __init__(self, selected_role: str):
-        curr_persona = GlobalModelManager.get_role_persona(selected_role)
+    def __init__(self, selected_role: str, channel_id: Optional[int] = None):
+        curr_persona = GlobalModelManager.get_role_persona(selected_role, channel_id=channel_id)
         options = []
         for p_id, p_info in QA_PERSONAS.items():
             options.append(
@@ -2414,6 +2736,7 @@ class PersonaSelectDropdown(Select):
             options=options,
             row=4
         )
+        self.channel_id = channel_id
 
     async def callback(self, interaction: discord.Interaction):
         try:
@@ -2424,22 +2747,26 @@ class PersonaSelectDropdown(Select):
             pass
         view: ModelDashboardView = self.view
         chosen_persona = self.values[0]
-        GlobalModelManager.set_role_persona(view.selected_role, chosen_persona)
+        GlobalModelManager.set_role_persona(view.selected_role, chosen_persona, channel_id=view.channel_id)
         view.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(view.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(view.selected_role, channel_id=view.channel_id)
         await _safe_edit_view(interaction, embed, view)
 
 
 class ModelDashboardView(View):
     """
     Main Interactive View for the !model command.
+
+    [📺 채널 스코프] channel_id 가 주어지면 이 대시보드의 모든 변경은
+    해당 채널의 전용 오버라이드로 저장된다(전역 설정은 그대로 유지).
     """
     _active_dashboards: List['ModelDashboardView'] = []
 
-    def __init__(self, selected_role: str = "auditor", user_id: Optional[int] = None):
+    def __init__(self, selected_role: str = "auditor", user_id: Optional[int] = None, channel_id: Optional[int] = None):
         super().__init__(timeout=600)
         self.selected_role = selected_role
         self.user_id = user_id
+        self.channel_id = channel_id
         self.model_page: int = 0
         self.message: Optional[discord.Message] = None
         self.update_components()
@@ -2449,12 +2776,12 @@ class ModelDashboardView(View):
 
     def update_components(self):
         self.clear_items()
-        role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+        role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
         is_enabled = role_cfg.get("enabled", True)
         curr_model = role_cfg.get("model", "")
 
         # Row 0: Role Select Dropdown (에이전트 선택)
-        self.add_item(RoleSelectDropdown(self.selected_role))
+        self.add_item(RoleSelectDropdown(self.selected_role, channel_id=self.channel_id))
 
         # Row 1: Action Buttons (최대 5개 버튼 - 총 width 5 엄수)
         # Button 1: Toggle ON/OFF
@@ -2470,7 +2797,7 @@ class ModelDashboardView(View):
         # Button 2: Search Modal Button
         total_models = 0
         try:
-            role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+            role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
             eng_for_count = role_cfg.get("engine", "agy")
             if (self.selected_role or "").lower().strip() == "image":
                 total_models = len(IMAGE_MODEL_PRESETS)
@@ -2513,7 +2840,7 @@ class ModelDashboardView(View):
         # QA 역할 선택 시: QA 파이프라인 일괄 토글 (⚡ qa 전체 ON <-> 🛡️ qa1만 ON)
         # 그 외 역할(auditor, coder, commander, image) 선택 시: 창 닫기 버튼
         if (self.selected_role or "").lower().strip().startswith("qa"):
-            all_qa_active = all(GlobalModelManager.is_qa_enabled(i) for i in range(1, 7))
+            all_qa_active = all(GlobalModelManager.is_qa_enabled(i, channel_id=self.channel_id) for i in range(1, 7))
             btn_qa_mode = Button(
                 label="🛡️ qa1만 ON" if all_qa_active else "⚡ qa 전체 ON",
                 style=discord.ButtonStyle.secondary,
@@ -2533,13 +2860,13 @@ class ModelDashboardView(View):
             self.add_item(btn_close)
 
         # Row 2: Engine Select Dropdown (엔진/라우터 선택) -> width 5 전용 Row
-        self.add_item(EngineSelectDropdown(self.selected_role))
+        self.add_item(EngineSelectDropdown(self.selected_role, channel_id=self.channel_id))
 
         # Row 3: Model Preset Dropdown (모델 프리셋 선택, 페이지 연동)
-        self.add_item(ModelPresetDropdown(self.selected_role, page=self.model_page))
+        self.add_item(ModelPresetDropdown(self.selected_role, page=self.model_page, channel_id=self.channel_id))
 
         # Row 4: Persona Select Dropdown (직업/전문 역할 선택)
-        self.add_item(PersonaSelectDropdown(self.selected_role))
+        self.add_item(PersonaSelectDropdown(self.selected_role, channel_id=self.channel_id))
 
     async def _search_callback(self, interaction: discord.Interaction):
         """[🔄 자동화] 전체 실시간 카탈로그에서 모델 검색 모달을 연다."""
@@ -2563,7 +2890,7 @@ class ModelDashboardView(View):
         try:
             import asyncio
             from live_model_catalog import LiveModelCatalog
-            role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+            role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
             eng = role_cfg.get("engine", "agy")
             # 사용자가 결과를 기다리는 명시적 조화이므로 동기 조회를 허용한다.
             models = await asyncio.to_thread(LiveModelCatalog.get_models_blocking, eng, True)
@@ -2578,7 +2905,7 @@ class ModelDashboardView(View):
             status_line = f"⚠️ 카탈로그 갱신 실패: {e}"
         GlobalModelManager.sync_to_runtime_config()
         self.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(self.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(self.selected_role, channel_id=self.channel_id)
         await _safe_edit_view(interaction, embed, self)
         try:
             await interaction.followup.send(
@@ -2596,7 +2923,7 @@ class ModelDashboardView(View):
                     await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        roles = GlobalModelManager.get_all_roles()
+        roles = GlobalModelManager.get_all_roles(channel_id=self.channel_id)
         lines = [
             f"**CODER_MODEL**=`{roles.get('coder', {}).get('model')}` (Engine: `{roles.get('coder', {}).get('engine')}`)",
             f"**QA_MODEL**=`{roles.get('qa1', {}).get('model')}` (Enabled: `{roles.get('qa1', {}).get('enabled')}`)",
@@ -2606,10 +2933,11 @@ class ModelDashboardView(View):
         ]
         for i in range(2, 7):
             q_cfg = roles.get(f"qa{i}", {})
-            lines.append(f"**qa{i}**: `{q_cfg.get('model')}` [{q_cfg.get('engine').upper()}] - {'🟢 ON' if q_cfg.get('enabled') else '🔴 OFF (Skip)'}")
-        
+            lines.append(f"**qa{i}**: `{q_cfg.get('model')}` [{str(q_cfg.get('engine')).upper()}] - {'🟢 ON' if q_cfg.get('enabled') else '🔴 OFF (Skip)'}")
+
+        scope = "이 채널 전용" if self.channel_id is not None else "전역"
         env_embed = discord.Embed(
-            title="📋 전역 환경변수 및 모델 동기화 현황",
+            title=f"📋 환경변수 및 모델 동기화 현황 ({scope})",
             description="\n".join(lines),
             color=0x34A853
         )
@@ -2628,15 +2956,15 @@ class ModelDashboardView(View):
                     await interaction.response.defer()
         except Exception:
             pass
-        role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+        role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
         new_state = not role_cfg.get("enabled", True)
-        GlobalModelManager.set_role_enabled(self.selected_role, new_state)
+        GlobalModelManager.set_role_enabled(self.selected_role, new_state, channel_id=self.channel_id)
         self.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(self.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(self.selected_role, channel_id=self.channel_id)
         await _safe_edit_view(interaction, embed, self)
 
     async def _modal_callback(self, interaction: discord.Interaction):
-        role_cfg = GlobalModelManager.get_role_config(self.selected_role)
+        role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
         curr_model = role_cfg.get("model", "")
         modal = CustomModelModal(self.selected_role, curr_model, self)
         await interaction.response.send_modal(modal)
@@ -2648,9 +2976,9 @@ class ModelDashboardView(View):
                     await interaction.response.defer()
         except Exception:
             pass
-        GlobalModelManager.set_all_qa_enabled(True)
+        GlobalModelManager.set_all_qa_enabled(True, channel_id=self.channel_id)
         self.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(self.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(self.selected_role, channel_id=self.channel_id)
         await _safe_edit_view(interaction, embed, self)
         try:
             await interaction.followup.send("✅ **qa1 ~ qa6 전원 활성화 완료!** 6중 교차 검증 파이프라인이 가동됩니다.", ephemeral=True)
@@ -2664,9 +2992,9 @@ class ModelDashboardView(View):
                     await interaction.response.defer()
         except Exception:
             pass
-        GlobalModelManager.set_only_primary_qa()
+        GlobalModelManager.set_only_primary_qa(channel_id=self.channel_id)
         self.update_components()
-        embed = GlobalModelManager.build_dashboard_embed(self.selected_role)
+        embed = GlobalModelManager.build_dashboard_embed(self.selected_role, channel_id=self.channel_id)
         await _safe_edit_view(interaction, embed, self)
         try:
             await interaction.followup.send("⚡ **qa1만 가동 모드 적용 완료!** (qa2~qa6 단계 자동 패스로 토큰/시간 절약)", ephemeral=True)
@@ -2719,7 +3047,9 @@ async def _sync_active_dashboards_on_change():
         try:
             if getattr(v, "message", None):
                 v.update_components()
-                embed = GlobalModelManager.build_dashboard_embed(v.selected_role)
+                embed = GlobalModelManager.build_dashboard_embed(
+                    v.selected_role, channel_id=getattr(v, "channel_id", None)
+                )
                 await v.message.edit(embed=embed, view=v)
         except Exception as e:
             logger.debug(f"Failed to auto-update active dashboard message: {e}")

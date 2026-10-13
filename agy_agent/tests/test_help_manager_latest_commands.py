@@ -72,8 +72,15 @@ class TestHelpManagerLatestCommands(unittest.TestCase):
         self.assertIn("!identity", all_text)
 
     def test_auto_embed(self):
+        """[⏰ !auto] 자동 알람/스케줄 웨이크업 도움말 임베드."""
         embed = HelpManager.get_auto_embed()
-        self.assertIn("기능 제거됨", embed.title)
+        self.assertIn("자동 알람", embed.title)
+        all_text = " ".join([f.name + " " + f.value for f in embed.fields])
+        self.assertIn("!auto", all_text)
+        self.assertIn("!auto on", all_text)
+        self.assertIn("!auto off", all_text)
+        self.assertIn("!auto message", all_text)
+        self.assertIn("!auto schedule", all_text)
 
     def test_qa_embed(self):
         embed = HelpManager.get_qa_embed()

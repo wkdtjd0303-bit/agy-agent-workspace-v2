@@ -35,10 +35,17 @@ _REAL_ENV_FILE = _BASE_DIR / ".env"
 _SANDBOX_DIR = tempfile.mkdtemp(prefix="agy_test_model_sandbox_")
 _SANDBOX_CONFIG = Path(_SANDBOX_DIR) / "global_model_config.json"
 _SANDBOX_ENV = Path(_SANDBOX_DIR) / ".env"
+# [📺 채널별 설정 격리] 채널 모델 오버라이드 / 채널 자동 알람(!auto) 상태도 샌드박스로 격리한다.
+_SANDBOX_CHANNEL_CONFIG = Path(_SANDBOX_DIR) / "channel_model_config.json"
+_SANDBOX_AUTO_CONFIG = Path(_SANDBOX_DIR) / "channel_auto_config.json"
+_REAL_CHANNEL_CONFIG = _BASE_DIR / "state" / "channel_model_config.json"
+_REAL_AUTO_CONFIG = _BASE_DIR / "state" / "channel_auto_config.json"
 
 # 반드시 test 모듈이 model_manager 를 import 하기 전에 지정되어야 한다.
 os.environ["AGY_MODEL_CONFIG_FILE"] = str(_SANDBOX_CONFIG)
 os.environ["AGY_ENV_FILE"] = str(_SANDBOX_ENV)
+os.environ["AGY_CHANNEL_MODEL_CONFIG_FILE"] = str(_SANDBOX_CHANNEL_CONFIG)
+os.environ["AGY_CHANNEL_AUTO_CONFIG_FILE"] = str(_SANDBOX_AUTO_CONFIG)
 
 # [출력 가드 격리] 한국어 강제 재작성은 외부 LLM을 1회 추가 호출하므로 단위 테스트에서는
 # 비활성화하여 결정성/속도를 보장한다. (판정 태그 첫 줄 강제 등 결정론적 가드는 그대로 동작)
@@ -80,8 +87,12 @@ def _sha(data):
 # 실제 라이브 파일 백업 (테스트가 어떤 경로로든 변조할 경우 원복용)
 _REAL_CONFIG_BACKUP = _read_bytes(_REAL_CONFIG_FILE)
 _REAL_ENV_BACKUP = _read_bytes(_REAL_ENV_FILE)
+_REAL_CHANNEL_BACKUP = _read_bytes(_REAL_CHANNEL_CONFIG)
+_REAL_AUTO_BACKUP = _read_bytes(_REAL_AUTO_CONFIG)
 _REAL_CONFIG_SHA = _sha(_REAL_CONFIG_BACKUP)
 _REAL_ENV_SHA = _sha(_REAL_ENV_BACKUP)
+_REAL_CHANNEL_SHA = _sha(_REAL_CHANNEL_BACKUP)
+_REAL_AUTO_SHA = _sha(_REAL_AUTO_BACKUP)
 
 
 def _restore_real_files_if_modified() -> bool:
@@ -92,6 +103,12 @@ def _restore_real_files_if_modified() -> bool:
         restored = True
     if _REAL_ENV_BACKUP is not None and _sha(_read_bytes(_REAL_ENV_FILE)) != _REAL_ENV_SHA:
         _REAL_ENV_FILE.write_bytes(_REAL_ENV_BACKUP)
+        restored = True
+    if _REAL_CHANNEL_BACKUP is not None and _sha(_read_bytes(_REAL_CHANNEL_CONFIG)) != _REAL_CHANNEL_SHA:
+        _REAL_CHANNEL_CONFIG.write_bytes(_REAL_CHANNEL_BACKUP)
+        restored = True
+    if _REAL_AUTO_BACKUP is not None and _sha(_read_bytes(_REAL_AUTO_CONFIG)) != _REAL_AUTO_SHA:
+        _REAL_AUTO_CONFIG.write_bytes(_REAL_AUTO_BACKUP)
         restored = True
     return restored
 
@@ -122,6 +139,8 @@ def _isolate_model_manager_state():
 
     cfg_before = _read_bytes(_SANDBOX_CONFIG)
     env_before = _read_bytes(_SANDBOX_ENV)
+    ch_before = _read_bytes(_SANDBOX_CHANNEL_CONFIG)
+    auto_before = _read_bytes(_SANDBOX_AUTO_CONFIG)
     attr_before = {a: getattr(config, a, None) for a in _CONFIG_ATTRS}
     had_attrs = {a: hasattr(config, a) for a in _CONFIG_ATTRS}
 
@@ -137,6 +156,23 @@ def _isolate_model_manager_state():
             _SANDBOX_ENV.write_bytes(env_before)
         elif _SANDBOX_ENV.exists():
             _SANDBOX_ENV.unlink()
+        for _real_snap, _path in ((ch_before, _SANDBOX_CHANNEL_CONFIG), (auto_before, _SANDBOX_AUTO_CONFIG)):
+            if _real_snap is not None:
+                _path.write_bytes(_real_snap)
+            elif _path.exists():
+                _path.unlink()
+    except Exception:
+        pass
+
+    # 1-b. 채널 오버라이드/자동알람 인메모리 상태를 샌드박스 기준선으로 재장전한다.
+    try:
+        import model_manager as _mm
+        _mm.GlobalModelManager.load_channel_overrides(force=True)
+    except Exception:
+        pass
+    try:
+        import auto_scheduler as _as
+        _as.ChannelAutoScheduler.load(force=True)
     except Exception:
         pass
 

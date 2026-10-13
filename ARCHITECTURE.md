@@ -21,12 +21,37 @@
         │
         ├──► [roadmap_manager.py] (Roadmap Ladder 피드백 루프: Value/Feasibility Pre-Check)
         │
+        ├──► [model_manager.py] (📺 채널별 AI 모델/엔진 SSOT — 전역 ∪ 채널 오버레이드 2계층 해석)
+        │
         └──► [evidence_validator.py] (Gate 0~7 물리적 아티팩트 자동 검증)
+
+[auto_scheduler.py] (⏰ 채널별 자동 알람 — 스케줄 도래 시 `!auto` 메시지를 채널 파이프라인에 투입)
+        │
+        └──► [bot.py: execute_channel_prompt] (채널 ID 컨텍스트 진입 → 해당 채널의 !model 설정 적용)
 
 [surface-status.service] (Node.js 데몬)
         │
         ├──► [status.js] (CPU, RAM, Temp, SSD, Quota 수집)
         └──► [Discord Channel: 1538368240089169960] (1분 실시간 갱신)
+```
+
+## 1-1. 📺 채널별 모델 해석 흐름 (Channel Model Resolution Flow)
+```text
+[채널 ID + 역할] ──► GlobalModelManager.get_role_config(role, channel_id)
+                              │
+                              ▼
+              state/channel_model_config.json  ‹채널 오버레이드›
+                              │  (없으면 패스)
+                              ▼
+              state/global_model_config.json   ‹전역 기본값›
+                              │
+                              ▼
+        .env / config.py 런타임 동기화 (전역 계층만 기록)
+
+[Ambient Channel Context] execute_channel_prompt() 진입 시
+        GlobalModelManager.set_active_channel(channel_id) →
+        trio_agent_runner · agent_runner · image_creator_hub 등
+        모든 하위 getter 가 코드 수정 없이 채널 오버레이드를 자동 적용
 ```
 
 ## 2. 모듈별 책임 및 격리 (Separation of Concerns)
@@ -38,6 +63,8 @@
 6. **`surface-status` (Node.js)**: OS 리소스 수집 및 실시간 텔레메트리 관제
 7. **`evidence_validator.py`**: 정량적 품질 게이트(Quality Gate) 자동 검증기
 8. **`autonomy_guard.py`**: Bounded Autonomy 10대 핵심 가드레일 및 4차원 의사결정 매트릭스 엔진
+9. **`model_manager.py`**: 전역 + **채널별(📺) 2계층** AI 모델/엔진/직업 설정 SSOT — `state/global_model_config.json`(전역) · `state/channel_model_config.json`(채널 오버레이드)
+10. **`auto_scheduler.py`**: ⏰ 채널별 자동 알람/스케줄 웨이크업 엔진 (`!auto`) — 예약시간 도래 시 해당 채널의 Coder 파이프라인에 지정 메시지를 자동 투입 (`state/channel_auto_config.json`)
 
 ## 3. Bounded Autonomy & 10 Core Safety Guards (AGY 4.x)
 무인 자율 진화(`!auto on evolve`)가 제어 불가능한 무한 루프나 시스템 고갈로 치닫지 않도록 10대 하드 가드레일을 강제합니다:

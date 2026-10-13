@@ -99,13 +99,30 @@ AGY Agent는 "코드 다 짰습니다"라는 AI의 말만 믿지 않습니다. �
 
 ---
 
-### 5. 🔄 무인 자율 연속 진화 (`!auto on`, `!auto on evolve`)
-개발자가 잠든 밤 사이에도 시스템이 스스로 서비스를 발전시킵니다:
+### 5. ⏰ 채널별 AI 자동 알람 & 스케줄 웨이크업 (`!auto`)
 
-* **무인 품질 검증 (`!auto on`)**:
-  * 배포된 웹 URL(`https://...web.app`)이 감지되면, 사용자의 입력이 없어도 Playwright 헤드리스 브라우저로 실제 접속하여 UI 깨짐과 콘솔 에러를 점검하고 버그가 0건이 될 때까지 스스로 고칩니다.
-* **무인 연속 진화 (`!auto on evolve`)**:
-  * 버그가 전혀 없는 상태가 되면, 로드맵(`ROADMAP.md`)의 다음 목표 기능을 스스로 찾아 새 기능을 개발하고 E2E 테스트를 거쳐 자동 배포하는 무한 성장 사이클을 가동합니다 (롤백 보호 내장).
+마케팅 프로젝트의 "매일 아침 자동 브리핑"처럼, **정해진 스케줄마다 이 채널의 Coder 봇을 자동으로 깨워** 지정된 메시지를 투입합니다:
+
+* **채널별 완전 분리**: 디스코드 채널마다 독립적인 on/off · 메시지 · 스케줄을 가집니다. (`state/channel_auto_config.json`)
+* **기본값은 OFF**: `!auto on` 을 명시적으로 입력하기 전까지 어떤 채널도 발동하지 않습니다.
+* **지정 메시지 투입**: `!auto message <내용>` 로 발동 시 Coder에게 전달할 프롬프트를 자유롭게 지정합니다.
+* **스케줄 표현**: `every 30m` · `every 2h` · `daily 09:00` · `weekly mon 09:00` · `평일 09:00`
+* **바쁜 채널 보호**: 발동 시점에 해당 채널이 작업 중이면 자동으로 연기하고, 여유가 생기면 이어서 진행합니다.
+* **모델 연동**: 발동된 파이프라인은 해당 채널의 `!model` 설정(엔진/모델)을 그대로 사용합니다.
+
+---
+
+### 5-1. 📺 채널별 AI 모델 설정 (`!model`)
+
+`!model` 은 이제 **전역 + 채널 오버레이드 2계층**으로 동작합니다:
+
+* `!model` : 이 채널 기준 관제 대시보드(버튼·드롭다운·검색)
+* `!model coder opencode-go/deepseek-v4-pro` : **이 채널에서만** Coder 모델 변경
+* `!model qa2 off` : 이 채널에서만 qa2 비활성화
+* `!model persona qa3 보안` : 이 채널에서만 qa3 직업/역할 변경
+* `!model reset [역할]` : 이 채널의 전용 설정을 지우고 전역 기본값으로 복귀
+
+오버라이드가 없는 채널은 기존 전역 설정과 100% 동일하게 동작하며, 모든 채널 설정은 `state/channel_model_config.json` 에 채널별로 영속 저장됩니다.
 
 ---
 
@@ -166,13 +183,19 @@ AGY Agent의 코드베이스에는 엄격한 개발 헌법(`PROJECT_CONSTITUTION
 | `!mode [auto\|pair\|read\|single]` | 채널 기본 동작 모드 변경 (자동 / 3중 협업 / 읽기 전용 / 단일) | `!mode auto` |
 | `!role [qa\|coder]` | 채널 역할 즉시 전환 (`!role qa`: 시니어 QA 검증관 모드) | `!role qa` |
 
-### 🎛️ AI 엔진 & 오토파일럿
+### 🎛️ AI 엔진 & 모델 & 자동 알람
 | 명령어 | 설명 |
 |---|---|
-| `!engine` | 🎛️ 멀티 AI 코딩 엔진 선택 UI (Antigravity, Claude, Codex, Aider 1클릭 전환) |
-| `!auto on` | 🎯 무인 품질 검증 & 결함 핫픽스 자동 순환 시작 |
-| `!auto on evolve` | 👑 무인 자율 연속 진화 (결함 0건 달성 후 다음 로드맵 기능 자동 개발) |
-| `!auto off` / `!auto run` | 오토파일럿 중단 / 대기 없이 즉시 1회 검증 실행 |
+| `!engine` | 🎛️ 멀티 AI 코딩 엔진 선택 UI (Antigravity, Hermes/OpenRouter, Codex, Claude, OpenCode 등 1클릭 전환) |
+| `!model` | 📺 **채널별 AI 모델 관제 센터** — Coder/QA1~QA6/Auditor/Image/Vision/Commander 모델·엔진·직업 실시간 교체 |
+| `!model coder <모델>` | 이 채널에서만 Coder 모델 변경 (예: `!model coder opencode-go/deepseek-v4-pro`) |
+| `!model qa2 off` / `!model qa2 on` | 이 채널에서만 특정 QA 단계 비활성화/활성화 |
+| `!model reset [역할]` | ♻️ 이 채널의 전용 설정을 지우고 전역 기본값으로 복귀 |
+| `!auto` | ⏰ 이 채널의 자동 알람 현황 + 버튼 제어판 열기 |
+| `!auto on` / `!auto off` | 🟢 이 채널 자동 알람 활성화 / 🔴 비활성화 (기본값 OFF) |
+| `!auto message <내용>` | 💬 발동 시 Coder에게 전달할 메시지 지정 |
+| `!auto schedule <스케줄>` | 🕒 `every 30m` · `daily 09:00` · `weekly mon 09:00` · `평일 09:00` |
+| `!auto now` | ▶️ 즉시 1회 테스트 발동 |
 | `!commander` | 👑 Commander 의도 분석 엔진 상태 확인 및 모의 테스트 |
 
 ### 📱 모바일 & 안드로이드 MCP
