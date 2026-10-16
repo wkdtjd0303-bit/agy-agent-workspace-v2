@@ -813,6 +813,7 @@ class TrioAgentRunner:
     _PENDING_COMPLETION_SUPPRESSORS = (
         "최종 완료", "모두 완료", "모든 작업을 완료", "작업을 완료했습니다",
         "all tasks complete", "all done", "finally completed",
+        "[turn_done]", "구현 완료", "배포 완료", "검증 완료", "완료 보고서",
     )
 
     @classmethod

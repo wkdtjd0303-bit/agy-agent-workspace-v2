@@ -53,6 +53,8 @@ class TestPendingSubagentDetection(unittest.TestCase):
             "백그라운드 작업을 모두 완료했습니다. 최종 완료 보고입니다.",
             "구현 완료: 결제 모듈을 리팩터링했습니다.",
             "백그라운드 워커 큐를 구현했습니다.",
+            "이벤트 루프가 돌고 있는 스레드에서도 코루틴을 안전 실행하도록 구현 완료했습니다.\n\n[TURN_DONE]",
+            "수정된 3개 파일을 디스크에 저장하고 테스트를 통과시켰습니다. [TURN_DONE]",
         ]
         for s in samples:
             self.assertFalse(
