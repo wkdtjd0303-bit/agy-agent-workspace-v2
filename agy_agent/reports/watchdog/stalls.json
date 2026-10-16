@@ -1,67 +1,27 @@
 {
   "schema": "stall_guard/v1",
-  "generated_at": "2026-10-06T22:39:48Z",
+  "generated_at": "2026-10-14T23:01:16Z",
   "thresholds": {
     "warn_seconds": 3000.0,
     "hard_seconds": 4000.0,
     "deep_seconds": 5000.0,
     "queue_wait_seconds": 60.0,
-    "zombie_seconds": 30.0,
     "tick_seconds": 10.0
   },
-  "total_events": 4,
+  "total_events": 1,
   "events": [
     {
-      "channel_id": 1553574969898704927,
-      "detected_at": "2026-10-06T02:39:36Z",
+      "channel_id": 1559923808855654450,
+      "detected_at": "2026-10-14T23:01:16Z",
       "action": "stall_warn",
-      "silence_seconds": 3007.5,
-      "busy_seconds": 3007.5,
+      "silence_seconds": 3001.0,
+      "busy_seconds": 3001.0,
       "status": "busy",
-      "status_desc": "🕵️ qa1 코드 리뷰 중 (1/20R · HIGH-Path)",
+      "status_desc": "⚖️ Auditor 최종 감사 중 (1/20R)",
       "task_alive": true,
       "process_pid": null,
       "queue_depth": 0,
-      "detail": "무응답 3007초 경과 (기준 3000초) → 경보 발송. 5000초까지 회복되지 않으면 자동 회수."
-    },
-    {
-      "channel_id": 1556664737532608592,
-      "detected_at": "2026-10-06T10:22:04Z",
-      "action": "stall_warn",
-      "silence_seconds": 3002.2,
-      "busy_seconds": 3002.2,
-      "status": "busy",
-      "status_desc": "🕵️ qa1 코드 리뷰 중 (1/20R · HIGH-Path)",
-      "task_alive": true,
-      "process_pid": null,
-      "queue_depth": 0,
-      "detail": "무응답 3002초 경과 (기준 3000초) → 경보 발송. 5000초까지 회복되지 않으면 자동 회수."
-    },
-    {
-      "channel_id": 1556664737532608592,
-      "detected_at": "2026-10-06T10:38:44Z",
-      "action": "deep_work_notice",
-      "silence_seconds": 4002.3,
-      "busy_seconds": 4002.3,
-      "status": "busy",
-      "status_desc": "🕵️ qa1 코드 리뷰 중 (1/20R · HIGH-Path)",
-      "task_alive": true,
-      "process_pid": null,
-      "queue_depth": 0,
-      "detail": "진행이 4002초간 끊겼으나 태스크가 살아있음 → 즉시 회수 보류. 절대 상한 5000초까지 관찰."
-    },
-    {
-      "channel_id": 1556664737532608592,
-      "detected_at": "2026-10-06T22:39:48Z",
-      "action": "stall_warn",
-      "silence_seconds": 3009.9,
-      "busy_seconds": 3009.9,
-      "status": "busy",
-      "status_desc": "🕵️ qa1 코드 리뷰 중 (1/20R · HIGH-Path)",
-      "task_alive": true,
-      "process_pid": null,
-      "queue_depth": 0,
-      "detail": "무응답 3009초 경과 (기준 3000초) → 경보 발송. 5000초까지 회복되지 않으면 자동 회수."
+      "detail": "무응답 3000초 경과 (기준 3000초) → 경보 발송 (강제 회수 없음 — 작업 계속 실행)"
     }
   ]
 }

@@ -517,6 +517,68 @@ class ThrottledStatusUpdater:
             await self.update(content=status_text, prefix=pref)
         return _callback
 
+
+async def safe_edit_view(
+    interaction: discord.Interaction,
+    embed: Optional[discord.Embed] = None,
+    view: Optional[Any] = None,
+    content: Optional[str] = None
+) -> bool:
+    """
+    Safely edits a discord interaction message regardless of whether the interaction
+    was already deferred or not, with a reliable fallback chain to prevent interaction timeout crashes.
+    """
+    kwargs: Dict[str, Any] = {}
+    if embed is not None:
+        kwargs["embed"] = embed
+    if view is not None:
+        kwargs["view"] = view
+    if content is not None:
+        kwargs["content"] = content
+
+    is_done = False
+    if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
+        try:
+            is_done = bool(interaction.response.is_done())
+        except Exception:
+            is_done = False
+
+    if is_done:
+        try:
+            if hasattr(interaction, "edit_original_response"):
+                await interaction.edit_original_response(**kwargs)
+                return True
+        except Exception as e:
+            logger.debug(f"[safe_edit_view] edit_original_response failed: {e}")
+
+    if not is_done and hasattr(interaction, "response") and hasattr(interaction.response, "edit_message"):
+        try:
+            await interaction.response.edit_message(**kwargs)
+            return True
+        except Exception as e:
+            logger.debug(f"[safe_edit_view] response.edit_message failed: {e}")
+
+    try:
+        if hasattr(interaction, "message") and interaction.message:
+            await interaction.message.edit(**kwargs)
+            return True
+        elif hasattr(view, "message") and view.message:
+            await view.message.edit(**kwargs)
+            return True
+    except Exception as e:
+        logger.debug(f"[safe_edit_view] message.edit fallback failed: {e}")
+
+    try:
+        if hasattr(interaction, "followup"):
+            await interaction.followup.edit_message("@original", **kwargs)
+            return True
+    except Exception as e:
+        logger.debug(f"[safe_edit_view] followup.edit_message fallback failed: {e}")
+
+    return False
+
+_safe_edit_view = safe_edit_view
+
 DISCORD_MAX_FILE_BYTES = int(8.0 * 1024 * 1024)  # 8.0MB safe limit for Discord standard file uploads
 
 ALLOWED_ATTACHMENT_EXTENSIONS = (
@@ -537,6 +599,10 @@ ALLOWED_ATTACHMENT_EXTENSIONS = (
 EXCLUDED_DIR_NAMES = {
     ".git", ".venv", "node_modules", "__pycache__",
     ".cache", ".local", ".npm", ".config", ".references"
+}
+
+USER_REFERENCE_DIR_NAMES = {
+    ".references", "agy_user_references", "참고자료"
 }
 
 
@@ -680,7 +746,7 @@ def extract_local_attachments(
         if not (is_image_deliverable or is_screenshot_dir):
             if path_segments.intersection(EXCLUDED_DIR_NAMES):
                 continue
-        if path_segments.intersection({".references", "agy_user_references"}) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
+        if path_segments.intersection(USER_REFERENCE_DIR_NAMES) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
             continue
         if os.path.isfile(abs_p):
             if session_start_time is not None:
@@ -768,7 +834,7 @@ def extract_oversized_attachments(
         if not (is_image_deliverable or is_screenshot_dir):
             if path_segments.intersection(EXCLUDED_DIR_NAMES):
                 continue
-        if path_segments.intersection({".references", "agy_user_references"}) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
+        if path_segments.intersection(USER_REFERENCE_DIR_NAMES) or any(seg.startswith("agy_discord_att_") for seg in path_segments):
             continue
         if os.path.isfile(abs_p):
             try:

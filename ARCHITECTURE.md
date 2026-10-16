@@ -65,6 +65,7 @@
 8. **`autonomy_guard.py`**: Bounded Autonomy 10대 핵심 가드레일 및 4차원 의사결정 매트릭스 엔진
 9. **`model_manager.py`**: 전역 + **채널별(📺) 2계층** AI 모델/엔진/직업 설정 SSOT — `state/global_model_config.json`(전역) · `state/channel_model_config.json`(채널 오버레이드)
 10. **`auto_scheduler.py`**: ⏰ 채널별 자동 알람/스케줄 웨이크업 엔진 (`!auto`) — 예약시간 도래 시 해당 채널의 Coder 파이프라인에 지정 메시지를 자동 투입 (`state/channel_auto_config.json`)
+11. **`bot.py (Attachment Pipeline)`**: 📁 디스코드 첨부파일(코드, 오피스/데이터셋, PDF, 이미지, 바이너리)을 워크스페이스 내 `참고자료/` 디렉토리에 실물 영구 저장하고, `references/` 심볼릭 링크 및 `.references/user_inputs/`와 상호 연동하여 에이전트의 워크스페이스 제약(`STRICT WORKSPACE CONFINEMENT`) 내에서 즉시 실행/열람/호환성 테스트를 수행할 수 있도록 상대 경로 및 가이던스를 프롬프트에 주입하는 1급(first-class) 파이프라인
 
 ## 3. Bounded Autonomy & 10 Core Safety Guards (AGY 4.x)
 무인 자율 진화(`!auto on evolve`)가 제어 불가능한 무한 루프나 시스템 고갈로 치닫지 않도록 10대 하드 가드레일을 강제합니다:

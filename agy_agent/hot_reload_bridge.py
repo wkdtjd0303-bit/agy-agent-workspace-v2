@@ -25,6 +25,13 @@ def sync_in_memory_state():
         if not main or (not hasattr(main, "bot") and not hasattr(main, "session_manager") and not getattr(main, "__file__", "").endswith("bot.py")):
             return False
 
+        # 1.0 Invalidate import caches to reflect fresh code files immediately
+        try:
+            import importlib
+            importlib.invalidate_caches()
+        except Exception as _inv_err:
+            logger.debug(f"[HotReloadBridge] invalidate_caches notice: {_inv_err}")
+
         # 1. Update existing ChannelSession instances and SessionManager class
         try:
             import session_manager
@@ -57,15 +64,16 @@ def sync_in_memory_state():
         except Exception as _ev_err:
             logger.debug(f"[HotReloadBridge] Error bridging EvidenceValidator: {_ev_err}")
 
-        # 1.3 Ensure critical helper modules like discord_utils are reloaded prior to recompiling bot.py
-        if "discord_utils" in sys.modules:
-            try:
-                import importlib
-                importlib.reload(sys.modules["discord_utils"])
-            except Exception as _du_err:
-                logger.debug(f"[HotReloadBridge] Pre-reload discord_utils notice: {_du_err}")
+        # 1.3 Ensure critical helper modules are reloaded prior to recompiling bot.py
+        for _crit_mod in ("discord_utils", "model_manager", "auto_scheduler"):
+            if _crit_mod in sys.modules:
+                try:
+                    import importlib
+                    importlib.reload(sys.modules[_crit_mod])
+                except Exception as _mod_err:
+                    logger.debug(f"[HotReloadBridge] Pre-reload {_crit_mod} notice: {_mod_err}")
 
-        # 2. Extract and compile ALL top-level imports and functions from bot.py
+        # 2. Extract and compile ALL top-level imports, classes, and functions from bot.py
         bot_py_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.py")
         if os.path.exists(bot_py_path):
             try:
@@ -75,7 +83,7 @@ def sync_in_memory_state():
                 tree = ast.parse(source, filename="bot.py")
                 extracted = []
                 for node in tree.body:
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Import, ast.ImportFrom)):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             node.decorator_list = []  # strip decorators so we can rebind manually
                         extracted.append(node)
@@ -84,7 +92,28 @@ def sync_in_memory_state():
                     new_module = ast.Module(body=extracted, type_ignores=[])
                     ast.fix_missing_locations(new_module)
                     compiled = compile(new_module, "bot.py", "exec")
-                    exec(compiled, main.__dict__)
+                    targets = [main]
+                    bot_module = sys.modules.get("bot")
+                    if bot_module and bot_module is not main:
+                        targets.append(bot_module)
+                    for tgt in targets:
+                        exec(compiled, tgt.__dict__)
+
+                    # 2.1 Dynamically upgrade classes of active UI view instances
+                    try:
+                        mm_mod = sys.modules.get("model_manager")
+                        if mm_mod and hasattr(mm_mod, "ModelDashboardView") and hasattr(mm_mod.ModelDashboardView, "_active_dashboards"):
+                            for _dash in list(mm_mod.ModelDashboardView._active_dashboards):
+                                if _dash.__class__ is not mm_mod.ModelDashboardView:
+                                    _dash.__class__ = mm_mod.ModelDashboardView
+                        auto_dash_cls = main.__dict__.get("AutoDashboardView")
+                        if auto_dash_cls and hasattr(auto_dash_cls, "_active_dashboards"):
+                            for _adash in list(auto_dash_cls._active_dashboards):
+                                if _adash.__class__ is not auto_dash_cls:
+                                    _adash.__class__ = auto_dash_cls
+                    except Exception as _up_err:
+                        logger.debug(f"[HotReloadBridge] View instances upgrade notice: {_up_err}")
+
                     # Also record _raw_<name> for each extracted function to prevent command wrapper pollution
                     for node in extracted:
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -95,7 +124,6 @@ def sync_in_memory_state():
                     # Synchronize critical function aliases after recompilation
                     if "execute_all_in_one_hot_reset" in main.__dict__:
                         main.perform_master_reset = main.__dict__["execute_all_in_one_hot_reset"]
-                    bot_module = sys.modules.get("bot")
                     if bot_module and hasattr(bot_module, "execute_all_in_one_hot_reset"):
                         bot_module.perform_master_reset = getattr(bot_module, "execute_all_in_one_hot_reset")
 
@@ -252,6 +280,13 @@ def sync_in_memory_state():
             _rebind_target_command("reset_command", ["reset", "reload", "restart", "hotreload", "리셋", "재시작", "초기화", "핫리셋"])
             _rebind_target_command("auto_command", ["auto", "자율", "오토", "autopilot", "autocode"])
             _rebind_target_command("mkdir_command", ["mkdir", "폴더", "폴더생성", "폴더관리", "folder", "rmdir", "trash", "mk", "디렉토리생성", "디렉토리관리"])
+            _rebind_target_command("model_command", ["model", "모델", "modelselect"])
+            _rebind_target_command("engine_command", ["engine", "ai", "cli", "엔진", "인공지능", "모델엔진", "engines"])
+            _rebind_target_command("role_command", ["role", "역할", "botrole", "채널역할", "roles"])
+            _rebind_target_command("identity_command", ["identity", "whoami", "나", "본체", "id", "정체성", "agent", "who"])
+            _rebind_target_command("e2e_universal_command", ["e2e", "cross_test", "universal_test", "자율테스트", "e2e테스트", "통합테스트", "검증", "test"])
+            _rebind_target_command("rounds_command", ["rounds", "라운드", "maxrounds", "round_limit", "roundcap"])
+            _rebind_target_command("watchdog_command", ["watchdog", "safety", "guards", "감시견", "안전가드"])
 
             # Self-healing sanitize sweep: ensure all entries in all_commands have .invoke and valid callbacks
             for alias, cmd_obj in list(main.bot.all_commands.items()):

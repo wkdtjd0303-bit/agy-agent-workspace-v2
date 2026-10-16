@@ -1,2 +1,43 @@
 {
-  "channel_id": 
+  "channel_id": 424242,
+  "observations": 1,
+  "marker_present": 1,
+  "heuristic_used": 0,
+  "unresolved": 0,
+  "resolved": 1,
+  "marker_emission_rate": 1.0,
+  "force_accepts": 0,
+  "escalations": 0,
+  "blocking_counts": [
+    1
+  ],
+  "improvement_observed": 0,
+  "improvements": [],
+  "total_improvements": 0,
+  "improvement_severities": {
+    "P0": 0,
+    "P1": 0,
+    "P2": 0,
+    "P3": 0
+  },
+  "unlabeled_improvements": 0,
+  "blocking_improvements": 0,
+  "per_stage": {
+    "qa1": {
+      "observations": 1,
+      "marker": 1,
+      "heuristic": 0,
+      "none": 0,
+      "counts": [
+        1
+      ]
+    }
+  },
+  "contract_active": true,
+  "warnings": [
+    "QA가 [IMPROVEMENTS] 개선점 탐색 마커를 한 번도 내보내지 않음 — '판정기'로만 동작 중(개선점 탐색 계약 미준수)"
+  ],
+  "milestone": "",
+  "generated_at": "2026-10-15T23:34:54",
+  "schema": "convergence_telemetry/v1"
+}

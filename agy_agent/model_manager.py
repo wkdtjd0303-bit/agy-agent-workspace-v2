@@ -19,6 +19,7 @@ import sys
 import re
 import json
 import logging
+import asyncio
 import contextvars
 import contextlib
 from pathlib import Path
@@ -2084,29 +2085,56 @@ class GlobalModelManager:
 # Discord UI Components: Select Menus, Buttons & Modal
 # -----------------------------------------------------------------------------
 
-async def _safe_edit_view(interaction: discord.Interaction, embed: discord.Embed, view: discord.ui.View):
+async def _safe_edit_view(interaction: discord.Interaction, embed: discord.Embed, view: Optional[discord.ui.View] = None):
     """
     Safely edits a discord interaction message regardless of whether the interaction
-    was already deferred or not, with a reliable fallback to interaction.message.edit.
+    was already deferred or not, with a reliable fallback chain to interaction.message.edit.
     """
-    try:
-        is_done = False
-        if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
-            res = interaction.response.is_done()
-            is_done = (res is True)
-        if is_done and hasattr(interaction, "edit_original_response"):
-            await interaction.edit_original_response(embed=embed, view=view)
-        elif hasattr(interaction, "response") and hasattr(interaction.response, "edit_message"):
-            await interaction.response.edit_message(embed=embed, view=view)
-    except Exception as e:
-        logger.warning(f"Error editing interaction response: {e}")
+    kwargs = {"embed": embed}
+    if view is not None:
+        kwargs["view"] = view
+
+    is_done = False
+    if hasattr(interaction, "response") and hasattr(interaction.response, "is_done"):
         try:
-            if hasattr(interaction, "message") and interaction.message:
-                await interaction.message.edit(embed=embed, view=view)
-            elif hasattr(view, "message") and view.message:
-                await view.message.edit(embed=embed, view=view)
-        except Exception as e2:
-            logger.debug(f"Fallback message edit failed: {e2}")
+            res = interaction.response.is_done()
+            if asyncio.iscoroutine(res):
+                is_done = bool(await res)
+            else:
+                is_done = bool(res)
+        except Exception:
+            is_done = False
+
+    if is_done:
+        try:
+            if hasattr(interaction, "edit_original_response"):
+                await interaction.edit_original_response(**kwargs)
+                return
+        except Exception as e:
+            logger.debug(f"[safe_edit_view] edit_original_response failed: {e}")
+
+    if not is_done and hasattr(interaction, "response") and hasattr(interaction.response, "edit_message"):
+        try:
+            await interaction.response.edit_message(**kwargs)
+            return
+        except Exception as e:
+            logger.debug(f"[safe_edit_view] response.edit_message failed: {e}")
+
+    try:
+        if hasattr(interaction, "message") and interaction.message:
+            await interaction.message.edit(**kwargs)
+            return
+        elif view is not None and hasattr(view, "message") and view.message:
+            await view.message.edit(**kwargs)
+            return
+    except Exception as e2:
+        logger.debug(f"[safe_edit_view] Fallback message edit failed: {e2}")
+
+    try:
+        if hasattr(interaction, "followup"):
+            await interaction.followup.edit_message("@original", **kwargs)
+    except Exception as e3:
+        logger.debug(f"[safe_edit_view] followup edit failed: {e3}")
 
 
 class CustomModelModal(Modal):
@@ -2492,24 +2520,18 @@ class EngineSelectDropdown(Select):
 
         GlobalModelManager.set_role_engine(view.selected_role, new_engine, channel_id=view.channel_id)
 
-        # [🔄 자동화] 방금 고른 엔진의 실시간 카탈로그를 지금 불러온다.
+        # [⚡ 지연 없는 완전 논블로킹 전환]
+        # 사용자가 라우터를 변경할 때 실시간 카탈로그를 동기 블로킹(get_models_blocking, 최대 30초)으로
+        # 가져오면 Discord Interaction 3초 타임아웃을 초과하여 "애플리케이션이 적시에 응답하지 않았어요"
+        # 오류가 발생합니다.
+        # 따라서 UI 스레드는 캐시/시드 프리셋을 메모리에서 즉시 렌더링(10ms 이내)하고,
+        # 최신 카탈로그 갱신은 백그라운드 스레드(warmup)로 위임하여 인터랙션을 초고속 완결합니다.
         try:
-            import asyncio
             from live_model_catalog import LiveModelCatalog
-            await asyncio.wait_for(
-                asyncio.to_thread(LiveModelCatalog.get_models_blocking, new_engine, True),
-                timeout=30.0,
-            )
+            LiveModelCatalog.warmup([new_engine])
         except Exception as e:
-            name = type(e).__name__
-            if name == "TimeoutError":
-                try:
-                    from live_model_catalog import LiveModelCatalog
-                    LiveModelCatalog.warmup([new_engine])
-                except Exception:
-                    pass
-            else:
-                logger.debug(f"[AutoCatalog] live fetch on engine switch failed: {e}")
+            logger.debug(f"[AutoCatalog] live warmup on engine switch failed: {e}")
+
 
         # Set default model of new engine if current model doesn't belong to it
         presets = get_engine_models(new_engine)
@@ -2872,10 +2894,17 @@ class ModelDashboardView(View):
         """[🔄 자동화] 전체 실시간 카탈로그에서 모델 검색 모달을 연다."""
         try:
             await interaction.response.send_modal(
-                ModelSearchModal(self.selected_role, self), ephemeral=True
+                ModelSearchModal(self.selected_role, self)
             )
         except Exception as e:
             logger.debug(f"_search_callback failed: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"⚠️ 모델 검색창을 열 수 없습니다: {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"⚠️ 모델 검색창을 열 수 없습니다: {e}", ephemeral=True)
+            except Exception:
+                pass
 
     async def _refresh_callback(self, interaction: discord.Interaction):
         try:
@@ -2964,10 +2993,20 @@ class ModelDashboardView(View):
         await _safe_edit_view(interaction, embed, self)
 
     async def _modal_callback(self, interaction: discord.Interaction):
-        role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
-        curr_model = role_cfg.get("model", "")
-        modal = CustomModelModal(self.selected_role, curr_model, self)
-        await interaction.response.send_modal(modal)
+        try:
+            role_cfg = GlobalModelManager.get_role_config(self.selected_role, channel_id=self.channel_id)
+            curr_model = role_cfg.get("model", "")
+            modal = CustomModelModal(self.selected_role, curr_model, self)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            logger.debug(f"_modal_callback failed: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"⚠️ 모델 직접 입력창을 열 수 없습니다: {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"⚠️ 모델 직접 입력창을 열 수 없습니다: {e}", ephemeral=True)
+            except Exception:
+                pass
 
     async def _all_qa_callback(self, interaction: discord.Interaction):
         try:
@@ -3042,17 +3081,39 @@ class ModelDashboardView(View):
                 pass
 
 
-async def _sync_active_dashboards_on_change():
-    for v in list(ModelDashboardView._active_dashboards):
+_dashboard_sync_task: Optional[asyncio.Task] = None
+
+async def _debounced_sync_dashboards():
+    # 짧은 디바운스로 여러 연속 호출 병합 및 현재 상호작용의 _safe_edit_view 우선 완료 보장
+    await asyncio.sleep(0.4)
+    # 최근 3개 활성 대시보드만 유지하여 불필요한 Discord API 부하 차단
+    dashboards = list(ModelDashboardView._active_dashboards)[-3:]
+    for v in dashboards:
         try:
-            if getattr(v, "message", None):
+            msg = getattr(v, "message", None)
+            if msg:
                 v.update_components()
                 embed = GlobalModelManager.build_dashboard_embed(
                     v.selected_role, channel_id=getattr(v, "channel_id", None)
                 )
-                await v.message.edit(embed=embed, view=v)
+                await msg.edit(embed=embed, view=v)
+                await asyncio.sleep(0.2)  # Rate Limit 보호 간격
         except Exception as e:
             logger.debug(f"Failed to auto-update active dashboard message: {e}")
+
+async def _sync_active_dashboards_on_change():
+    global _dashboard_sync_task
+    try:
+        if _dashboard_sync_task and not _dashboard_sync_task.done():
+            _dashboard_sync_task.cancel()
+    except Exception:
+        pass
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        _dashboard_sync_task = loop.create_task(_debounced_sync_dashboards())
+    except Exception:
+        pass
 
 GlobalModelManager.register_change_callback(_sync_active_dashboards_on_change)
 

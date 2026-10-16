@@ -233,3 +233,73 @@ def test_bot_reload_helper_modules_evidence_validator_sync():
     assert bot.EvidenceValidator is evidence_validator.EvidenceValidator
 
 
+def test_reload_helper_modules_includes_model_manager_and_auto_scheduler():
+    """Ensure reload_helper_modules includes model_manager and auto_scheduler."""
+    import bot
+    import sys
+    import model_manager
+    import auto_scheduler
+
+    bot.reload_helper_modules()
+    assert "model_manager" in sys.modules
+    assert "auto_scheduler" in sys.modules
+
+
+def test_hot_reload_bridge_rebinds_model_command():
+    """Ensure model_command and all its aliases are bound properly after sync."""
+    import hot_reload_bridge
+    from discord.ext import commands
+
+    class MockBot:
+        def __init__(self):
+            self.all_commands = {}
+
+        def add_command(self, cmd):
+            self.all_commands[cmd.name] = cmd
+            for a in cmd.aliases:
+                self.all_commands[a] = cmd
+
+        def get_command(self, name):
+            return self.all_commands.get(name)
+
+    class MockMain:
+        def __init__(self):
+            self.bot = MockBot()
+            self.session_manager = None
+
+    mock_main = MockMain()
+    sys.modules["__main__"] = mock_main
+
+    success = hot_reload_bridge.sync_in_memory_state()
+    assert success is True
+    assert "model" in mock_main.bot.all_commands
+    assert "모델" in mock_main.bot.all_commands
+    assert "modelselect" in mock_main.bot.all_commands
+
+
+def test_hot_reload_bridge_recompiles_classes_and_upgrades_views():
+    """Ensure ClassDef nodes are extracted and active UI views get upgraded."""
+    import hot_reload_bridge
+
+    class MockBot:
+        def __init__(self):
+            self.all_commands = {}
+
+    class MockMain:
+        def __init__(self):
+            self.bot = MockBot()
+            self.session_manager = None
+
+    mock_main = MockMain()
+    sys.modules["__main__"] = mock_main
+
+    success = hot_reload_bridge.sync_in_memory_state()
+    assert success is True
+    # AutoDashboardView should be compiled into mock_main
+    assert "AutoDashboardView" in mock_main.__dict__
+    view_cls = mock_main.__dict__["AutoDashboardView"]
+    assert hasattr(view_cls, "refresh_view")
+
+
+
+

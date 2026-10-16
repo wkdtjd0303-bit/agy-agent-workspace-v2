@@ -65,7 +65,9 @@ from discord_utils import (
     create_workspace_zip,
     export_channel_history,
     ThrottledStatusUpdater,
-    sanitize_attachment_filename
+    sanitize_attachment_filename,
+    safe_edit_view,
+    _safe_edit_view
 )
 
 
@@ -366,6 +368,12 @@ def _reload_helper_modules_impl():
     global CODER_MODEL, QA_MODEL, AUDITOR_MODEL, COMMANDER_MODEL
     global EvidenceValidator
 
+    # [⚡ Hot-Reload Cache Invalidation] 파이썬 바이트코드/파인더 캐시 무효화로 최신 파일 즉시 인식 보장
+    try:
+        importlib.invalidate_caches()
+    except Exception as _inv_err:
+        logger.debug(f"invalidate_caches notice: {_inv_err}")
+
     # Ensure extended_qa_bots registry exists in globals
     if not isinstance(globals().get("extended_qa_bots"), dict):
         qa2_client = globals().get("qa2_bot")
@@ -381,7 +389,7 @@ def _reload_helper_modules_impl():
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     priority_modules = [
-        "config", "model_registry", "session_manager", "mode_classifier", "hot_reload_bridge",
+        "config", "model_registry", "model_manager", "auto_scheduler", "session_manager", "mode_classifier", "hot_reload_bridge",
         "commander", "discord_utils", "gdrive_uploader", "android_build_manager",
         "audio_transcriber", "android_vision_inspector", "agent_guidelines", "agent_runner",
         "trio_agent_runner", "research_runner", "consulting_runner",
@@ -393,7 +401,7 @@ def _reload_helper_modules_impl():
     ]
     all_local_py = [
         os.path.splitext(f)[0] for f in os.listdir(current_dir)
-        if f.endswith(".py") and f not in ("bot.py", "model_manager.py")
+        if f.endswith(".py") and f != "bot.py"
     ]
     modules = []
     for m in priority_modules + sorted(all_local_py):
@@ -442,7 +450,35 @@ def _reload_helper_modules_impl():
         TrioAgentRunner = sys.modules["trio_agent_runner"].TrioAgentRunner
         QuotaManager = sys.modules["trio_agent_runner"].QuotaManager
     if "model_manager" in sys.modules:
-        sys.modules["model_manager"].GlobalModelManager.sync_to_runtime_config()
+        try:
+            mm = sys.modules["model_manager"]
+            if hasattr(mm, "GlobalModelManager"):
+                mm.GlobalModelManager.sync_to_runtime_config()
+                _sync_fn = globals().get("sync_all_bot_presences")
+                if callable(_sync_fn):
+                    mm.GlobalModelManager.register_change_callback(_sync_fn)
+            if hasattr(mm, "ModelDashboardView") and hasattr(mm.ModelDashboardView, "_active_dashboards"):
+                for _dash in list(mm.ModelDashboardView._active_dashboards):
+                    if _dash.__class__ is not mm.ModelDashboardView:
+                        _dash.__class__ = mm.ModelDashboardView
+        except Exception as _mm_err:
+            logger.debug(f"model_manager post-reload notice: {_mm_err}")
+    if "auto_scheduler" in sys.modules:
+        try:
+            _as = sys.modules["auto_scheduler"]
+            if hasattr(_as, "ChannelAutoScheduler"):
+                _fire_fn = globals().get("_fire_auto_channel_wakeup")
+                if callable(_fire_fn):
+                    _as.ChannelAutoScheduler.set_fire_handler(_fire_fn)
+        except Exception as _as_err:
+            logger.debug(f"auto_scheduler post-reload notice: {_as_err}")
+    if "AutoDashboardView" in globals() and hasattr(AutoDashboardView, "_active_dashboards"):
+        try:
+            for _adash in list(AutoDashboardView._active_dashboards):
+                if _adash.__class__ is not AutoDashboardView:
+                    _adash.__class__ = AutoDashboardView
+        except Exception as _ad_err:
+            logger.debug(f"AutoDashboardView class upgrade notice: {_ad_err}")
     if "research_runner" in sys.modules:
         ResearchRunner = sys.modules["research_runner"].ResearchRunner
     if "consulting_runner" in sys.modules:
@@ -640,6 +676,13 @@ def _reload_helper_modules_impl():
     _safe_rebind_command("queue_command", ["queue", "q", "대기열"])
     _safe_rebind_command("clear_queue_command", ["clear-queue", "cq", "대기열삭제", "대기열초기화", "대기열비우기"])
     _safe_rebind_command("temp_command", ["temp", "thermal", "온도", "발열"])
+    _safe_rebind_command("model_command", ["model", "모델", "modelselect"])
+    _safe_rebind_command("engine_command", ["engine", "ai", "cli", "엔진", "인공지능", "모델엔진", "engines"])
+    _safe_rebind_command("role_command", ["role", "역할", "botrole", "채널역할", "roles"])
+    _safe_rebind_command("identity_command", ["identity", "whoami", "나", "본체", "id", "정체성", "agent", "who"])
+    _safe_rebind_command("e2e_universal_command", ["e2e", "cross_test", "universal_test", "자율테스트", "e2e테스트", "통합테스트", "검증", "test"])
+    _safe_rebind_command("rounds_command", ["rounds", "라운드", "maxrounds", "round_limit", "roundcap"])
+    _safe_rebind_command("watchdog_command", ["watchdog", "safety", "guards", "감시견", "안전가드"])
 
     # Global integrity guarantee: sanitize all entries in bot.all_commands
     for _k, _v in list(bot.all_commands.items()):
@@ -1566,8 +1609,13 @@ class AutoMessageModal(Modal):
     async def on_submit(self, interaction: discord.Interaction):
         from auto_scheduler import ChannelAutoScheduler
         ChannelAutoScheduler.set_message(self.channel_id, self.message_input.value)
-        embed = self.parent_view.build_embed()
-        await _safe_edit_view(interaction, embed, self.parent_view)
+        if self.parent_view:
+            self.parent_view._render()
+            embed = self.parent_view.build_embed()
+            await _safe_edit_view(interaction, embed, self.parent_view)
+        else:
+            embed = _auto_status_embed(self.channel_id)
+            await _safe_edit_view(interaction, embed, None)
         try:
             await interaction.followup.send("✅ **발동 메시지가 저장되었습니다!**", ephemeral=True)
         except Exception:
@@ -1595,12 +1643,20 @@ class AutoScheduleModal(Modal):
             _, desc = ChannelAutoScheduler.set_schedule(self.channel_id, self.schedule_input.value)
         except ScheduleParseError as e:
             try:
-                await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
             except Exception:
                 pass
             return
-        embed = self.parent_view.build_embed()
-        await _safe_edit_view(interaction, embed, self.parent_view)
+        if self.parent_view:
+            self.parent_view._render()
+            embed = self.parent_view.build_embed()
+            await _safe_edit_view(interaction, embed, self.parent_view)
+        else:
+            embed = _auto_status_embed(self.channel_id)
+            await _safe_edit_view(interaction, embed, None)
         try:
             await interaction.followup.send(f"🕒 **스케줄이 `{desc}`(으)로 설정되었습니다!**", ephemeral=True)
         except Exception:
@@ -1609,12 +1665,17 @@ class AutoScheduleModal(Modal):
 
 class AutoDashboardView(View):
     """`!auto` 인터랙티브 제어판 (채널별)."""
+    _active_dashboards: List['AutoDashboardView'] = []
+
     def __init__(self, channel_id: int, user_id: Optional[int] = None):
         super().__init__(timeout=600)
         self.channel_id = channel_id
         self.user_id = user_id
         self.message: Optional[discord.Message] = None
         self._render()
+        AutoDashboardView._active_dashboards.append(self)
+        if len(AutoDashboardView._active_dashboards) > 10:
+            AutoDashboardView._active_dashboards = AutoDashboardView._active_dashboards[-10:]
 
     def _render(self):
         from auto_scheduler import ChannelAutoScheduler
@@ -1649,7 +1710,7 @@ class AutoDashboardView(View):
     def build_embed(self) -> discord.Embed:
         return _auto_status_embed(self.channel_id)
 
-    async def _refresh(self, interaction: discord.Interaction):
+    async def refresh_view(self, interaction: discord.Interaction):
         self._render()
         await _safe_edit_view(interaction, self.build_embed(), self)
 
@@ -1662,7 +1723,7 @@ class AutoDashboardView(View):
             pass
         new_state = not ChannelAutoScheduler.is_enabled(self.channel_id)
         ChannelAutoScheduler.set_enabled(self.channel_id, new_state)
-        await self._refresh(interaction)
+        await self.refresh_view(interaction)
         try:
             await interaction.followup.send(
                 "🟢 **자동 알람을 활성화했습니다!**" if new_state else "🔴 **자동 알람을 비활성화했습니다.**",
@@ -1710,7 +1771,7 @@ class AutoDashboardView(View):
         except Exception:
             pass
         ChannelAutoScheduler.reset_channel(self.channel_id)
-        await self._refresh(interaction)
+        await self.refresh_view(interaction)
         try:
             await interaction.followup.send("♻️ **이 채널의 자동 알람 설정을 초기화했습니다.**", ephemeral=True)
         except Exception:
@@ -5171,18 +5232,21 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
     await ThermalGuard.check_task_start_cooldown(message.channel)
 
     # Check if this is a natural language E2E dispatch request targeting #qa-tester
-    raw_user_prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
+    raw_user_prompt = (message.content or "")
+    if bot.user:
+        raw_user_prompt = raw_user_prompt.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "")
     if qa_bot.user:
-        raw_user_prompt = raw_user_prompt.replace(f"<@{qa_bot.user.id}>", "").strip()
+        raw_user_prompt = raw_user_prompt.replace(f"<@{qa_bot.user.id}>", "").replace(f"<@!{qa_bot.user.id}>", "")
     for ext_bot in globals().get("extended_qa_bots", {}).values():
         if ext_bot and ext_bot.user:
-            raw_user_prompt = raw_user_prompt.replace(f"<@{ext_bot.user.id}>", "").replace(f"<@!{ext_bot.user.id}>", "").strip()
+            raw_user_prompt = raw_user_prompt.replace(f"<@{ext_bot.user.id}>", "").replace(f"<@!{ext_bot.user.id}>", "")
     if auditor_bot.user:
-        raw_user_prompt = raw_user_prompt.replace(f"<@{auditor_bot.user.id}>", "").strip()
+        raw_user_prompt = raw_user_prompt.replace(f"<@{auditor_bot.user.id}>", "").replace(f"<@!{auditor_bot.user.id}>", "")
     if "image_bot" in globals() and image_bot.user:
-        raw_user_prompt = raw_user_prompt.replace(f"<@{image_bot.user.id}>", "").replace(f"<@!{image_bot.user.id}>", "").strip()
+        raw_user_prompt = raw_user_prompt.replace(f"<@{image_bot.user.id}>", "").replace(f"<@!{image_bot.user.id}>", "")
     if qa2_bot.user:
-        raw_user_prompt = raw_user_prompt.replace(f"<@{qa2_bot.user.id}>", "").replace(f"<@!{qa2_bot.user.id}>", "").strip()
+        raw_user_prompt = raw_user_prompt.replace(f"<@{qa2_bot.user.id}>", "").replace(f"<@!{qa2_bot.user.id}>", "")
+    raw_user_prompt = raw_user_prompt.strip()
 
     raw_lower = raw_user_prompt.lower()
     is_explicit_code_task = any(kw in raw_user_prompt for kw in [
@@ -6571,17 +6635,27 @@ async def on_message(message: discord.Message):
     # Handle attachments (text files read into prompt; voice/audio transcribed; media formatted safely)
     attachment_notes = []
     if message.attachments:
-        ws = session.workspace if session else None
-        if ws:
-            os.makedirs(ws, exist_ok=True)
-            ref_dir = os.path.join(ws, ".references", "user_inputs")
-        else:
-            base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".session_data")
-            ref_dir = os.path.join(base_dir, "user_references", str(message.channel.id))
+        ws = session.workspace if (session and session.workspace) else None
+        if not ws:
+            ws = getattr(config, "DEFAULT_WORKSPACE", None) or os.getcwd()
+
+        # [📁 First-Class 사용자 첨부파일/참고자료 디렉토리 자동 구성]
+        # 사용자가 번거롭게 워크스페이스에 직접 들어가 '참고자료' 폴더를 수동 생성할 필요 없이,
+        # 디스코드로 전송된 모든 파일(코드, 데이터셋, 엑셀, 문서, 바이너리, 이미지 등)을
+        # 워크스페이스 내 '참고자료' 폴더에 자동 영구 보존하고 상호 연동합니다.
+        user_refs_dir = os.path.join(ws, "참고자료")
+        dot_ref_dir = os.path.join(ws, ".references", "user_inputs")
+        en_refs_dir = os.path.join(ws, "references")
         try:
-            os.makedirs(ref_dir, mode=0o700, exist_ok=True)
-        except Exception:
-            pass
+            os.makedirs(user_refs_dir, exist_ok=True)
+            os.makedirs(dot_ref_dir, mode=0o700, exist_ok=True)
+            if not os.path.exists(en_refs_dir):
+                try:
+                    os.symlink("참고자료", en_refs_dir)
+                except Exception:
+                    pass
+        except Exception as _dir_err:
+            logger.warning(f"Failed to initialize user attachment dirs in workspace {ws}: {_dir_err}")
 
         temp_dir = tempfile.mkdtemp(prefix="agy_discord_att_")
         for att in message.attachments:
@@ -6590,33 +6664,59 @@ async def on_message(message: discord.Message):
             stem_d, ext_d = os.path.splitext(orig_filename)
             display_name = orig_filename if len(orig_filename) <= 60 else (stem_d[:40] + "..." + ext_d)
 
-            file_path = os.path.join(temp_dir, safe_filename)
+            temp_file_path = os.path.join(temp_dir, safe_filename)
             try:
-                await att.save(file_path)
+                await att.save(temp_file_path)
             except Exception as save_err:
-                logger.error(f"Failed to save attachment '{orig_filename}' as '{file_path}': {save_err}")
+                logger.error(f"Failed to save attachment '{orig_filename}' as '{temp_file_path}': {save_err}")
                 try:
                     await message.reply(f"⚠️ 첨부 파일(`{display_name}`)을 저장하는 중 오류가 발생하여 건너뜁니다: `{save_err}`")
                 except Exception:
                     pass
                 continue
 
+            # [💾 워크스페이스 내 '참고자료' 실물 파일 영구 보존]
+            dest_file_path = os.path.join(user_refs_dir, safe_filename)
+            try:
+                shutil.copy2(temp_file_path, dest_file_path)
+            except Exception as copy_err:
+                logger.warning(f"Failed to copy attachment to {dest_file_path}: {copy_err}")
+                dest_file_path = temp_file_path
+
+            # 에이전트가 바로 사용할 워크스페이스 기준 상대 경로 (forward slash 통일)
+            if ws and dest_file_path.startswith(ws):
+                rel_file_path = os.path.relpath(dest_file_path, ws).replace("\\", "/")
+            else:
+                rel_file_path = dest_file_path
+
+            file_sz = os.path.getsize(dest_file_path) if os.path.isfile(dest_file_path) else 0
+            if file_sz >= 1024 * 1024:
+                file_sz_str = f"{file_sz / (1024 * 1024):.2f} MB"
+            else:
+                file_sz_str = f"{file_sz / 1024:.1f} KB"
+
             from audio_transcriber import AudioTranscriber
 
             # 1. Audio / Voice message files
             if AudioTranscriber.is_audio_file(safe_filename):
-                transcription = await AudioTranscriber.transcribe_audio(file_path)
+                transcription = await AudioTranscriber.transcribe_audio(dest_file_path)
                 if transcription:
                     attachment_notes.append(
-                        f"[🎙️ 음성 메시지 음성인식(STT) 내용: {display_name}]\n\"{transcription}\""
+                        f"[🎙️ 음성 메시지 음성인식(STT) 내용: {display_name}]\n\"{transcription}\"\n"
+                        f"- 워크스페이스 저장 위치: `{rel_file_path}` (절대경로: `{dest_file_path}`)"
                     )
                     try:
-                        await message.reply(f"🎙️ **[음성 메시지 인식 완료]**\n> \"{transcription}\"")
+                        await message.reply(
+                            f"🎙️ **[음성 메시지 인식 완료]**\n> \"{transcription}\"\n"
+                            f"> 💾 음성 원본 저장: `{rel_file_path}`"
+                        )
                     except Exception:
                         pass
                 else:
                     if raw_user_prompt:
-                        attachment_notes.append(f"[첨부 오디오 파일: {display_name}] (저장 위치: {file_path})")
+                        attachment_notes.append(
+                            f"[첨부 오디오 파일: {display_name}] (저장 위치: `{rel_file_path}`, 절대경로: `{dest_file_path}`)"
+                        )
                     else:
                         await message.reply(
                             f"🎙️ **[음성 메시지 수신]**\n"
@@ -6625,51 +6725,83 @@ async def on_message(message: discord.Message):
                         )
                         return
 
-            # 2. Text-based files (code, config, logs, etc.)
+            # 2. Text-based files (code, scripts, config, data, logs, etc.)
             elif safe_filename.lower().endswith((
                 ".txt", ".md", ".py", ".js", ".ts", ".json", ".html", ".css", ".jsx", ".tsx",
-                ".sh", ".yaml", ".yml", ".xml", ".csv", ".log", ".env", ".sql"
+                ".sh", ".yaml", ".yml", ".xml", ".csv", ".log", ".env", ".sql", ".ini", ".conf", ".toml"
             )):
                 try:
-                    file_size = os.path.getsize(file_path)
+                    file_size = os.path.getsize(dest_file_path)
                     max_read_bytes = 20000  # 20KB limit to protect memory and token budget
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    with open(dest_file_path, "r", encoding="utf-8", errors="replace") as f:
                         file_text_content = f.read(max_read_bytes)
                     truncation_notice = "\n... [파일 용량이 커서 앞부분 20KB만 프롬프트에 포함되었습니다]" if file_size > max_read_bytes else ""
                     attachment_notes.append(
-                        f"\n[📄 첨부 파일 내용: {display_name} ({file_size / 1024:.1f} KB)]\n```\n{file_text_content}{truncation_notice}\n```"
+                        f"\n[📄 첨부 파일: {display_name} ({file_sz_str})]\n"
+                        f"- 워크스페이스 저장 위치: `{rel_file_path}` (절대경로: `{dest_file_path}`)\n"
+                        f"- 지침: 사용자가 디스코드로 전달한 실제 파일이 워크스페이스 내 `{rel_file_path}`에 실물 파일로 온전히 저장되었습니다. "
+                        f"STRICT WORKSPACE CONFINEMENT 규범에 부합하므로, 워크스페이스 내에서 직접 파일을 열람, 코드 검토, 스크립트 실행(예: python {rel_file_path}), 단위/호환성 테스트, 빌드 검증을 직접 완결하십시오.\n"
+                        f"```\n{file_text_content}{truncation_notice}\n```"
                     )
-                except Exception:
-                    attachment_notes.append(f"[첨부 파일: {display_name}] (경로: {file_path})")
+                    try:
+                        await message.reply(
+                            f"📁 **[첨부 코드/문서 워크스페이스 저장 완료: `{display_name}`]**\n"
+                            f"> 저장 위치: `{rel_file_path}` ({file_sz_str})\n"
+                            f"> 에이전트가 워크스페이스 내 실물 파일에 직접 접근하여 호환성 검증 및 실행 테스트를 즉시 수행합니다! 🚀"
+                        )
+                    except Exception:
+                        pass
+                except Exception as _read_err:
+                    attachment_notes.append(
+                        f"[📄 첨부 파일: {display_name}] (저장 위치: `{rel_file_path}`, 절대경로: `{dest_file_path}`)\n"
+                        f"- 지침: 워크스페이스 내 파일에 직접 접근하여 확인/실행하십시오."
+                    )
 
             # 3. PDF Document files
             elif safe_filename.lower().endswith(".pdf"):
                 from vision_attachment_analyzer import VisionAttachmentAnalyzer
-                doc_res = VisionAttachmentAnalyzer.analyze_document_file(file_path)
+                doc_res = VisionAttachmentAnalyzer.analyze_document_file(dest_file_path)
                 if doc_res.get("success") and doc_res.get("content"):
                     p_cnt = doc_res.get("page_count", 1)
                     p_ext = doc_res.get("pages_extracted", 1)
                     attachment_notes.append(
-                        f"\n[📑 첨부 PDF 문서 내용: {display_name} (총 {p_cnt}페이지 중 {p_ext}페이지 추출)]\n"
+                        f"\n[📑 첨부 PDF 문서 내용: {display_name} (총 {p_cnt}페이지 중 {p_ext}페이지 추출, {file_sz_str})]\n"
+                        f"- 워크스페이스 저장 위치: `{rel_file_path}` (절대경로: `{dest_file_path}`)\n"
+                        f"- 지침: 원본 PDF 파일이 워크스페이스 내 `{rel_file_path}`에 실물로 보존되어 있으므로 필요 시 직접 도구/라이브러리(pypdf, pdfplumber 등)로 열람 및 호환성 검증을 수행하십시오.\n"
                         f"{doc_res['content']}"
                     )
                     try:
                         await message.reply(
-                            f"📑 **[PDF 문서 내용 분석 완료: `{display_name}`]**\n"
-                            f"> 총 `{p_cnt}`페이지 중 `{p_ext}`페이지의 텍스트 내용을 성공적으로 추출하여 에이전트 프롬프트에 전달했습니다! 🚀"
+                            f"📑 **[PDF 문서 내용 분석 및 저장 완료: `{display_name}`]**\n"
+                            f"> 저장 위치: `{rel_file_path}` ({file_sz_str})\n"
+                            f"> 총 `{p_cnt}`페이지 중 `{p_ext}`페이지의 텍스트를 추출하여 에이전트에 전달했습니다! 🚀"
                         )
                     except Exception:
                         pass
                 else:
-                    attachment_notes.append(f"[📑 첨부 PDF 파일: {display_name}] (경로: {file_path})")
+                    attachment_notes.append(
+                        f"[📑 첨부 PDF 파일: {display_name} ({file_sz_str})]\n"
+                        f"- 워크스페이스 저장 위치: `{rel_file_path}` (절대경로: `{dest_file_path}`)\n"
+                        f"- 지침: PDF 파일이 워크스페이스 내 `{rel_file_path}`에 보존되었습니다. 도구로 직접 열람 및 호환성을 검증하십시오."
+                    )
+                    try:
+                        await message.reply(
+                            f"📑 **[PDF 문서 워크스페이스 저장 완료: `{display_name}`]**\n"
+                            f"> 저장 위치: `{rel_file_path}` ({file_sz_str})\n"
+                            f"> 에이전트가 해당 경로에서 직접 파일을 열람하고 호환성 검증을 수행합니다! 🚀"
+                        )
+                    except Exception:
+                        pass
 
             # 4. Image files (Multimodal Vision Intelligence & Reference Assets)
             elif safe_filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")):
-                ref_file_path = os.path.join(ref_dir, safe_filename)
+                ref_file_path = dest_file_path
+                # 기존 .references/user_inputs 호환용 복사
+                dot_file_path = os.path.join(dot_ref_dir, safe_filename)
                 try:
-                    shutil.copy2(file_path, ref_file_path)
+                    shutil.copy2(dest_file_path, dot_file_path)
                 except Exception:
-                    ref_file_path = file_path
+                    pass
 
                 sha256_hash = ""
                 try:
@@ -6688,8 +6820,6 @@ async def on_message(message: discord.Message):
                     logger.warning(f"Failed to compute image dhash: {_ev_err}")
                     dhash = None
 
-                file_sz = os.path.getsize(ref_file_path) if os.path.isfile(ref_file_path) else 0
-
                 if session:
                     session.register_user_reference_image(
                         filename=safe_filename,
@@ -6704,7 +6834,8 @@ async def on_message(message: discord.Message):
                 try:
                     vision_status_msg = await message.reply(
                         f"🖼️ **[첨부 이미지 시각 분석 진행 중...]**\n"
-                        f"> 파일명: `{display_name}` · 화면 구성, OCR 텍스트, UI/UX 레이아웃을 정밀 분석하고 있습니다. ⏳"
+                        f"> 파일명: `{display_name}` · 저장 위치: `{rel_file_path}`\n"
+                        f"> 화면 구성, OCR 텍스트, UI/UX 레이아웃을 정밀 분석하고 있습니다. ⏳"
                     )
                 except Exception:
                     pass
@@ -6749,12 +6880,14 @@ async def on_message(message: discord.Message):
                             if vision_verified:
                                 status_content = (
                                     f"🖼️ **[첨부 이미지 시각 분석 완료: `{display_name}`]**\n"
+                                    f"> 📁 저장 위치: `{rel_file_path}`\n"
                                     f"> 🔍 **비전 분석 완료** (`{vision_res.get('engine') or 'vision'}` · {vision_res.get('width')}x{vision_res.get('height')} px)\n"
                                     f"> 화면 내 텍스트(OCR 전수 추출) 및 레이아웃/스타일 토큰이 에이전트(Coder/QA) 작업에 즉시 주입되었습니다! 🚀"
                                 )
                             else:
                                 status_content = (
                                     f"🖼️ **[첨부 이미지 처리 완료: `{display_name}`]**\n"
+                                    f"> 📁 저장 위치: `{rel_file_path}`\n"
                                     f"> ⚠️ **비전 모델 미호출 — 메타데이터만 확보** ({vision_res.get('width')}x{vision_res.get('height')} px)\n"
                                     f"> 사유: {vision_res.get('degraded_reason') or '비전 API 미설정/호출 실패'}. "
                                     f"원본 파일 경로가 에이전트에 전달되어 직접 확인 모드로 진행합니다."
@@ -6766,7 +6899,7 @@ async def on_message(message: discord.Message):
                     if vision_status_msg:
                         try:
                             await vision_status_msg.edit(
-                                content=f"🖼️ **[첨부 이미지 수신 완료: `{display_name}`]** (로컬 보존: 에이전트 직접 검증 모드)"
+                                content=f"🖼️ **[첨부 이미지 수신 완료: `{display_name}`]** (저장 위치: `{rel_file_path}` · 에이전트 직접 검증 모드)"
                             )
                         except Exception:
                             pass
@@ -6798,14 +6931,14 @@ async def on_message(message: discord.Message):
 
                 if not raw_user_prompt:
                     attachment_notes.append(
-                        f"[🖼️ 사용자 제공 참고(레퍼런스) 이미지: {display_name}] (보존 위치: {ref_file_path})"
+                        f"[🖼️ 사용자 제공 참고(레퍼런스) 이미지: {display_name}] (저장 위치: {rel_file_path}, 절대경로: {ref_file_path})"
                         f"{vision_block}\n"
                         f"{anti_tracing_rule}\n"
                         f"사용자 요청: 첨부된 이미지의 화면 구성, 텍스트, UI/UX 디자인 또는 에러/진단 내용을 정밀 분석하고, 사용자의 의도에 맞게 문제 해결/코드 개선/구현/답변을 최우선으로 제공해줘."
                     )
                 elif is_evaluation_or_question:
                     attachment_notes.append(
-                        f"[🖼️ 사용자 제공 참고(레퍼런스) 이미지: {display_name}] (보존 위치: {ref_file_path})"
+                        f"[🖼️ 사용자 제공 참고(레퍼런스) 이미지: {display_name}] (저장 위치: {rel_file_path}, 절대경로: {ref_file_path})"
                         f"{vision_block}\n"
                         f"{anti_tracing_rule}\n"
                         f"🎯 **[사용자 질문 답변 최우선 지침]**: 사용자가 첨부 이미지에 대한 평가, 점수, 감점 요인, 해결책, 또는 자문을 요청했습니다. "
@@ -6813,21 +6946,30 @@ async def on_message(message: discord.Message):
                     )
                 else:
                     attachment_notes.append(
-                        f"[🖼️ 사용자 제공 참고(레퍼런스) 이미지: {display_name}] (보존 위치: {ref_file_path})"
+                        f"[🖼️ 사용자 제공 참고(레퍼런스) 이미지: {display_name}] (저장 위치: {rel_file_path}, 절대경로: {ref_file_path})"
                         f"{vision_block}\n"
                         f"{anti_tracing_rule}\n"
                         f"사용자 원본 요청을 충실히 반영하여 고유한 새 산출물을 생성하거나 필요한 코드/작업을 완결하십시오."
                     )
 
-            # 5. Other binary / archive files
+            # 5. Other binary / office / dataset / archive / executable files (호환성 및 실행 검증)
             else:
-                if not raw_user_prompt:
-                    attachment_notes.append(
-                        f"[📦 첨부 파일: {display_name}] (경로: {file_path})\n"
-                        f"사용자 요청: 첨부된 파일의 내용과 구조를 분석해줘."
+                attachment_notes.append(
+                    f"[📦 첨부 파일 (호환성/실행 검증 대상): {display_name} ({file_sz_str})]\n"
+                    f"- 워크스페이스 저장 위치: `{rel_file_path}` (절대경로: `{dest_file_path}`)\n"
+                    f"- 핵심 지침: 사용자가 파일 열람, 호환성 테스트, 실행 검증 또는 데이터 분석을 위해 디스코드로 전달한 실제 파일입니다. "
+                    f"파일이 워크스페이스 내 `{rel_file_path}`에 실물로 안전하게 저장되어 있으므로, STRICT WORKSPACE CONFINEMENT 규범을 준수하면서 "
+                    f"해당 경로에서 직접 파일을 열람(python pandas, openpyxl, sqlite3, zipfile, subprocess 등 활용)하거나 "
+                    f"실행 및 호환성/무결성 테스트를 즉시 완결하고 그 결과를 상세히 보고하십시오."
+                )
+                try:
+                    await message.reply(
+                        f"📦 **[첨부 파일 워크스페이스 저장 완료: `{display_name}`]**\n"
+                        f"> 저장 위치: `{rel_file_path}` ({file_sz_str})\n"
+                        f"> 사용자가 전달한 파일이 워크스페이스에 안전하게 배치되었습니다. 에이전트가 파일 열람 및 호환성/실행 검증을 즉시 진행합니다! 🚀"
                     )
-                else:
-                    attachment_notes.append(f"[📦 첨부 파일: {display_name}] (경로: {file_path})")
+                except Exception:
+                    pass
 
     if attachment_notes:
         prompt = (prompt + "\n\n" if prompt else "") + "\n".join(attachment_notes)

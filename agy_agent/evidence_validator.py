@@ -1161,7 +1161,7 @@ class EvidenceValidator:
         ]
 
         visited_paths = set()
-        excluded_parts = EXCLUDED_DIR_NAMES | {".references", "user_inputs", "agy_user_references"}
+        excluded_parts = EXCLUDED_DIR_NAMES | {".references", "user_inputs", "agy_user_references", "참고자료"}
 
         def _process_file(abs_path: str):
             nonlocal count
