@@ -72,6 +72,28 @@ from discord_utils import (
 
 
 from evidence_validator import EvidenceValidator
+
+
+def get_fresh_evidence_validator():
+    """시스템 무결성 가디언(EvidenceValidator) 동적 핫리로드 및 최신 클래스 반환."""
+    global EvidenceValidator
+    try:
+        import sys
+        import importlib
+        importlib.invalidate_caches()
+        if "evidence_validator" in sys.modules:
+            ev_mod = importlib.reload(sys.modules["evidence_validator"])
+        else:
+            import evidence_validator as ev_mod
+        ev_cls = getattr(ev_mod, "EvidenceValidator", None)
+        if ev_cls is not None:
+            EvidenceValidator = ev_cls
+            globals()["EvidenceValidator"] = ev_cls
+            return ev_cls
+    except Exception as _ev_err:
+        logger.debug(f"bot: get_fresh_evidence_validator failed: {_ev_err}")
+    return globals().get("EvidenceValidator", EvidenceValidator)
+
 try:
     from model_registry import AntigravityModelRegistry
 except ImportError:
@@ -393,7 +415,7 @@ def _reload_helper_modules_impl():
         "commander", "discord_utils", "gdrive_uploader", "android_build_manager",
         "audio_transcriber", "android_vision_inspector", "agent_guidelines", "agent_runner",
         "trio_agent_runner", "research_runner", "consulting_runner",
-        "qa_hub", "thermal_guard", "setup_manager", "evidence_validator",
+        "qa_hub", "thermal_guard", "setup_manager", "evidence_validator", "role_authority",
         "help_manager", "plan_wizard", "qa_wizard", "android_emulator_manager",
         "windows_vm_manager", "roadmap_manager", "telemetry_status_manager",
         "openrouter_usage_monitor", "autonomy_guard", "git_manager", "engine_manager",
@@ -5389,9 +5411,7 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str, is
         try:
             async with message.channel.typing():
                 try:
-                    ev_cls = globals().get("EvidenceValidator")
-                    if ev_cls is None:
-                        from evidence_validator import EvidenceValidator as ev_cls
+                    ev_cls = get_fresh_evidence_validator()
                 except Exception:
                     ev_cls = None
 
@@ -6178,7 +6198,7 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str, is
                     return
 
                 # 2) 수확 체감(Diminishing Returns) 감지 시 정상 완결
-                current_diff_info = EvidenceValidator.inspect_production_diff(session.workspace or "")
+                current_diff_info = get_fresh_evidence_validator().inspect_production_diff(session.workspace or "")
                 current_diff_lines = current_diff_info.get("prod_diff_lines", 0)
                 prev_diff_lines = getattr(session, "_last_milestone_diff_lines", None)
                 session._last_milestone_diff_lines = current_diff_lines
@@ -6932,10 +6952,9 @@ async def on_message(message: discord.Message):
 
                 dhash = None
                 try:
-                    ev_cls = globals().get("EvidenceValidator")
-                    if ev_cls is None:
-                        from evidence_validator import EvidenceValidator as ev_cls
-                    dhash = ev_cls.compute_image_dhash(ref_file_path)
+                    ev_cls = get_fresh_evidence_validator()
+                    if ev_cls is not None:
+                        dhash = ev_cls.compute_image_dhash(ref_file_path)
                 except Exception as _ev_err:
                     logger.warning(f"Failed to compute image dhash: {_ev_err}")
                     dhash = None

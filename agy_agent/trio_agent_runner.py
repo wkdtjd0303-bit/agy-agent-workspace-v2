@@ -23,6 +23,65 @@ from thermal_guard import ThermalGuard
 from mode_classifier import classify_task_type, classify_risk_level, is_diagnostic_prompt
 import mode_registry
 from evidence_validator import EvidenceValidator
+import role_authority
+
+
+def get_fresh_evidence_validator():
+    """시스템 무결성 가디언(EvidenceValidator) 동적 핫리로드 및 최신 클래스 반환.
+
+    봇 프로세스가 실행 중인 동안 Coder가 evidence_validator.py를 수정해도,
+    파이썬 sys.modules 캐싱으로 인해 구버전 가디언 로직(예: 이전 화이트리스트 미반영)이
+    메모리에 상주하여 오반려(Ping-Pong Trap)를 유발하는 현상을 원천 방지한다.
+    """
+    global EvidenceValidator
+    current_ev = globals().get("EvidenceValidator", EvidenceValidator)
+    # 단위 테스트 중 Mock 객체가 주입되어 있는 경우 목(Mock) 무결성 보존
+    if hasattr(current_ev, "_mock_return_value") or hasattr(current_ev, "mock_calls") or (
+        hasattr(current_ev, "validate_all_gates") and hasattr(getattr(current_ev, "validate_all_gates"), "mock_calls")
+    ):
+        return current_ev
+
+    try:
+        import sys
+        import importlib
+        importlib.invalidate_caches()
+        if "evidence_validator" in sys.modules:
+            ev_mod = importlib.reload(sys.modules["evidence_validator"])
+        else:
+            import evidence_validator as ev_mod
+        ev_cls = getattr(ev_mod, "EvidenceValidator", None)
+        if ev_cls is not None:
+            EvidenceValidator = ev_cls
+            globals()["EvidenceValidator"] = ev_cls
+            return ev_cls
+    except Exception as _ev_reload_err:
+        logger.debug(f"Failed to dynamic-reload evidence_validator: {_ev_reload_err}")
+    return globals().get("EvidenceValidator", EvidenceValidator)
+
+
+def get_fresh_role_authority():
+    """역할 권한 규칙 모듈(role_authority) 동적 핫리로드 및 최신 모듈 반환."""
+    global role_authority
+    current_ra = globals().get("role_authority", role_authority)
+    if hasattr(current_ra, "_mock_return_value") or hasattr(current_ra, "mock_calls") or (
+        hasattr(current_ra, "format_system_gate_override") and hasattr(getattr(current_ra, "format_system_gate_override"), "mock_calls")
+    ):
+        return current_ra
+
+    try:
+        import sys
+        import importlib
+        importlib.invalidate_caches()
+        if "role_authority" in sys.modules:
+            ra_mod = importlib.reload(sys.modules["role_authority"])
+        else:
+            import role_authority as ra_mod
+        globals()["role_authority"] = ra_mod
+        return ra_mod
+    except Exception as _ra_reload_err:
+        logger.debug(f"Failed to dynamic-reload role_authority: {_ra_reload_err}")
+    return globals().get("role_authority", sys.modules.get("role_authority"))
+
 from round_control import (
     continual_round_sequence,
     has_turn_done_marker,
@@ -817,6 +876,14 @@ class TrioAgentRunner:
     )
 
     @classmethod
+    def get_fresh_evidence_validator(cls):
+        return get_fresh_evidence_validator()
+
+    @classmethod
+    def get_fresh_role_authority(cls):
+        return get_fresh_role_authority()
+
+    @classmethod
     def detect_pending_subagent_work(cls, output: str) -> bool:
         """Coder가 서브에이전트/비동기 작업을 완료하지 않은 채 턴을 종료했는지 판정한다.
 
@@ -830,6 +897,12 @@ class TrioAgentRunner:
         """
         if not output or not isinstance(output, str):
             return False
+        # [Short-circuit Guard] Coder가 작업을 모두 끝내고 [TURN_DONE] 완료 토큰을 출력한 경우,
+        # 보고서 본문 내 기술 용어("이벤트 루프가 돌고 있는", "비동기 대기" 등)와 무관하게
+        # 즉시 대기 작업 없음(False)으로 단락 판정하여 불필요한 재촉을 방지한다.
+        if has_turn_done_marker(output) or "[turn_done]" in output.lower():
+            return False
+
         text = output.lower()
         if any(done in text for done in cls._PENDING_COMPLETION_SUPPRESSORS):
             return False
@@ -837,6 +910,10 @@ class TrioAgentRunner:
             return True
         has_subject = any(re.search(p, text) for p in cls._PENDING_SUBJECT_PATTERNS)
         return has_subject and any(re.search(p, text) for p in cls._PENDING_WEAK_MARKERS)
+
+    # 호환성 별칭
+    _has_pending_subagent_work = detect_pending_subagent_work
+
 
     @staticmethod
     def strip_coder_verdict_tags(text: str) -> Tuple[str, List[str]]:
@@ -1637,7 +1714,7 @@ class TrioAgentRunner:
                     and cls.detect_pending_subagent_work(latest_coder_output)
                 ):
                     subagent_wait_round += 1
-                    diff_check = EvidenceValidator.inspect_production_diff(session.workspace or "")
+                    diff_check = cls.get_fresh_evidence_validator().inspect_production_diff(session.workspace or "")
                     logger.info(
                         "TrioAgentRunner: Coder ended with pending subagent/async work "
                         f"(wait {subagent_wait_round}/{subagent_wait_max}, "
@@ -1896,19 +1973,26 @@ class TrioAgentRunner:
                 round_deliverable_image_hashes = getattr(session, "round_deliverable_image_hashes", {})
                 prev_round_hashes = round_deliverable_image_hashes.get(round_num - 1) if round_num > 1 else None
 
+                # [시스템 무결성 가디언 및 규칙 모듈 동적 핫리로드]
+                # Coder가 evidence_validator.py나 role_authority.py를 수정한 경우,
+                # sys.modules 캐싱으로 인한 QA 통과 vs 시스템 가디언 반려 충돌을 방지하기 위해
+                # 검증 직전 최신 모듈을 동적으로 리로드합니다.
+                fresh_ev = cls.get_fresh_evidence_validator()
+                cls.get_fresh_role_authority()
+
                 # [🛡️ 이벤트 루프 차단 방지] validate_all_gates / verify_anti_mocking 내부에서
                 # PIL 이미지 해싱을 수행하므로 ThreadPool으로 오프로드합니다.
                 diff_info = await asyncio.to_thread(
-                    EvidenceValidator.get_git_diff_summary, effective_ws
+                    fresh_ev.get_git_diff_summary, effective_ws
                 )
                 gates_info = await asyncio.to_thread(
-                    EvidenceValidator.validate_all_gates,
+                    fresh_ev.validate_all_gates,
                     effective_ws,
                     user_reference_images=user_ref_images,
                     previous_round_image_hashes=prev_round_hashes
                 )
                 is_anti_mock_clean, anti_mock_violations, _ = await asyncio.to_thread(
-                    EvidenceValidator.verify_anti_mocking_and_authenticity,
+                    fresh_ev.verify_anti_mocking_and_authenticity,
                     effective_ws,
                     prompt,
                     user_reference_images=user_ref_images,
@@ -1919,7 +2003,7 @@ class TrioAgentRunner:
                 # [🛡️ 이벤트 루프 차단 방지] 이미지 해싱은 PIL 리사이즈/dhash 계산으로 CPU-intensive하므로
                 # ThreadPool 으로 오프로드하여 Discord 게이트웨이 하트비트 차단(>10초)을 방지합니다.
                 curr_round_hashes = await asyncio.to_thread(
-                    EvidenceValidator.collect_workspace_image_hashes, effective_ws
+                    fresh_ev.collect_workspace_image_hashes, effective_ws
                 )
                 round_deliverable_image_hashes[round_num] = curr_round_hashes
                 session.round_deliverable_image_hashes = round_deliverable_image_hashes
@@ -1964,7 +2048,7 @@ class TrioAgentRunner:
                     "test suite", "테스트 추가", "test code", "tc 작성"
                 ])
 
-                prod_diff_info = EvidenceValidator.inspect_production_diff(effective_ws, diff_info)
+                prod_diff_info = fresh_ev.inspect_production_diff(effective_ws, diff_info)
                 has_git_activity = is_git_tree or diff_info.get("has_changes", False) or bool(diff_info.get("changed_files"))
 
                 # =============================================================
@@ -2273,7 +2357,7 @@ class TrioAgentRunner:
                                     break
 
                         if is_gui_domain:
-                            asset_check = EvidenceValidator.check_visual_asset_presence(effective_ws)
+                            asset_check = cls.get_fresh_evidence_validator().check_visual_asset_presence(effective_ws)
                             if not asset_check.get("has_assets"):
                                 visual_asset_gate_block = (
                                     f"\n🎨 **[Visual Asset Gate — 이미지 에셋 미감지 경고]**:\n"
@@ -2663,7 +2747,7 @@ class TrioAgentRunner:
                     vis_app = getattr(session_5w1h, "visual_approved", False) if session_5w1h else False
                     dom = getattr(session_5w1h, "domain", "") if session_5w1h else ""
                     if vis_app and dom in ("mobile_app", "saas_web", "game"):
-                        asset_stat = EvidenceValidator.check_visual_asset_presence(session.workspace or "")
+                        asset_stat = cls.get_fresh_evidence_validator().check_visual_asset_presence(session.workspace or "")
                         if not asset_stat.get("has_assets", False):
                             logger.warning("TrioAgentRunner: QA passed GUI task but 0 visual assets exist. Overriding to REJECTED for visual quality.")
                             qa_approved = False
@@ -3786,3 +3870,5 @@ class TrioAgentRunner:
 
 # Backward compatibility alias
 DualAgentRunner = TrioAgentRunner
+_has_pending_subagent_work = TrioAgentRunner.detect_pending_subagent_work
+

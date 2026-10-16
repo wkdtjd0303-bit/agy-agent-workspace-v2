@@ -57,9 +57,11 @@ def sync_in_memory_state():
             main.extended_qa_bots = {2: qa2_client} if qa2_client else {}
             logger.info("[HotReloadBridge] Initialized extended_qa_bots registry in main.")
 
-        # 1.2 Explicitly ensure EvidenceValidator is bridged into main
+        # 1.2 Explicitly ensure EvidenceValidator is bridged into main with fresh reload
         try:
+            import importlib
             import evidence_validator
+            importlib.reload(evidence_validator)
             main.EvidenceValidator = evidence_validator.EvidenceValidator
         except Exception as _ev_err:
             logger.debug(f"[HotReloadBridge] Error bridging EvidenceValidator: {_ev_err}")

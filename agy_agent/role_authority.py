@@ -37,6 +37,7 @@ __all__ = [
     "VERDICT_TAG_RE",
     "BLOCKING_TAG_RE",
     "DIRECT_PATCH_TAG_RE",
+    "strip_markdown_blocks_and_quotes",
     "is_declaration_line",
     "has_verdict_declaration",
     "strip_coder_verdict_tags",
@@ -90,8 +91,8 @@ DIRECT_PATCH_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 판정 선언 줄의 선행 장식 / 라벨 (output_guard 와 동일 규약)
-_LEAD_DECOR_RE = re.compile(r"^(?:[#*\-•>\s\d.]|__|\*\*)+")
+# 판정 선언 줄의 선행 장식 / 라벨 (output_guard 와 동일 규약, 인용구 '>'는 장식에서 제외)
+_LEAD_DECOR_RE = re.compile(r"^(?:[#*\-•\s\d.]|__|\*\*)+")
 _LABEL_RE = re.compile(
     r"^(?:판정|결론|최종\s*판정|최종\s*결과|감사\s*결과|검증\s*결과|검토\s*결과|"
     r"Verdict|Result|Conclusion|Final\s*Verdict|Status)(?:\*\*|__)?\s*[:：\-]\s*(?:\*\*|__)?",
@@ -113,6 +114,27 @@ _QA_CODER_COMPLETION_PHRASES = (
 
 
 # ---------------------------------------------------------------------------
+# 마크다운 블록 및 인용구 정화 (오탐 방지)
+# ---------------------------------------------------------------------------
+def strip_markdown_blocks_and_quotes(text: str) -> str:
+    """마크다운 코드 블록, 인라인 코드, 마크다운 인용줄을 제거하여 순수 본문만 남긴다.
+
+    Coder가 설명문, 마크다운 코드 블록(```...```), 인라인 코드(`...`),
+    인용구(>) 안에서 [STATUS: APPROVED] 등을 언급할 때 발생하는
+    역할 전도(Role Inversion) 오탐을 원천 차단한다.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    # 1. 마크다운 코드 블록 제거 (```...```)
+    cleaned = re.sub(r"```[\s\S]*?```", "", text)
+    # 2. 인라인 코드 제거 (`...`)
+    cleaned = re.sub(r"`[^`\n]+`", "", cleaned)
+    # 3. 마크다운 인용줄 제거 (^\s*>.*$)
+    cleaned = re.sub(r"^\s*>.*$", "", cleaned, flags=re.MULTILINE)
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
 # 판정 선언 판별
 # ---------------------------------------------------------------------------
 def is_declaration_line(line: str) -> bool:
@@ -121,11 +143,22 @@ def is_declaration_line(line: str) -> bool:
     `[STATUS: REJECTED]`, `**판정**: [STATUS: APPROVED]`,
     `[BLOCKING_DEFECTS: 2]` → True
     `이전 라운드에서 [STATUS: REJECTED]를 받았습니다` → False (본문 인용)
+    `> [STATUS: APPROVED]` → False (마크다운 인용문)
+    ` `[STATUS: APPROVED]` ` → False (인라인 코드)
     """
     if not line:
         return False
+    stripped = line.strip()
+    # 인용 줄(>)은 판정 선언이 아님
+    if stripped.startswith(">"):
+        return False
+    # 인라인 코드(`...`)로 감싸진 경우 판정 선언이 아님
+    if stripped.startswith("`") and stripped.endswith("`"):
+        return False
     head = _LEAD_DECOR_RE.sub("", line)
     head = _LABEL_RE.sub("", head)
+    if head.startswith("`"):
+        return False
     return bool(VERDICT_TAG_RE.match(head)) or bool(BLOCKING_TAG_RE.match(head))
 
 
@@ -147,7 +180,8 @@ def strip_coder_verdict_tags(text: str) -> Tuple[str, List[str]]:
         ``(clean_text, removed_tags)`` — removed_tags 는 제거된 태그 문자열 목록.
 
     정책:
-      * 판정 '선언 줄'에서만 태그를 제거한다(본문 중 인용은 보존).
+      * 코드 블록 내부의 판정 태그 및 본문 인용/인라인 코드/인용문은 보존한다.
+      * 판정 '선언 줄'에서만 태그를 제거한다.
       * 태그 제거 후 남은 내용이 있으면 유지(맥락 보존), 비면 줄을 삭제한다.
     """
     if not text or not isinstance(text, str):
@@ -155,8 +189,13 @@ def strip_coder_verdict_tags(text: str) -> Tuple[str, List[str]]:
 
     removed: List[str] = []
     out: List[str] = []
+    in_code_block = False
     for line in text.splitlines():
-        if not is_declaration_line(line):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            out.append(line)
+            continue
+        if in_code_block or not is_declaration_line(line):
             out.append(line)
             continue
         m = VERDICT_TAG_RE.search(line) or BLOCKING_TAG_RE.search(line)
@@ -237,31 +276,46 @@ def detect_coder_role_inversion(output: str) -> Tuple[bool, str]:
     if not output or not isinstance(output, str):
         return False, ""
 
-    lines = [ln.strip() for ln in output.strip().splitlines() if ln.strip()]
+    # [가드 과민반응 차단] 마크다운 코드 블록, 인라인 코드, 마크다운 인용줄을 먼저 제거하여
+    # Coder가 설명문, 인용문, 코드 블록 내에서 [STATUS: APPROVED] 등을 언급했을 때의 오탐을 원천 차단한다.
+    clean_text = strip_markdown_blocks_and_quotes(output)
+
+    lines = [ln.strip() for ln in clean_text.strip().splitlines() if ln.strip()]
     if not lines:
         return False, ""
 
     head_joined = " ".join(lines[:3])
 
-    # 1) 판정 선언 줄 (앞쪽 3줄) — Coder 가 QA 판정 태그를 선언
-    if has_verdict_declaration(output, within_first=3):
+    # 1) 판정 선언 줄 (앞쪽 3줄) — Coder 가 QA 판정 태그를 단독 선언
+    if has_verdict_declaration(clean_text, within_first=3):
         return True, (
             "Coder 에이전트가 소스코드 구현 대신 QA/감사관 판정 태그"
             "([STATUS: APPROVED/REJECTED/AUDIT_PASSED])를 선언하며 QA 역할을 수행(역할 전도)했습니다."
         )
 
-    # 2) 최종 판정 라벨 + 태그 조합
+    # 2) 최종 판정 라벨 + 태그 조합 (선두 선언)
     if re.search(
-        r"(?:최종\s*판정|판정|결론)\s*[:：]\s*\[?\s*STATUS\s*:",
-        head_joined,
-        re.IGNORECASE,
+        r"^\s*(?:최종\s*판정|판정|결론)\s*[:：]\s*\[?\s*STATUS\s*:",
+        clean_text,
+        re.IGNORECASE | re.MULTILINE,
     ):
         return True, (
             "Coder 에이전트가 소스코드 구현 대신 QA/감사관 판정 태그"
             "([STATUS: APPROVED/REJECTED/AUDIT_PASSED])를 선언하며 QA 역할을 수행(역할 전도)했습니다."
         )
 
-    # 3) QA 리뷰 리포트 헤더 (구현 산출물 없이 리뷰 보고서만 작성)
+    # 3) 줄의 맨 앞 단독 선언: ^\s*\[STATUS:\s*(?:APPROVED|REJECTED|DEFECT_DETECTED|AUDIT_PASSED|AUDIT_FAILED|AUDIT_STOP)
+    if re.search(
+        r"^\s*\[\s*STATUS\s*:\s*(?:APPROVED|REJECTED|DEFECT_DETECTED|AUDIT_PASSED|AUDIT_FAILED|AUDIT_STOP)",
+        clean_text,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        return True, (
+            "Coder 에이전트가 소스코드 구현 대신 QA/감사관 판정 태그"
+            "([STATUS: APPROVED/REJECTED/AUDIT_PASSED])를 선언하며 QA 역할을 수행(역할 전도)했습니다."
+        )
+
+    # 4) QA 리뷰 리포트 헤더 (구현 산출물 없이 리뷰 보고서만 작성)
     for header in _QA_REPORT_HEADERS:
         if header.lower() in head_joined.lower():
             return True, (

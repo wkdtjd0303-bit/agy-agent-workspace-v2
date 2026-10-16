@@ -9,7 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agy_agent"))
 import role_authority as RA
 from trio_agent_runner import TrioAgentRunner
 
-_TRIO_SRC = os.path.join(os.path.dirname(__file__), "..", "agy_agent", "trio_agent_runner.py")
+_TRIO_SRC = os.path.join(os.path.dirname(__file__), "..", "trio_agent_runner.py")
+if not os.path.exists(_TRIO_SRC):
+    _TRIO_SRC = os.path.join(os.path.dirname(__file__), "..", "agy_agent", "trio_agent_runner.py")
 
 
 def _read_trio_src() -> str:

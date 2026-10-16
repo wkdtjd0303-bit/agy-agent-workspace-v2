@@ -70,6 +70,66 @@ def test_detect_coder_normal_output_passes():
     assert reason == ""
 
 
+def test_detect_coder_role_inversion_ignores_quotes_and_codeblocks():
+    """Coder quoting QA verdicts in quotes, inline code, or code blocks must NOT trigger role inversion."""
+    # 1. Inline code mention
+    inline_code_mention = (
+        "QA가 `[STATUS: APPROVED]`를 내릴 때의 엣지 케이스를 패치했습니다.\n"
+        "이전 `[STATUS: REJECTED]` 로그를 분석하여 수정 완료했습니다."
+    )
+    is_inv, reason = TrioAgentRunner.detect_coder_role_inversion(inline_code_mention)
+    assert is_inv is False
+    assert reason == ""
+
+    # 2. Markdown blockquote (>)
+    blockquote_mention = (
+        "아래 QA 보고서 내용을 참고하여 수정을 진행했습니다:\n"
+        "> [STATUS: REJECTED]\n"
+        "> [BLOCKING_DEFECTS: 1]\n"
+        "> 1. NullPointerException 발견\n"
+        "해당 NPE 문제를 완전히 수정했습니다."
+    )
+    is_inv, reason = TrioAgentRunner.detect_coder_role_inversion(blockquote_mention)
+    assert is_inv is False
+    assert reason == ""
+
+    # 3. Markdown codeblock (```...```)
+    codeblock_mention = (
+        "message.txt의 작업 지침을 인용합니다:\n"
+        "```markdown\n"
+        "1. QA는 `[STATUS: APPROVED]`를 줬는데 시스템 가디언이 반려함\n"
+        "2. Coder가 [STATUS: REJECTED]를 보고서에서 언급함\n"
+        "```\n"
+        "위 2가지 이슈를 모두 해결했습니다."
+    )
+    is_inv, reason = TrioAgentRunner.detect_coder_role_inversion(codeblock_mention)
+    assert is_inv is False
+    assert reason == ""
+
+
+def test_detect_pending_subagent_work_short_circuits_on_turn_done():
+    """When [TURN_DONE] is present, pending subagent detector must return False even with technical terms."""
+    from trio_agent_runner import _has_pending_subagent_work
+
+    report_with_technical_terms = (
+        "이벤트 루프가 돌고 있는 스레드에서도 코루틴을 안전 실행하도록 구현 완료했습니다.\n"
+        "사전 알림 대기 로직을 리팩터링하고 백그라운드 워커 큐를 최적화했습니다.\n\n"
+        "[TURN_DONE]"
+    )
+    assert TrioAgentRunner.detect_pending_subagent_work(report_with_technical_terms) is False
+    assert _has_pending_subagent_work(report_with_technical_terms) is False
+    assert TrioAgentRunner._has_pending_subagent_work(report_with_technical_terms) is False
+
+
+def test_get_fresh_evidence_validator():
+    """get_fresh_evidence_validator must dynamically return the latest EvidenceValidator class."""
+    fresh_cls = TrioAgentRunner.get_fresh_evidence_validator()
+    assert fresh_cls is not None
+    assert hasattr(fresh_cls, "validate_all_gates")
+    assert hasattr(fresh_cls, "get_git_diff_summary")
+
+
+
 def test_detect_qa_role_inversion_developer_mimicry():
     """QA omitting status verdict tags and declaring code implementation completion must be detected."""
     # QA pretending to be developer
