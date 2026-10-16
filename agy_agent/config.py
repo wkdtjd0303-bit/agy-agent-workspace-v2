@@ -258,6 +258,8 @@ HOTFIX_MAX_ROUNDS = int(os.getenv("HOTFIX_MAX_ROUNDS", "4"))    # 핫픽스 수�
 # [❓ 라운드 상한 도달 확인 프롬프트] "N회가 끝났습니다. 이어서 진행하시겠습니까?" (예/아니요)
 ROUND_CONTINUE_ENABLED = os.getenv("ROUND_CONTINUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 ROUND_CONTINUE_TIMEOUT_SEC = float(os.getenv("ROUND_CONTINUE_TIMEOUT_SEC", "300"))  # 무응답 시 자동 종료 대기(초)
+COMMANDER_MAX_CYCLES = int(os.getenv("COMMANDER_MAX_CYCLES", "5"))                  # !mode 3 에픽 마일스톤 최대 사이클 상한
+
 
 # ==============================================================================
 # [🔋 토큰 절약] 인플라이트 재시도/폴백 예산 (In-flight Retry & Fallback Budget)

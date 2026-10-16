@@ -40,6 +40,10 @@ STATE_DIR = BASE_DIR / "state"
 CONFIG_FILE = Path(
     os.getenv("AGY_CHANNEL_AUTO_CONFIG_FILE", str(STATE_DIR / "channel_auto_config.json"))
 )
+METRICS_HISTORY_FILE = Path(
+    os.getenv("AGY_AUTO_METRICS_HISTORY_FILE", str(STATE_DIR / "auto_metrics_history.json"))
+)
+
 
 # 루프 tick 간격(초). 15초 면 분 단위 스케줄까지 무리 없이 커버한다.
 TICK_SECONDS = 15
@@ -589,3 +593,119 @@ class ChannelAutoScheduler:
             "run_count": int(cfg.get("run_count", 0) or 0),
             "missed_count": int(cfg.get("missed_count", 0) or 0),
         }
+
+
+# =============================================================================
+# 📊 [!auto] 데이터 기반 PDCA (Plan-Do-Check-Act) 지표 이력 저장소
+# =============================================================================
+
+class AutoMetricsHistory:
+    """
+    정기 마케팅/투자/운영 자동화를 위해 회차별 목표 지표, 실행 액션, 관측 결과,
+    가설 수정 사항을 영속 기록하고(state/auto_metrics_history.json),
+    다음 스케줄 실행 시 에이전트에게 직전 데이터를 주입하는 PDCA 관리자.
+    """
+    _cache: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def _ensure_loaded(cls) -> Dict[str, Any]:
+        if cls._cache is not None:
+            return cls._cache
+        if METRICS_HISTORY_FILE.is_file():
+            try:
+                with open(METRICS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    cls._cache = json.load(f)
+            except Exception as e:
+                logger.warning(f"[AutoMetricsHistory] Failed to read {METRICS_HISTORY_FILE}: {e}")
+                cls._cache = {}
+        else:
+            cls._cache = {}
+        return cls._cache
+
+    @classmethod
+    def _save(cls) -> None:
+        if cls._cache is None:
+            return
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = METRICS_HISTORY_FILE.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cls._cache, f, ensure_ascii=False, indent=2)
+            tmp.replace(METRICS_HISTORY_FILE)
+        except Exception as e:
+            logger.error(f"[AutoMetricsHistory] Failed to save {METRICS_HISTORY_FILE}: {e}")
+
+    @classmethod
+    def record_cycle(
+        cls,
+        channel_id: int,
+        target_metrics: Optional[Dict[str, Any]] = None,
+        action_taken: str = "",
+        observed_result: str = "",
+        hypothesis_delta: str = "",
+    ) -> Dict[str, Any]:
+        """한 주기의 PDCA 실행 내역을 기록한다."""
+        data = cls._ensure_loaded()
+        cid = str(channel_id)
+        if cid not in data:
+            data[cid] = []
+
+        now_ts = _now()
+        date_str = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M:%S")
+        cycle_num = len(data[cid]) + 1
+
+        entry = {
+            "cycle": cycle_num,
+            "timestamp": now_ts,
+            "date_str": date_str,
+            "target_metrics": target_metrics or {},
+            "action_taken": action_taken or "정기 점검 및 개선 작업",
+            "observed_result": observed_result,
+            "hypothesis_delta": hypothesis_delta,
+        }
+        data[cid].append(entry)
+        cls._save()
+        return entry
+
+    @classmethod
+    def get_history(cls, channel_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        """채널의 최근 N회차 기록을 반환한다."""
+        data = cls._ensure_loaded()
+        records = data.get(str(channel_id), [])
+        return records[-limit:] if limit else records
+
+    @classmethod
+    def get_latest(cls, channel_id: int) -> Optional[Dict[str, Any]]:
+        """채널의 직전 회차 기록을 반환한다."""
+        hist = cls.get_history(channel_id, limit=1)
+        return hist[-1] if hist else None
+
+    @classmethod
+    def format_pdca_context(cls, channel_id: int) -> str:
+        """
+        차기 스케줄 실행 시 에이전트 프롬프트에 주입할 데이터 기반 PDCA 컨텍스트를 생성한다.
+        """
+        latest = cls.get_latest(channel_id)
+        if not latest:
+            return (
+                "\n\n[📊 !auto 데이터 기반 PDCA 그로스 루프 (최초 실행)]\n"
+                "• 직전 회차 데이터: 없음 (현재 회차가 최초 기준선 수립 주기입니다)\n"
+                "• 지침: 사용자가 지정한 정량 목표 지표(조회수, 전환율, 클릭률, 수익률 등)의 현재 상태를 "
+                "확인하고, 기준선(Baseline)을 수립한 뒤 첫 번째 개선 가설을 실행하십시오."
+            )
+
+        metrics_str = ", ".join(f"{k}: {v}" for k, v in latest.get("target_metrics", {}).items()) or "정기 자동화 지표"
+        return (
+            f"\n\n[📊 !auto 데이터 기반 PDCA 그로스 루프 (직전 {latest.get('cycle', 1)}회차 대조)]\n"
+            f"• 직전 실행 일시: `{latest.get('date_str', 'n/a')}`\n"
+            f"• 이전 목표/관측 지표: {metrics_str}\n"
+            f"• 이전 적용 조치: {latest.get('action_taken', '기본 자동화')}\n"
+            f"• 이전 관측 결과: {latest.get('observed_result', '지표 추적 중')}\n"
+            f"• 이전 가설/원인 분석: {latest.get('hypothesis_delta', '데이터 축적 중')}\n\n"
+            "**[PDCA 4단계 실행 프레임워크]**:\n"
+            "1. **[지표 비교 (Metrics Delta)]**: 직전 주기 지표와 현재 상태를 대조하십시오.\n"
+            "2. **[병목 진단 (Bottleneck)]**: 지표가 기대에 못 미친 핵심 원인을 1~2가지로 좁히십시오.\n"
+            "3. **[이번 주기 실험 (Experiment & Action)]**: 원인을 해결하기 위해 이번 주기에 바꿀 단 하나의 구체적 변수를 결정하고 실행하십시오.\n"
+            "4. **[다음 주기 검증 기준 요약]**: 다음 스케줄에서 어떤 수치가 얼마나 변하면 성공으로 볼지 기록하십시오."
+        )
+

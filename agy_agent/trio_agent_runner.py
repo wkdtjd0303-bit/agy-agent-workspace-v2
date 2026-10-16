@@ -23,7 +23,12 @@ from thermal_guard import ThermalGuard
 from mode_classifier import classify_task_type, classify_risk_level, is_diagnostic_prompt
 import mode_registry
 from evidence_validator import EvidenceValidator
-from round_control import continual_round_sequence
+from round_control import (
+    continual_round_sequence,
+    has_turn_done_marker,
+    detect_premature_turn_stop,
+    TURN_DONE_MARKER,
+)
 from discord_utils import (
     async_prepare_message_payload,
     safe_send_discord_message
@@ -1510,8 +1515,13 @@ class TrioAgentRunner:
                             f"- 폰트/좌표 스케일링 시 임의의 하드코딩 클램핑(`coerceIn(..., 34f)` 등 변수화 우회 포함)을 금지하고 뷰포트 비율에 맞춘 정확한 수학적 변환식을 적용하십시오.\n"
                             f"- **[🚨 레퍼런스 이미지 표절, 트레이싱(Tracing), 라운드 재탕 절대 금지]**: 사용자의 참고 이미지를 그대로 복사하거나, 스크립트 코드(Image.open, cv2.imread, findContours 등)에서 열어 외곽선/픽셀을 추출하거나, 이전 라운드의 결과물 이미지를 변경 없이 그대로 재탕하는 행위는 엄격히 금지됩니다. 반드시 실제 수정된 소스코드를 렌더링/빌드하여 고유한 새 결과물 이미지를 생성하십시오.\n"
                             f"**[📉 명확한 보고 및 가독성 준수]**: 인사말/수다 배제, 장황한 내부 절대경로 노출 금지(상대경로 `./...` 또는 파일명만 사용), 소스코드 전체 덤프 금지(수정은 도구로만 수행하고 본문에는 변경 핵심 diff/요약 표기), 사용자 질문 답변과 변경 목적 및 검증 결과를 논리적으로 명쾌하게 보고하십시오.\n\n"
-                            f"**[🚨 Coder 최종 의무 리마인더]**: 당신은 개발자(Coder)입니다. QA의 지적 사항을 면밀히 분석하여 소스코드를 직접 수정(Patch)하고 파일 수정 도구로 변경 사항을 디스크에 반영하십시오. QA 판정 태그(`[STATUS: ...]`)를 출력하지 마십시오."
+                            f"**[🚨 Coder 최종 의무 리마인더]**: 당신은 요구사항을 실제로 구현하고 완결된 산출물만 제출하는 개발자(Coder)입니다.\n"
+                            f"1. **조기 종료 절대 금지**: 절대로 '대기하고 있습니다', '진행하겠습니다', '작업을 시작하겠습니다' 같은 중간 진행 상황이나 미래 시제 선언으로 응답을 끝내지 마십시오.\n"
+                            f"2. **실체 구현 및 검증 완결**: 모든 소스코드 작성, 파일 수정(`write_to_file`, `replace_file_content`), 테스트 검증, 빌드 절차를 현재 턴 안에서 끝까지 완수한 후에만 응답을 출력하십시오.\n"
+                            f"3. **이미지 요청**: 이미지 생성이 필요한 작업이라면 응답 내에 `[IMAGE_REQUEST: 상세 프롬프트]`를 명시하여 이미지 생성 파이프라인이 즉시 가동되도록 트리거하십시오.\n"
+                            f"4. **완료 마커 필수**: 모든 작업이 100% 완료되었을 때만 마지막 줄에 `{TURN_DONE_MARKER}`를 붙여 출력하십시오. QA 판정 태그(`[STATUS: ...]`)를 출력하지 마십시오."
                         )
+
 
                 async def on_coder_tool(tool_status: str):
                     if on_status_update:
@@ -1661,7 +1671,46 @@ class TrioAgentRunner:
                         f"{subagent_wait_max} wait rounds. Proceeding (QA will judge completeness)."
                     )
 
+                # 🛡️ [조기 종료 방지 및 턴 완결 자가 재촉 (Self-Continue Loop)]
+                # 에이전트가 "대기하고 있습니다", "진행하겠습니다" 같은 안내성 텍스트만 출력하고
+                # 턴을 마치는 것을 방지하며, 반드시 [TURN_DONE] 완료 토큰이 포함될 때까지 최대 2회 재촉한다.
+                self_continue_round = 0
+                is_premature, premature_reason = detect_premature_turn_stop(latest_coder_output)
+                while (
+                    self_continue_round < 2
+                    and is_premature
+                    and not cls.is_system_error(latest_coder_output)
+                    and not cls.is_cancellation_or_stop(latest_coder_output)
+                    and not getattr(session, "is_stopped", False)
+                ):
+                    self_continue_round += 1
+                    logger.warning(
+                        f"TrioAgentRunner: Coder premature stop detected ({self_continue_round}/2): {premature_reason}. "
+                        "Triggering in-flight self-continue loop to finish remaining implementation..."
+                    )
+                    continue_prompt = (
+                        "⚠️ **[사령관 긴급 재촉구: 중간 대기 안내 출력 금지 및 작업 완결 의무]**\n"
+                        f"직전 응답은 실제 작업을 마치지 않고 중간 대기/진행 안내({premature_reason})로 조기 종료되었습니다.\n"
+                        "1. '대기하고 있습니다', '진행하겠습니다' 같은 중간 안내만 출력하지 말고 실제 소스코드 수정, 파일 저장(`write_to_file`, `replace_file_content`), 단위 테스트, 빌드 검증을 현재 턴에서 끝까지 완수하십시오.\n"
+                        "2. 만약 이미지 생성이 필요하다면 본문에 `[IMAGE_REQUEST: 상세 프롬프트]`를 명시하십시오.\n"
+                        f"3. 모든 작업이 100% 완료되었을 때만 최종 요약 보고서의 마지막 줄에 `{TURN_DONE_MARKER}`를 붙여 출력하십시오."
+                    )
+                    async with main_channel.typing():
+                        latest_coder_output = await cls.run_coder_turn(
+                            session=session,
+                            prompt=continue_prompt,
+                            on_tool_update=on_coder_tool
+                        )
+                        if channel_id:
+                            AutonomySafetyLayer.record_llm_call(channel_id)
+                    is_premature, premature_reason = detect_premature_turn_stop(latest_coder_output)
+
+                # 2회 재촉 후에도 마커가 없으나 충분한 내용(실제 구현 보고)이 있다면 안전 부착
+                if not has_turn_done_marker(latest_coder_output) and len(latest_coder_output.strip()) >= 50:
+                    latest_coder_output = f"{latest_coder_output.rstrip()}\n\n{TURN_DONE_MARKER}"
+
                 # 🎨 [Image generator Tool] Coder가 이미지 생성을 요청한 경우 즉시 도구 호출
+
                 try:
                     from image_creator_hub import ImageCreatorHub
                     img_results = await ImageCreatorHub.process_agent_output(
@@ -1689,7 +1738,9 @@ class TrioAgentRunner:
                             except Exception as _send_err:
                                 logger.warning(f"TrioAgentRunner: image send skipped: {_send_err}")
                             try:
-                                await ImageCreatorHub.dispatch_to_studio(qa_client, _img, origin_channel_id=channel_id)
+                                await ImageCreatorHub.dispatch_to_studio(
+                                    qa_client, _img, origin_channel_id=channel_id, origin_channel=main_channel
+                                )
                             except Exception:
                                 pass
                         # [정직 고지] 실패 건이 있으면 메인 채널에 즉시 실패 사유를 알린다.
@@ -2417,7 +2468,8 @@ class TrioAgentRunner:
                         f"2. **QA Direct Patch**: 직접 수정했다면 첫 줄 `[STATUS: APPROVED (QA Direct Patch)]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하십시오.\n"
                         f"3. **APPROVED**: 차단 결함이 0건이면 첫 줄 `[STATUS: APPROVED]`, 둘째 줄 `[BLOCKING_DEFECTS: 0]`을 표기하고, 검증 통과 근거와 **[전문가 관점 차기 고도화 권고]**를 충분히 구체적으로 작성하십시오. 비차단 항목은 [차기 백로그]로만 기록하십시오.\n"
                         f"4. 사용자 요청이 정보 확인·기획 자문·시스템 상태 조회인 경우: Coder의 답변이 올바르다면 `[STATUS: APPROVED]` + `[BLOCKING_DEFECTS: 0]`을 표기하십시오.\n"
-                        f"5. **[개선점 탐색 계약 준수]**: 판정과 무관하게 `**[개선점 탐색]**` 섹션(최소 3개)과 셋째 줄 `[IMPROVEMENTS: N]` 마커를 반드시 표기하십시오. 개선점 0개로 넘기려면 반증 근거를 제시하십시오."
+                        f"5. **[개선점 탐색 계약 준수]**: 판정과 무관하게 `**[개선점 탐색]**` 섹션(최소 3개)과 셋째 줄 `[IMPROVEMENTS: N]` 마커를 반드시 표기하십시오. 개선점 0개로 넘기려면 반증 근거를 제시하십시오.\n"
+                        f"6. **[기술 결함 전담 원칙 & 완료 마커]**: 기획적인 추가 아이디어나 취향 차이로 반려(REJECTED)하지 마십시오. 코드/동작이 기술적·기능적으로 정상이면 즉시 `[STATUS: APPROVED]`를 선언하십시오. 검증 완료 후 최종 응답 맨 마지막 줄에 반드시 `{TURN_DONE_MARKER}`를 출력하십시오."
                     )
 
                     try:
@@ -3368,7 +3420,8 @@ class TrioAgentRunner:
                     f"         • 사용자님이 직접 브라우저 또는 개발 환경에서 변경 사항을 체감하고 테스트해볼 수 있는 구체적인 실행/조작 가이드\n"
                     f"     (5) `---\n### 🛡️ {qa_summary_title}` (맨 하단 최종 요약):\n"
                     f"         • 👨‍💻 **Coder**: 구현 및 방어 로직 완비 | 🕵️ **{qa_reviewers_label}** | ⚖️ **Client Auditor**: 사용자 의도 100% 부합 최종 승인\n"
-                    f"         *(핵심 변경 사항과 검증 결과를 한눈에 파악 가능한 최상의 가독성으로 작성하십시오)*"
+                    f"         *(핵심 변경 사항과 검증 결과를 한눈에 파악 가능한 최상의 가독성으로 작성하십시오)*\n\n"
+                    f"5. **[의도 달성 감사 & 완료 마커]**: 만약 Coder가 실제 결과물 없이 '대기 중입니다 / 진행하겠습니다'라고만 답했다면 무조건 `[STATUS: AUDIT_FAILED] [ACTION: REVISE]` 처리하십시오. 요구사항이 충족되었다면 추가 욕심을 부리지 말고 즉시 `[STATUS: AUDIT_PASSED]`를 선언하고 최종 응답 맨 마지막 줄에 반드시 `{TURN_DONE_MARKER}`를 출력하십시오."
                 )
 
                 try:

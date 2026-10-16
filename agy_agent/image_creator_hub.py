@@ -146,16 +146,34 @@ class ImageCreatorHub:
         return aliases
 
     @classmethod
-    def resolve_role_engine_model(cls) -> Tuple[str, str]:
+    def resolve_role_engine_model(cls, channel_id: Optional[int] = None) -> Tuple[str, str]:
         """
         image 역할의 실제 사용 엔진/모델을 해석한다.
 
-        런타임 config(.env + `!model` 동기화 결과)를 우선 사용하고, 값이 비어 있으면
-        GlobalModelManager 에서 직접 조회한다. (`!model` 에서 Image generator 의
-        엔진/모델을 바꾸면 즉시 이 값에 반영된다.)
+        1. 특정 채널에 개별 오버라이드가 있으면 해당 설정을 최우선 반영한다.
+        2. 그 외의 경우 런타임 config(.env + `!model` 동기화 결과)를 우선 사용한다.
+        3. 값이 비어 있으면 GlobalModelManager 글로벌 설정에서 조회한다.
         """
-        engine = (getattr(config, "IMAGE_ENGINE", "") or "").strip()
-        model = (getattr(config, "IMAGE_MODEL", "") or "").strip()
+        engine = ""
+        model = ""
+
+        # 1. 채널별 오버라이드 확인
+        if channel_id is not None:
+            try:
+                from model_manager import GlobalModelManager
+                if GlobalModelManager.has_channel_override("image", channel_id):
+                    engine = (GlobalModelManager.get_role_engine("image", channel_id=channel_id) or "").strip()
+                    model = (GlobalModelManager.get_role_model("image", channel_id=channel_id) or "").strip()
+            except Exception as _ch_err:
+                logger.debug(f"[ImageCreatorHub] Channel override check note: {_ch_err}")
+
+        # 2. 런타임 config (동기화된 설정 및 테스트 오버라이드)
+        if not engine:
+            engine = (getattr(config, "IMAGE_ENGINE", "") or "").strip()
+        if not model:
+            model = (getattr(config, "IMAGE_MODEL", "") or "").strip()
+
+        # 3. GlobalModelManager 기본값
         if not engine or not model:
             try:
                 from model_manager import GlobalModelManager
@@ -163,11 +181,13 @@ class ImageCreatorHub:
                     engine = (GlobalModelManager.get_role_engine("image") or "").strip()
                 if not model:
                     model = (GlobalModelManager.get_role_model("image") or "").strip()
-            except Exception:
-                pass
+            except Exception as _mm_err:
+                logger.debug(f"[ImageCreatorHub] GlobalModelManager fallback note: {_mm_err}")
+
         engine = (engine or "agy").lower()
         model = model or "gemini-3.8-flash-high"
         return engine, model
+
 
     @classmethod
     def resolve_backend_model_hint(cls, engine: str, model: str) -> str:
@@ -994,7 +1014,29 @@ class ImageCreatorHub:
         if not requests:
             return []
         results: List[ImageGenerationResult] = []
+        channel_id = getattr(session, "channel_id", None) if session else None
+        engine, model = cls.resolve_role_engine_model(channel_id=channel_id)
+        model_display = model
+        try:
+            from model_manager import GlobalModelManager
+            model_display = GlobalModelManager.format_model_name(model)
+        except Exception:
+            pass
+
         for req in requests[:max_requests]:
+            # 🎨 [Pre-hook 사전 알림] 이미지 생성 시작 전 전용 채널(1549422783803691058)에 시작 알림 전송
+            try:
+                bot_client = getattr(session, "_bot_client", None) or getattr(session, "bot", None)
+                asyncio.create_task(cls.send_pre_hook_notification(
+                    bot_client=bot_client,
+                    prompt=req.get("prompt", ""),
+                    model_display=model_display,
+                    asset_name=req.get("asset_name", ""),
+                    origin_channel_id=channel_id,
+                ))
+            except Exception as _pre_err:
+                logger.debug(f"[ImageCreatorHub] Pre-hook notification skipped: {_pre_err}")
+
             res = await cls.generate(
                 prompt=req.get("prompt", ""),
                 workspace=workspace,
@@ -1099,25 +1141,98 @@ class ImageCreatorHub:
         return f"⚠️ **[Image generator 실패]** 실제 AI 이미지 생성에 실패했습니다. 사유: {reasons}{extra}"
 
     @classmethod
+    async def send_pre_hook_notification(
+        cls,
+        bot_client: Optional[Any],
+        prompt: str,
+        model_display: str,
+        asset_name: str,
+        origin_channel_id: Optional[int] = None,
+        origin_channel: Optional[Any] = None,
+    ) -> bool:
+        """
+        이미지 생성 시작 전 #nano-banana-image (1549422783803691058) 채널에 사전 알림을 전송한다.
+        DISCORD_AGY_IMAGE_BOT_TOKEN 기반 이미지 봇을 우선 사용하고, 미설정 시 bot_client 로 폴백하되 경고를 표기한다.
+        """
+        try:
+            import discord
+            import sys
+            main = sys.modules.get("__main__") or sys.modules.get("bot")
+            active_img_bot = getattr(main, "image_bot", None) if main else None
+            tok = getattr(config, "DISCORD_AGY_IMAGE_BOT_TOKEN", None)
+
+            used_bot = None
+            is_fallback = False
+            if active_img_bot and getattr(active_img_bot, "is_ready", lambda: False)():
+                used_bot = active_img_bot
+            elif bot_client and getattr(bot_client, "is_ready", lambda: False)():
+                used_bot = bot_client
+                if not tok:
+                    is_fallback = True
+
+            if not used_bot:
+                logger.debug("[ImageCreatorHub] Pre-hook: No active discord bot available.")
+                return False
+
+            channel_id = getattr(config, "NANO_BANANA_IMAGE_CHANNEL_ID", 1549422783803691058)
+            target = used_bot.get_channel(channel_id) if channel_id else None
+            if target is None and channel_id and hasattr(used_bot, "fetch_channel"):
+                try:
+                    target = await used_bot.fetch_channel(channel_id)
+                except Exception as _fc_err:
+                    logger.debug(f"[ImageCreatorHub] fetch_channel notice: {_fc_err}")
+
+            fallback_note = "\n⚠️ *(DISCORD_AGY_IMAGE_BOT_TOKEN 미설정으로 메인 봇 폴백 작동)*" if is_fallback else ""
+            origin_note = f"\n• 요청 출처: <#{origin_channel_id}>" if origin_channel_id else ""
+            clean_prompt = prompt[:160] + ("..." if len(prompt) > 160 else "")
+            clean_asset = asset_name or "asset"
+            msg = (
+                f"🎨 **[{model_display}]** 봇이 이미지 생성을 시작합니다.\n"
+                f"• 에셋명: `{clean_asset}.png`\n"
+                f"• 요청 프롬프트: {clean_prompt}"
+                f"{origin_note}"
+                f"{fallback_note}"
+            )
+            if target:
+                try:
+                    await target.send(msg)
+                    return True
+                except Exception as send_err:
+                    logger.error(f"[ImageCreatorHub] Pre-hook send to channel {channel_id} failed: {send_err}")
+                    if origin_channel and hasattr(origin_channel, "send"):
+                        try:
+                            await origin_channel.send(
+                                f"⚠️ **[이미지 스튜디오 채널 전송 경고]** <#{channel_id}> 사전 알림 실패: `{send_err}`"
+                            )
+                        except Exception:
+                            pass
+            return False
+        except Exception as e:
+            logger.warning(f"[ImageCreatorHub] send_pre_hook_notification failed: {e}")
+            return False
+
+    @classmethod
     async def dispatch_to_studio(
         cls,
         bot_client: Optional[Any],
         result: ImageGenerationResult,
         origin_channel_id: Optional[int] = None,
+        origin_channel: Optional[Any] = None,
     ) -> bool:
         """생성 이미지를 #nano-banana-image 스튜디오 채널에 아카이빙한다 (best-effort)."""
         if not bot_client or not result.absolute_path or not os.path.isfile(result.absolute_path):
             return False
+        channel_id = getattr(config, "NANO_BANANA_IMAGE_CHANNEL_ID", 1549422783803691058)
         try:
             import discord
-            channel_id = getattr(config, "NANO_BANANA_IMAGE_CHANNEL_ID", 0)
             target = bot_client.get_channel(channel_id) if channel_id else None
-            if target is None and channel_id:
+            if target is None and channel_id and hasattr(bot_client, "fetch_channel"):
                 try:
                     target = await bot_client.fetch_channel(channel_id)
                 except Exception:
                     target = None
             if target is None:
+                logger.warning(f"[ImageCreatorHub] Studio channel {channel_id} could not be resolved.")
                 return False
             origin = "실제 AI 생성" if result.is_real_ai else "⚠️ 절차적 임시 에셋(AI 생성 실패)"
             embed = discord.Embed(
@@ -1137,7 +1252,14 @@ class ImageCreatorHub:
             await target.send(embed=embed, file=discord.File(result.absolute_path, filename=f"{result.asset_name}.png"))
             return True
         except Exception as e:
-            logger.debug(f"[ImageCreatorHub] studio dispatch skipped: {e}")
+            logger.error(f"[ImageCreatorHub] Studio dispatch failed to channel {channel_id}: {e}")
+            if origin_channel and hasattr(origin_channel, "send"):
+                try:
+                    await origin_channel.send(
+                        f"⚠️ **[Image generator 스튜디오 전송 오류]** 채널 <#{channel_id}> 아카이빙 실패: `{e}`"
+                    )
+                except Exception:
+                    pass
             return False
 
     # ------------------------------------------------------------------

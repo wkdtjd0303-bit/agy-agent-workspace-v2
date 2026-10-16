@@ -69,6 +69,8 @@ class Milestone5W1HPlan:
     intent_coverage: str = ""     # "5/5" 형태의 요구사항 커버리지 요약
     visual_gap_analysis: str = "" # [📸 스크린샷 실측 제품 결손] 실 렌더링 E2E 화면 비전 분석 요약
     product_value_analysis: str = "" # [📦 제품 가치 기획] 아직 없는 사용자 체감 신규 기능 (품질 하드닝 대체)
+    decision: str = "CONTINUE"   # [Stop or Go] "CONTINUE" 또는 "COMPLETE"
+
 
     def coverage_summary(self) -> str:
         """Human-readable 'covered/total' summary of the intent coverage contract."""
@@ -140,6 +142,12 @@ class Milestone5W1HPlan:
             embed.add_field(
                 name="🎨 디자인 & 에셋",
                 value=self.visual_asset_spec[:1000],
+                inline=False
+            )
+        if (self.decision or "").upper() == "COMPLETE":
+            embed.add_field(
+                name="🏁 사령관 판정",
+                value="에픽 완결 (COMPLETE): 모든 핵심 요구사항이 온전히 달성되었습니다.",
                 inline=False
             )
         embed.set_footer(text=f"!stop으로 중단 가능 | {engine_disp}")
@@ -244,6 +252,12 @@ class Milestone5W1HPlan:
                 "",
                 "🎨 **디자인 & 에셋 지침**",
                 self.visual_asset_spec
+            ])
+
+        if (self.decision or "").upper() == "COMPLETE":
+            parts.extend([
+                "",
+                "🏁 **[사령관 마일스톤 판정: 에픽 완결 (COMPLETE)]** 모든 핵심 요구사항이 온전히 달성되었습니다."
             ])
 
         parts.extend([
@@ -370,6 +384,11 @@ class Milestone5W1HPlan:
 
         if user_prompt and not user_prompt.strip().startswith("[📍 Roadmap Ladder") and not user_prompt.strip().startswith("[Zero-Production-Diff]"):
             directive += f"\n\n**[사용자 원본 지시]:**\n{user_prompt[:400]}"
+
+        decision_val = (self.decision or "CONTINUE").upper()
+        if decision_val not in ("COMPLETE", "CONTINUE"):
+            decision_val = "CONTINUE"
+        directive += f"\n\n[COMMANDER_DECISION: {decision_val}]\n"
 
         return directive
 
@@ -3474,7 +3493,8 @@ class Commander:
                             visual_asset_spec=visual_asset_spec,
                             visual_approved=visual_approved,
                             source="ai",
-                            quality_contracts=parsed_qcs
+                            quality_contracts=parsed_qcs,
+                            decision=str(data.get("decision", "CONTINUE")).strip().upper() if str(data.get("decision", "")).strip().upper() in ("COMPLETE", "CONTINUE") else "CONTINUE"
                         )
                         # 🎯 커버리지 계약: AI가 생성한 플랜도 사용자 요청을 1:1로 담았는지 감사.
                         ai_plan = cls.apply_intent_coverage(
@@ -5231,7 +5251,8 @@ class Commander:
             f'    {{"id": "QC-V-01", "category": "visual", "description": "시각 에셋 적용", "level": 2, "verification_rule": "단색 사각형 대신 이미지/스프라이트 렌더링"}}\n'
             f'  ],\n'
             f'  "visual_asset_spec": "시각 에셋 승인 규격 (필요 시 Rule 8 Type A/Type B, 불필요 시 불필요 명시)",\n'
-            f'  "visual_approved": true\n'
+            f'  "visual_approved": true,\n'
+            f'  "decision": "CONTINUE" (or "COMPLETE" if all requirements are fully satisfied and no more development is needed)\n'
             f"}}\n"
         )
 
@@ -5315,7 +5336,8 @@ class Commander:
                             source="feedback" if is_locked else "ai",
                             quality_contracts=parsed_qcs,
                             delta_analysis=delta_analysis,
-                            thinking_process=final_thinking
+                            thinking_process=final_thinking,
+                            decision=str(data.get("decision", "CONTINUE")).strip().upper() if str(data.get("decision", "")).strip().upper() in ("COMPLETE", "CONTINUE") else "CONTINUE"
                         )
                         ai_plan.directive_for_coder = ai_plan.build_directive_for_coder(
                             macro_memory_text=macro_memory_text,

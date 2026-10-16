@@ -1561,9 +1561,19 @@ async def _fire_auto_channel_wakeup(channel_id: int, message: str, cfg: Dict[str
         logger.warning(f"[AutoScheduler] Failed to send wakeup banner to {channel_id}: {e}")
         return False
 
-    wake_msg = _ScheduledWakeMessage(channel, message)
-    asyncio.create_task(execute_channel_prompt(wake_msg, message))
+    # 📊 [!auto PDCA 지표 컨텍스트 주입]
+    pdca_block = ""
+    try:
+        from auto_scheduler import AutoMetricsHistory
+        pdca_block = AutoMetricsHistory.format_pdca_context(channel_id)
+    except Exception as _pdca_err:
+        logger.debug(f"[AutoScheduler] PDCA context creation skipped: {_pdca_err}")
+
+    full_prompt = f"{message}{pdca_block}" if pdca_block else message
+    wake_msg = _ScheduledWakeMessage(channel, full_prompt)
+    asyncio.create_task(execute_channel_prompt(wake_msg, full_prompt))
     return True
+
 
 
 async def ensure_auto_scheduler_started() -> bool:
@@ -6100,6 +6110,47 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
                     logger.info(f"[Mode 3 !done] Stopped after completing {completed_title} as requested by user.")
                     return
 
+                # 🛑 [Commander Epic Loop Guard: 하드 리밋 & 수확 체감 감지]
+                session._commander_cycle_count = int(getattr(session, "_commander_cycle_count", 0) or 0) + 1
+                from round_control import COMMANDER_MAX_CYCLES, parse_commander_decision, detect_diminishing_returns
+                cmd_ch = commander_bot.get_channel(message.channel.id) if (commander_bot and commander_bot.is_ready()) else None
+                target_sender = cmd_ch or message.channel
+
+                # 1) 최대 에픽 사이클 상한 도달 시 정상 완결
+                if session._commander_cycle_count >= COMMANDER_MAX_CYCLES:
+                    session.set_status("idle", f"🏁 최대 마일스톤 에픽 상한({COMMANDER_MAX_CYCLES}회) 도달로 정상 완료")
+                    await safe_send_discord_message(
+                        target_sender,
+                        f"🏁 **[Mode 3 자율 순환 최종 완결 — 최대 사이클({COMMANDER_MAX_CYCLES}회) 도달]**\n"
+                        f"✅ 마일스톤 `{completed_title}` 승인 완료 및 전체 {session._commander_cycle_count}개 에픽 개발이 성공적으로 완료되었습니다!\n"
+                        f"• 사유: 무한 루프 방지 상한({COMMANDER_MAX_CYCLES}회)에 도달하여 시스템을 안전한 대기(idle) 상태로 전환합니다.\n\n"
+                        f"💡 추가 개발이 필요하시면 새 명령어나 `{COMMAND_PREFIX}mode 3`을 입력해 주세요."
+                    )
+                    logger.info(f"[Mode 3 Auto-Cycle] Reached COMMANDER_MAX_CYCLES ({COMMANDER_MAX_CYCLES}). Terminated gracefully.")
+                    return
+
+                # 2) 수확 체감(Diminishing Returns) 감지 시 정상 완결
+                current_diff_info = EvidenceValidator.inspect_production_diff(session.workspace or "")
+                current_diff_lines = current_diff_info.get("prod_diff_lines", 0)
+                prev_diff_lines = getattr(session, "_last_milestone_diff_lines", None)
+                session._last_milestone_diff_lines = current_diff_lines
+
+                if prev_diff_lines is not None:
+                    is_diminishing, dim_reason = detect_diminishing_returns(
+                        prev_diff_lines, current_diff_lines, session._commander_cycle_count
+                    )
+                    if is_diminishing:
+                        session.set_status("idle", f"🏁 수확 체감 감지({dim_reason})로 자율 개발 정상 완료")
+                        await safe_send_discord_message(
+                            target_sender,
+                            f"🏁 **[Mode 3 자율 순환 수렴 완료 — 수확 체감 감지]**\n"
+                            f"✅ 마일스톤 `{completed_title}`까지의 핵심 기능이 모두 수렴되었습니다.\n"
+                            f"• 판정 사유: {dim_reason}\n"
+                            f"• 추가 코드 변경량이 미미하여 불필요한 반복 핑퐁을 방지하고 시스템을 정상 대기(idle) 상태로 종결합니다."
+                        )
+                        logger.info(f"[Mode 3 Auto-Cycle] Diminishing returns detected: {dim_reason}. Terminated gracefully.")
+                        return
+
                 # [🛡️ Early Quota Protection] Check Gemini quota before calling Commander 5W1H planner
                 cmd_ch = commander_bot.get_channel(message.channel.id) if (commander_bot and commander_bot.is_ready()) else None
                 target_sender = cmd_ch or message.channel
@@ -6153,7 +6204,24 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
                 # [🎨 Visual Craft Loop 연동] 차기 마일스톤 5W1H 플랜(도메인/시각 에셋 승인/QC) 바인딩
                 session._current_5w1h_plan = next_plan_5w1h
                 next_title = f"{next_plan_5w1h.version} — {next_plan_5w1h.title}"
+
+                # 3) Commander 기획의 명시적 완료 판정([COMMANDER_DECISION: COMPLETE]) 감지
+                cmd_decision = parse_commander_decision(next_plan_5w1h.directive_for_coder or "") or getattr(next_plan_5w1h, "decision", "")
+                if cmd_decision == "COMPLETE":
+                    session.set_status("idle", "🏁 Commander 최종 목표 달성 판단으로 자율 개발 완료")
+                    await safe_send_discord_message(
+                        target_sender,
+                        f"🎉 **[Mode 3 자율 개발 최종 완결 — [COMMANDER_DECISION: COMPLETE]]**\n"
+                        f"👑 **Commander 판정**: 프로젝트 목표 달성률 및 가치가 충분하여 자율 사이클을 완결합니다!\n"
+                        f"• 직전 마일스톤: `{completed_title}` (Auditor 최종 승인 완료)\n"
+                        f"• 사유: 핵심 기능과 비즈니스 로직이 프로덕션 표준으로 완결되었습니다.\n\n"
+                        f"💡 추가 기능이 필요하시면 새로운 지시사항을 입력해 주세요."
+                    )
+                    logger.info("[Mode 3 Auto-Cycle] Commander decided COMPLETE. Terminated gracefully.")
+                    return
+
                 mode3_next_dispatched = True
+
 
                 logger.info(
                     f"[Mode 3 Auto-Cycle] Milestone '{completed_title}' approved. "
