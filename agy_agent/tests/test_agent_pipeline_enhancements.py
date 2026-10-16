@@ -207,6 +207,120 @@ class TestAgentPipelineEnhancements(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_image_pre_hook_fallback_to_origin_channel(self):
+        """스튜디오 채널 캐시 미스 및 fetch 실패 시 요청 출처 채널로 폴백 전송 검증"""
+        import asyncio
+
+        mock_bot = MagicMock()
+        mock_bot.is_ready.return_value = True
+        mock_bot.get_channel.return_value = None
+        mock_bot.fetch_channel = AsyncMock(side_effect=Exception("Channel not found / Forbidden"))
+
+        mock_origin = MagicMock()
+        mock_origin.send = AsyncMock()
+
+        async def _run():
+            ok = await ImageCreatorHub.send_pre_hook_notification(
+                bot_client=mock_bot,
+                prompt="아이콘 에셋 생성",
+                model_display="Gemini 3.8 Flash",
+                asset_name="app_icon",
+                origin_channel_id=111222,
+                origin_channel=mock_origin,
+            )
+            self.assertTrue(ok)
+            mock_origin.send.assert_called_once()
+            sent_msg = mock_origin.send.call_args[0][0]
+            self.assertIn("app_icon.png", sent_msg)
+            self.assertIn("접근 불가로 요청 채널에 직접 안내", sent_msg)
+
+        asyncio.run(_run())
+
+    def test_detect_premature_turn_stop_with_50_chars_waiting_message(self):
+        """50자 이상인 한글 대기성/진행성 문구도 조기 종료로 정확히 탐지되는지 검증"""
+        sample_54_chars = "현재 진행 중인 테스트가 완료될 때까지 대기하고 있습니다. 완료되는 대로 배포 절차를 진행하겠습니다."
+        self.assertGreaterEqual(len(sample_54_chars), 50)
+        premature, reason = detect_premature_turn_stop(sample_54_chars)
+        self.assertTrue(premature)
+        self.assertIn("미래 시제/대기", reason)
+
+        # Fallback 조건 시뮬레이션: len >= 50 이지만 is_still_premature 가 True 이므로 [TURN_DONE] 부착 불가
+        is_still_premature, _ = detect_premature_turn_stop(sample_54_chars)
+        can_attach = not has_turn_done_marker(sample_54_chars) and len(sample_54_chars.strip()) >= 50 and not is_still_premature
+        self.assertFalse(can_attach)
+
+    def test_commander_decision_priority_complete_overrides_continue(self):
+        """directive_for_coder 본문 템플릿과 무관하게 decision='COMPLETE'가 최우선 완결로 판정되는지 검증"""
+        plan = Milestone5W1HPlan(
+            version="v2.0",
+            title="최종 검증 완료",
+            domain="saas_web",
+            why="완결",
+            what=["완결"],
+            how="완결",
+            who_where="agy_agent",
+            when_acceptance=["완결"],
+            decision="COMPLETE"
+        )
+        # 만약 directive 에 기본 텍스트 CONTINUE 가 남아있더라도
+        mock_directive = "작업 지침\n[COMMANDER_DECISION: CONTINUE]\n끝"
+        plan_dec = str(getattr(plan, "decision", "") or "").strip().upper()
+        directive_dec = parse_commander_decision(mock_directive).upper()
+        resolved_decision = "COMPLETE" if (plan_dec == "COMPLETE" or directive_dec == "COMPLETE") else (plan_dec or directive_dec)
+        self.assertEqual(resolved_decision, "COMPLETE")
+
+    def test_auto_metrics_history_sliding_window_ten_items(self):
+        """!auto PDCA 이력 저장 시 채널별 최근 10개만 유지하는 슬라이딩 윈도우 검증"""
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_history_file = Path(tmpdir) / "test_sliding_history.json"
+            AutoMetricsHistory._cache = None
+            with patch("auto_scheduler.METRICS_HISTORY_FILE", test_history_file), \
+                 patch("auto_scheduler.STATE_DIR", Path(tmpdir)):
+                for i in range(1, 16):
+                    AutoMetricsHistory.record_cycle(
+                        channel_id=99999,
+                        target_metrics={"iteration": i},
+                        action_taken=f"{i}번째 테스트 실행",
+                        observed_result=f"{i} 성공",
+                        hypothesis_delta="정상",
+                        max_entries=10
+                    )
+
+                history = AutoMetricsHistory.get_history(99999, limit=100)
+                self.assertEqual(len(history), 10)
+                # 6번째부터 15번째까지 유지
+                self.assertEqual(history[0]["cycle"], 6)
+                self.assertEqual(history[-1]["cycle"], 15)
+
+    def test_auto_metrics_history_record_turn_output(self):
+        """!auto 턴 완료 후 에이전트 출력에서 액션/결과/가설 자동 추출 및 기록 검증"""
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_history_file = Path(tmpdir) / "test_turn_output_history.json"
+            AutoMetricsHistory._cache = None
+            with patch("auto_scheduler.METRICS_HISTORY_FILE", test_history_file), \
+                 patch("auto_scheduler.STATE_DIR", Path(tmpdir)):
+                sample_prompt = "인스타그램 릴스 조회수 증대를 위한 썸네일 A/B 테스트 지시"
+                sample_response = (
+                    "### 📊 성과 요약 보고\n"
+                    "릴스 썸네일 3종을 실서비스에 배포 완료했습니다.\n"
+                    "평균 시청 유지시간이 12% 상승하였으며 노출 수가 전주 대비 2,000회 증가했습니다.\n\n"
+                    "다음 회차에서는 첫 3초 훅 사운드 최적화 개선을 권장합니다."
+                )
+
+                entry = AutoMetricsHistory.record_turn_output(
+                    channel_id="77777",
+                    prompt=sample_prompt,
+                    response=sample_response,
+                    workspace=None
+                )
+                self.assertIsNotNone(entry)
+                self.assertEqual(entry["cycle"], 1)
+                self.assertIn("인스타그램 릴스", entry["action_taken"])
+                self.assertIn("릴스 썸네일", entry["observed_result"])
+                self.assertIn("개선", entry["hypothesis_delta"])
+
 
 if __name__ == "__main__":
     unittest.main()

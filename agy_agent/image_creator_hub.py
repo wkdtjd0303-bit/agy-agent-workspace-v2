@@ -1024,18 +1024,21 @@ class ImageCreatorHub:
             pass
 
         for req in requests[:max_requests]:
-            # 🎨 [Pre-hook 사전 알림] 이미지 생성 시작 전 전용 채널(1549422783803691058)에 시작 알림 전송
+            # 🎨 [Pre-hook 사전 알림] 이미지 생성 시작 전 전용 채널(1549422783803691058)에 시작 알림 확정 전송 (순서 보장: await + 5초 타임아웃)
             try:
                 bot_client = getattr(session, "_bot_client", None) or getattr(session, "bot", None)
-                asyncio.create_task(cls.send_pre_hook_notification(
-                    bot_client=bot_client,
-                    prompt=req.get("prompt", ""),
-                    model_display=model_display,
-                    asset_name=req.get("asset_name", ""),
-                    origin_channel_id=channel_id,
-                ))
+                await asyncio.wait_for(
+                    cls.send_pre_hook_notification(
+                        bot_client=bot_client,
+                        prompt=req.get("prompt", ""),
+                        model_display=model_display,
+                        asset_name=req.get("asset_name", ""),
+                        origin_channel_id=channel_id,
+                    ),
+                    timeout=5.0
+                )
             except Exception as _pre_err:
-                logger.debug(f"[ImageCreatorHub] Pre-hook notification skipped: {_pre_err}")
+                logger.debug(f"[ImageCreatorHub] Pre-hook notification note: {_pre_err}")
 
             res = await cls.generate(
                 prompt=req.get("prompt", ""),
@@ -1193,19 +1196,37 @@ class ImageCreatorHub:
                 f"{origin_note}"
                 f"{fallback_note}"
             )
+            sent_ok = False
             if target:
                 try:
                     await target.send(msg)
+                    sent_ok = True
                     return True
                 except Exception as send_err:
-                    logger.error(f"[ImageCreatorHub] Pre-hook send to channel {channel_id} failed: {send_err}")
-                    if origin_channel and hasattr(origin_channel, "send"):
+                    logger.warning(f"[ImageCreatorHub] Pre-hook send to studio channel {channel_id} failed: {send_err}")
+
+            # [스튜디오 채널 부재/전송 실패 시 요청 출처 채널로 폴백 전송]
+            if not sent_ok:
+                origin_target = origin_channel
+                if origin_target is None and origin_channel_id and hasattr(used_bot, "get_channel"):
+                    origin_target = used_bot.get_channel(origin_channel_id)
+                    if origin_target is None and hasattr(used_bot, "fetch_channel"):
                         try:
-                            await origin_channel.send(
-                                f"⚠️ **[이미지 스튜디오 채널 전송 경고]** <#{channel_id}> 사전 알림 실패: `{send_err}`"
-                            )
-                        except Exception:
-                            pass
+                            origin_target = await used_bot.fetch_channel(origin_channel_id)
+                        except Exception as _f_err:
+                            logger.debug(f"[ImageCreatorHub] origin fetch_channel notice: {_f_err}")
+
+                if origin_target and hasattr(origin_target, "send"):
+                    try:
+                        fallback_msg = (
+                            f"{msg}\n"
+                            f"*(⚠️ 전용 스튜디오 채널 <#{channel_id}> 접근 불가로 요청 채널에 직접 안내합니다)*"
+                        )
+                        await origin_target.send(fallback_msg)
+                        return True
+                    except Exception as _fallback_err:
+                        logger.warning(f"[ImageCreatorHub] Pre-hook fallback to origin channel failed: {_fallback_err}")
+
             return False
         except Exception as e:
             logger.warning(f"[ImageCreatorHub] send_pre_hook_notification failed: {e}")

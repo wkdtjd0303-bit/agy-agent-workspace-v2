@@ -1676,6 +1676,7 @@ class TrioAgentRunner:
                 # 턴을 마치는 것을 방지하며, 반드시 [TURN_DONE] 완료 토큰이 포함될 때까지 최대 2회 재촉한다.
                 self_continue_round = 0
                 is_premature, premature_reason = detect_premature_turn_stop(latest_coder_output)
+                intermediate_msgs = []
                 while (
                     self_continue_round < 2
                     and is_premature
@@ -1688,6 +1689,18 @@ class TrioAgentRunner:
                         f"TrioAgentRunner: Coder premature stop detected ({self_continue_round}/2): {premature_reason}. "
                         "Triggering in-flight self-continue loop to finish remaining implementation..."
                     )
+                    # 만약 중간 안내 메시지가 발송되면 기록해두고 이후 깔끔히 정리
+                    try:
+                        imsg = await safe_send_discord_message(
+                            main_channel,
+                            f"⏳ **[작업 완결 자가 재촉 ({self_continue_round}/2)]** Coder 조기 종료({premature_reason}) 감지. "
+                            "중간 안내 텍스트를 정리하고 최종 구현 및 검증을 계속 진행합니다..."
+                        )
+                        if imsg:
+                            intermediate_msgs.append(imsg)
+                    except Exception:
+                        pass
+
                     continue_prompt = (
                         "⚠️ **[사령관 긴급 재촉구: 중간 대기 안내 출력 금지 및 작업 완결 의무]**\n"
                         f"직전 응답은 실제 작업을 마치지 않고 중간 대기/진행 안내({premature_reason})로 조기 종료되었습니다.\n"
@@ -1705,8 +1718,16 @@ class TrioAgentRunner:
                             AutonomySafetyLayer.record_llm_call(channel_id)
                     is_premature, premature_reason = detect_premature_turn_stop(latest_coder_output)
 
-                # 2회 재촉 후에도 마커가 없으나 충분한 내용(실제 구현 보고)이 있다면 안전 부착
-                if not has_turn_done_marker(latest_coder_output) and len(latest_coder_output.strip()) >= 50:
+                # 재촉 중 발송된 중간 안내 메시지 삭제/정리 (디스코드 채팅창 깔끔화)
+                for _im in intermediate_msgs:
+                    try:
+                        await _im.delete()
+                    except Exception as _del_err:
+                        logger.debug(f"TrioAgentRunner: intermediate message delete skipped: {_del_err}")
+
+                # 2회 재촉 후에도 마커가 없으나, 조기 종료/대기성 문구가 전혀 없는 실제 구현 보고(50자 이상)인 경우에만 안전 부착
+                is_still_premature, _ = detect_premature_turn_stop(latest_coder_output)
+                if not has_turn_done_marker(latest_coder_output) and len(latest_coder_output.strip()) >= 50 and not is_still_premature:
                     latest_coder_output = f"{latest_coder_output.rstrip()}\n\n{TURN_DONE_MARKER}"
 
                 # 🎨 [Image generator Tool] Coder가 이미지 생성을 요청한 경우 즉시 도구 호출

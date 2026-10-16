@@ -638,13 +638,14 @@ class AutoMetricsHistory:
     @classmethod
     def record_cycle(
         cls,
-        channel_id: int,
+        channel_id: Union[int, str],
         target_metrics: Optional[Dict[str, Any]] = None,
         action_taken: str = "",
         observed_result: str = "",
         hypothesis_delta: str = "",
+        max_entries: int = 10,
     ) -> Dict[str, Any]:
-        """한 주기의 PDCA 실행 내역을 기록한다."""
+        """한 주기의 PDCA 실행 내역을 기록한다 (슬라이딩 윈도우: 최근 max_entries 개 유지)."""
         data = cls._ensure_loaded()
         cid = str(channel_id)
         if cid not in data:
@@ -652,7 +653,8 @@ class AutoMetricsHistory:
 
         now_ts = _now()
         date_str = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M:%S")
-        cycle_num = len(data[cid]) + 1
+        prev_cycle = int(data[cid][-1].get("cycle", 0)) if data[cid] else 0
+        cycle_num = prev_cycle + 1
 
         entry = {
             "cycle": cycle_num,
@@ -660,28 +662,90 @@ class AutoMetricsHistory:
             "date_str": date_str,
             "target_metrics": target_metrics or {},
             "action_taken": action_taken or "정기 점검 및 개선 작업",
-            "observed_result": observed_result,
-            "hypothesis_delta": hypothesis_delta,
+            "observed_result": observed_result or "작업 정상 완료",
+            "hypothesis_delta": hypothesis_delta or "지표 데이터 수집 중",
         }
         data[cid].append(entry)
+        if max_entries and len(data[cid]) > max_entries:
+            data[cid] = data[cid][-max_entries:]
         cls._save()
         return entry
 
     @classmethod
-    def get_history(cls, channel_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+    def record_turn_output(
+        cls,
+        channel_id: Union[int, str],
+        prompt: str = "",
+        response: str = "",
+        workspace: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        !auto 턴 완료 후 에이전트 최종 출력(response)에서 요약, 액션, 가설을 추출하여
+        PDCA 이력에 자동 기록한다.
+        """
+        try:
+            cid = str(channel_id)
+            clean_resp = (response or "").strip()
+            clean_prompt = (prompt or "").strip()
+
+            # 1. 액션 추출 (프롬프트 첫 줄 또는 주요 목적)
+            action_lines = [l.strip() for l in clean_prompt.splitlines() if l.strip() and not l.startswith(("[", "•", "*", "#"))]
+            action_taken = action_lines[0][:100] if action_lines else "정기 자동화 점검 및 개선 작업"
+
+            # 2. 결과 관측 (응답 본문의 핵심 요약부)
+            resp_lines = [
+                l.strip() for l in clean_resp.splitlines()
+                if l.strip() and not l.strip().startswith(("```", "#", "---", "[STATUS:", "🎯"))
+            ]
+            observed_result = " ".join(resp_lines[:2])[:200] if resp_lines else "작업 정상 수행 완료"
+
+            # 3. 정량 측정 지표 (diff_lines / 변경 파일 수)
+            target_metrics: Dict[str, Any] = {}
+            if workspace and os.path.isdir(workspace):
+                try:
+                    from evidence_validator import EvidenceValidator
+                    diff_info = EvidenceValidator.inspect_production_diff(workspace)
+                    lines = diff_info.get("prod_diff_lines", 0)
+                    files = diff_info.get("prod_files_changed", 0)
+                    target_metrics["diff_lines"] = f"+{lines}L"
+                    target_metrics["files_changed"] = files
+                except Exception:
+                    pass
+
+            # 4. 가설 / 차기 개선점 추출
+            hypothesis_delta = "기능 정상 배포 및 성능 지표 모니터링"
+            for line in resp_lines:
+                if any(k in line for k in ("가설", "개선", "보완", "다음", "차기", "향후", "TODO", "권장")):
+                    hypothesis_delta = line[:150]
+                    break
+
+            return cls.record_cycle(
+                channel_id=cid,
+                target_metrics=target_metrics,
+                action_taken=action_taken,
+                observed_result=observed_result,
+                hypothesis_delta=hypothesis_delta,
+                max_entries=10
+            )
+        except Exception as e:
+            logger.warning(f"[AutoMetricsHistory] record_turn_output failed: {e}")
+            return None
+
+    @classmethod
+    def get_history(cls, channel_id: Union[int, str], limit: int = 5) -> List[Dict[str, Any]]:
         """채널의 최근 N회차 기록을 반환한다."""
         data = cls._ensure_loaded()
         records = data.get(str(channel_id), [])
         return records[-limit:] if limit else records
 
     @classmethod
-    def get_latest(cls, channel_id: int) -> Optional[Dict[str, Any]]:
+    def get_latest(cls, channel_id: Union[int, str]) -> Optional[Dict[str, Any]]:
         """채널의 직전 회차 기록을 반환한다."""
         hist = cls.get_history(channel_id, limit=1)
         return hist[-1] if hist else None
 
     @classmethod
-    def format_pdca_context(cls, channel_id: int) -> str:
+    def format_pdca_context(cls, channel_id: Union[int, str]) -> str:
         """
         차기 스케줄 실행 시 에이전트 프롬프트에 주입할 데이터 기반 PDCA 컨텍스트를 생성한다.
         """

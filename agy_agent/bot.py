@@ -1571,7 +1571,28 @@ async def _fire_auto_channel_wakeup(channel_id: int, message: str, cfg: Dict[str
 
     full_prompt = f"{message}{pdca_block}" if pdca_block else message
     wake_msg = _ScheduledWakeMessage(channel, full_prompt)
-    asyncio.create_task(execute_channel_prompt(wake_msg, full_prompt))
+
+    async def _run_and_record_auto_cycle():
+        try:
+            await execute_channel_prompt(wake_msg, full_prompt)
+        except Exception as _wake_err:
+            logger.error(f"[AutoScheduler] Error during scheduled wakeup execution: {_wake_err}")
+        finally:
+            try:
+                from auto_scheduler import AutoMetricsHistory
+                sess = session_manager.get_session(channel_id)
+                last_resp = getattr(sess, "_last_turn_response", "") or ""
+                AutoMetricsHistory.record_turn_output(
+                    channel_id=channel_id,
+                    prompt=message,
+                    response=last_resp,
+                    workspace=getattr(sess, "workspace", None)
+                )
+                logger.info(f"[AutoScheduler] Successfully ensured PDCA cycle record for channel {channel_id}.")
+            except Exception as _rec_err:
+                logger.debug(f"[AutoScheduler] Post-wakeup PDCA record notice: {_rec_err}")
+
+    asyncio.create_task(_run_and_record_auto_cycle())
     return True
 
 
@@ -5238,6 +5259,16 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
     session.set_busy(True, "⏳ 작업 준비 중...")
     session.current_task = asyncio.current_task()
 
+    # [Commander Epic Cycle] 사용자가 새로운 최상위 작업/요청을 시작할 때 사이클 카운트 초기화
+    # (Mode 3 자율 순환 내부 호출이 아닌 일반 사용자 입력일 때 0으로 리셋)
+    is_internal_auto_chain = (
+        prompt.strip().startswith("🎯 [Commander 사령관 5W1H 개발 지침")
+        or prompt.strip().startswith("🎯 [Commander")
+    )
+    if not is_internal_auto_chain:
+        session._commander_cycle_count = 0
+        session._last_milestone_diff_lines = None
+
     # Check ThermalGuard before starting execution
     await ThermalGuard.check_task_start_cooldown(message.channel)
 
@@ -5943,6 +5974,20 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
                 except Exception as _img_err:
                     logger.warning(f"Single-agent image request handling skipped: {_img_err}")
 
+        # Record last response on session for PDCA tracking & debugging
+        session._last_turn_response = str(final_response or "")
+        if isinstance(message, _ScheduledWakeMessage):
+            try:
+                from auto_scheduler import AutoMetricsHistory
+                AutoMetricsHistory.record_turn_output(
+                    channel_id=message.channel.id,
+                    prompt=prompt,
+                    response=str(final_response or ""),
+                    workspace=session.workspace
+                )
+            except Exception as _ar_err:
+                logger.debug(f"[AutoScheduler] Immediate PDCA recording note: {_ar_err}")
+
         # Update or delete status message
         await status_updater.delete()
 
@@ -6206,7 +6251,10 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
                 next_title = f"{next_plan_5w1h.version} — {next_plan_5w1h.title}"
 
                 # 3) Commander 기획의 명시적 완료 판정([COMMANDER_DECISION: COMPLETE]) 감지
-                cmd_decision = parse_commander_decision(next_plan_5w1h.directive_for_coder or "") or getattr(next_plan_5w1h, "decision", "")
+                # plan.decision 과 directive_for_coder 파싱 결과 중 하나라도 COMPLETE 이면 우선 완결 처리
+                plan_dec = str(getattr(next_plan_5w1h, "decision", "") or "").strip().upper()
+                directive_dec = parse_commander_decision(next_plan_5w1h.directive_for_coder or "").upper()
+                cmd_decision = "COMPLETE" if (plan_dec == "COMPLETE" or directive_dec == "COMPLETE") else (plan_dec or directive_dec)
                 if cmd_decision == "COMPLETE":
                     session.set_status("idle", "🏁 Commander 최종 목표 달성 판단으로 자율 개발 완료")
                     await safe_send_discord_message(

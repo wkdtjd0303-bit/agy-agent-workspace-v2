@@ -507,6 +507,8 @@ class ChannelSession:
         self.wait_for_green = False
         self.stop_after_current_cycle = False
         self.commander_macro_history = []
+        self._commander_cycle_count = 0
+        self._last_milestone_diff_lines = None
 
     def reset_cycle_workers(self):
         """
