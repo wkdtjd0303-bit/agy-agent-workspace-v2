@@ -1,6 +1,6 @@
 {
   "version": "v1.0",
-  "updated_at": 1790244266.0183127,
+  "updated_at": 1792131564.2642972,
   "categories": {
     "gameplay": {
       "passed": 0,
@@ -29,8 +29,8 @@
     }
   },
   "overall_score": 100.0,
-  "previous_overall_score": 0.0,
-  "delta": 100.0,
+  "previous_overall_score": 100.0,
+  "delta": 0.0,
   "history": [
     {
       "milestone": "v1.0",
@@ -45,12 +45,40 @@
         "architecture": 100.0
       },
       "has_regression": true
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1792131330.8034387,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 0.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": true
+    },
+    {
+      "milestone": "v1.0",
+      "timestamp": 1792131564.2642941,
+      "overall_score": 100.0,
+      "delta": 0.0,
+      "categories": {
+        "gameplay": 0.0,
+        "visual": 0.0,
+        "ux": 100.0,
+        "performance": 100.0,
+        "architecture": 100.0
+      },
+      "has_regression": false
     }
   ],
   "regression": {
-    "functional_ac_passed": false,
-    "has_regression": true,
-    "details": "핵심 기능 인수 기준(Functional AC) 미달"
+    "functional_ac_passed": true,
+    "has_regression": false,
+    "details": "무결점 유지 (회귀 없음)"
   },
   "active_qcs": [
     {

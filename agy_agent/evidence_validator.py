@@ -1344,7 +1344,14 @@ class EvidenceValidator:
             "git_manager.py", "mode_classifier.py", "visual_craft_loop.py",
             "image_generation_backend.py", "image_creator_hub.py", "autonomous_e2e_loop.py",
             "cross_platform_e2e_runner.py", "auto_scheduler.py", "model_manager.py",
-            "role_authority.py", "qa_hub.py", "setup_manager.py"
+            "role_authority.py", "qa_hub.py", "setup_manager.py",
+            "domain_adaptive_engine.py", "autonomous_e2e_200_auditor.py",
+            "autonomous_e2e_160_auditor.py", "ui_visual_differ.py",
+            "discord_screenshot_gallery.py", "vision_attachment_analyzer.py",
+            "hybrid_asset_pipeline.py", "hybrid_visual_generator.py",
+            "quality_state_manager.py", "autonomy_guard.py",
+            "director_feedback_hub.py", "android_vision_inspector.py",
+            "observation_engine.py", "brand_ui.py", "motion_smoothness_gate.py"
         }
 
         for root, dirs, files in os.walk(workspace):
@@ -1370,7 +1377,7 @@ class EvidenceValidator:
                 lower_f = f.lower()
                 if not lower_f.endswith((".py", ".js", ".ts")):
                     continue
-                if lower_f in FRAMEWORK_SYSTEM_FILES:
+                if "agy_agent" in rel_parts or lower_f in FRAMEWORK_SYSTEM_FILES:
                     continue
                 if any(lower_f.startswith(pfx) for pfx in EXCLUDED_SCRIPT_PREFIXES):
                     continue

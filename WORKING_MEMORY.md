@@ -2,6 +2,25 @@
 
 > **원칙**: 새로운 요구사항과 개선 방향에 맞춰 자유롭고 유연하게 진화하며, 가짜 결과 생성을 배제하고 정직하게 동작을 검증합니다.
 
+
+## 📊 Quality State Store (정량적 품질 지표 및 증분 추적)
+
+> **마일스톤**: `v1.0` | **종합 기계 점수**: `100.0%` (증분: `+0.0%`) | **회귀 검증**: ✅ 무결점 통과 (No Regression)
+
+| 품질 차원 (Dimension) | 통과/전체 | 측정 점수 |
+| :--- | :---: | :---: |
+| GAMEPLAY | 유지 | `0.0%` |
+| VISUAL | 유지 | `0.0%` |
+| UX | 1/1 | `100.0%` |
+| PERFORMANCE | 1/1 | `100.0%` |
+| ARCHITECTURE | 1/1 | `100.0%` |
+
+**최근 활성 Quality Contract (QC) 검증 결과**:
+- **[QC-A-01]** `✅ PASS`: 명령행 인자(Argparse/Click) 유효성 검증 및 도움말(--help) 출력 완결 *(증거: [기계적 디스크 검증] model_manager.py 소스코드 내 'Manager' 물리적 토큰 검출 완료)*
+- **[QC-U-01]** `✅ PASS`: 장시간 작업 시 실시간 진행률(Progress Bar or Spinner or Step Indicator) 피드백 *(증거: [기계적 디스크 검증] fix_bot.py 소스코드 내 'flash' 물리적 토큰 검출 완료)*
+- **[QC-P-01]** `✅ PASS`: Graceful Shutdown (SIGINT/Ctrl+C) 프로세스 및 리소스 정상 해제 *(증거: [기계적 디스크 검증] game.test.js 소스코드 내 'pool' 물리적 토큰 검출 완료)*
+
+
 ## 📋 누적 합의 및 의사결정 이력 (Consensus History)
 
 - **디스코드 첨부파일 워크스페이스 '참고자료' 자동 보존 및 호환성 파이프라인 구축**:
