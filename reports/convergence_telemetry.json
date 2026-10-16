@@ -1,14 +1,49 @@
 {
-  "channel_id": 999999999,
-  "observations": 0,
-  "marker_emission_rate": null,
-  "contract_active": false,
-  "improvement_observed": 0,
-  "improvements": [],
+  "channel_id": 1539483630089273435,
+  "observations": 2,
+  "marker_present": 2,
+  "heuristic_used": 0,
+  "unresolved": 0,
+  "resolved": 2,
+  "marker_emission_rate": 1.0,
+  "force_accepts": 0,
+  "escalations": 0,
+  "blocking_counts": [
+    2,
+    2
+  ],
+  "improvement_observed": 3,
+  "improvements": [
+    4,
+    4,
+    3
+  ],
+  "total_improvements": 11,
+  "improvement_severities": {
+    "P0": 1,
+    "P1": 2,
+    "P2": 5,
+    "P3": 3
+  },
+  "unlabeled_improvements": 0,
+  "blocking_improvements": 3,
+  "per_stage": {
+    "qa1": {
+      "observations": 2,
+      "marker": 2,
+      "heuristic": 0,
+      "none": 0,
+      "counts": [
+        2,
+        2
+      ]
+    }
+  },
+  "contract_active": true,
   "warnings": [
-    "관측 데이터 없음 — 수렴 계약이 한 번도 실행되지 않음"
+    "P0/P1(게이트 차단) 개선점이 관측됨 — 제품 PASS 전 해소 필요"
   ],
   "milestone": "",
-  "generated_at": "2026-10-15T23:33:56",
+  "generated_at": "2026-10-16T15:23:36",
   "schema": "convergence_telemetry/v1"
 }
