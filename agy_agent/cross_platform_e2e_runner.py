@@ -39,6 +39,21 @@ from hybrid_visual_generator import HybridVisualGenerator, GeneratedVisualAsset
 from e2e_performance_benchmark import E2EPerformanceBenchmarkEngine, BenchmarkMetricSnapshot, BenchmarkComparisonResult
 
 
+def _safe_run_coroutine(coro):
+    """Safely executes an async coroutine from sync context, even if an event loop is running."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(coro)).result()
+    else:
+        return asyncio.run(coro)
+
+
 class CrossPlatformE2ERunner:
     """
     Unified Cross-Platform Autonomous E2E Engine.
@@ -164,11 +179,27 @@ class CrossPlatformE2ERunner:
             logger.warning(f"Playwright Web E2E run encountered: {e}")
 
         # Evaluate through MechanicalGate
+        err_str = str(result.get("error") or "").lower()
+        is_env_blocked = any(
+            sig in err_str for sig in (
+                "executable doesn't exist",
+                "browser has not been downloaded",
+                "modulenotfounderror",
+                "no module named 'playwright'",
+                "host system is missing dependencies",
+            )
+        )
         checks = [
             MechanicalCheck(
                 name="web_navigation_success",
                 passed=result["success"],
-                details=f"Web navigation across {len(result['viewports_tested'])} viewports"
+                is_blocked=is_env_blocked,
+                status="BLOCKED" if is_env_blocked else ("PASS" if result["success"] else "FAIL"),
+                details=(
+                    f"Web navigation across {len(result['viewports_tested'])} viewports"
+                    if result["success"]
+                    else (f"Playwright environment blocked: {result.get('error')}" if is_env_blocked else f"Web navigation failed: {result.get('error')}")
+                )
             ),
             MechanicalGate.assert_action_trace_validity(result["actions"], min_actions=1)
         ]
@@ -625,7 +656,7 @@ class CrossPlatformE2ERunner:
         eff_target = target or discovery.artifact or discovery.execution_target
 
         if plat == "WEB":
-            res = asyncio.run(cls.run_web_e2e(target_url=eff_target, workspace=ws))
+            res = _safe_run_coroutine(cls.run_web_e2e(target_url=eff_target, workspace=ws))
         elif plat == "ANDROID":
             res = cls.run_android_e2e(target_apk_or_pkg=eff_target, workspace=ws)
         elif plat == "WINDOWS":
@@ -636,6 +667,97 @@ class CrossPlatformE2ERunner:
             raise ValueError(f"Unsupported cross-platform target: {plat}")
 
         # Standard Quantitative Benchmark Evaluation (Task 4)
+        try:
+            from telemetry_benchmark import QuantitativeBenchmarkEngine
+            bench_eval = QuantitativeBenchmarkEngine.evaluate_benchmarks(
+                workspace=ws,
+                telemetry_raw=res
+            )
+            res["quantitative_benchmarks"] = bench_eval
+            res["benchmark_table_markdown"] = bench_eval["table_markdown"]
+        except Exception as _be_err:
+            logger.warning(f"Telemetry benchmark evaluation failed: {_be_err}")
+            res["quantitative_benchmarks"] = {
+                "all_passed": False,
+                "has_unmeasured": True,
+                "summary": f"⚠️ 정량적 벤치마크 계측 실패: {_be_err}",
+                "error": str(_be_err),
+            }
+            res["benchmark_table_markdown"] = (
+                "### 📊 [정량적 E2E 계측 벤치마크]\n"
+                f"⚠️ **[계측 미실시/실패]**: {_be_err} (실측 텔레메트리 데이터를 수집할 수 없습니다.)"
+            )
+
+        res["discovery"] = discovery.to_dict()
+        return res
+
+    @classmethod
+    async def run_unified_cross_platform_e2e_async(
+        cls,
+        target: Optional[str] = None,
+        platform_override: Optional[str] = None,
+        workspace: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Async native variant of run_unified_cross_platform_e2e.
+        Awaits run_web_e2e directly and runs synchronous platform runners in worker threads.
+        """
+        ws = workspace or os.getcwd()
+
+        cls.cleanup_stale_processes_and_buffers(workspace=ws)
+        purge_result = AutonomousE2E160Auditor.execute_phase0_workspace_purge(ws)
+        logger.info(f"🧹 Phase 0 Purge completed: {purge_result['purged_count']} stale artifacts burned.")
+
+        discovery = cls.discover_platform_and_target(workspace=ws, explicit_target=target)
+        plat = platform_override or discovery.platform
+
+        if not discovery.is_runnable_on_host:
+            check_blocked = MechanicalCheck(
+                name="host_capability_prerequisite",
+                passed=False,
+                is_blocked=True,
+                status="BLOCKED",
+                details=discovery.unsupported_reason or "Target platform is not executable on this host environment"
+            )
+            gate_res = MechanicalGate.evaluate_gate(
+                gate_name=f"REQ-001_{plat}_E2E",
+                ai_verdict="FAIL",
+                checks=[check_blocked]
+            )
+            audit_200 = AutonomousE2E200Auditor.audit_session_200({
+                "platform": plat,
+                "is_blocked": True,
+                "checks": [check_blocked],
+                "discovery": discovery,
+                "has_zero_config_discovery": (discovery.confidence >= 0.7)
+            })
+            audit_160 = AutonomousE2E160Auditor.evaluate_160_point_checklist({
+                "is_environment_blocked": True
+            })
+            return {
+                "platform": plat,
+                "target": target or discovery.execution_target,
+                "discovery": discovery.to_dict(),
+                "overall_verdict": "BLOCKED",
+                "e2e_200_audit": audit_200,
+                "e2e_160_audit": audit_160,
+                "mechanical_gate": gate_res.to_dict(),
+                "unsupported_reason": discovery.unsupported_reason
+            }
+
+        eff_target = target or discovery.artifact or discovery.execution_target
+
+        if plat == "WEB":
+            res = await cls.run_web_e2e(target_url=eff_target, workspace=ws)
+        elif plat == "ANDROID":
+            res = await asyncio.to_thread(cls.run_android_e2e, target_apk_or_pkg=eff_target, workspace=ws)
+        elif plat == "WINDOWS":
+            res = await asyncio.to_thread(cls.run_windows_e2e, target_exe=eff_target, workspace=ws)
+        elif plat == "IOS":
+            res = await asyncio.to_thread(cls.run_ios_e2e, target_xcodeproj_or_app=eff_target, workspace=ws)
+        else:
+            raise ValueError(f"Unsupported cross-platform target: {plat}")
+
         try:
             from telemetry_benchmark import QuantitativeBenchmarkEngine
             bench_eval = QuantitativeBenchmarkEngine.evaluate_benchmarks(

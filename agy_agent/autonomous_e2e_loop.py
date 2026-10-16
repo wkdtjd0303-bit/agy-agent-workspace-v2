@@ -265,6 +265,28 @@ def detect_test_commands(workspace: str) -> List[Dict[str, Any]]:
             "argv": [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider"],
             "command": "python -m pytest -q",
         })
+    else:
+        # 워크스페이스 직하위 패키지/디렉터리(예: agy_agent/tests, src/tests 등) 내 테스트 구조 탐색
+        candidate_subdirs = [
+            d for d in _safe_listdir(ws)
+            if not d.startswith((".", "_"))
+            and d not in ("venv", ".venv", "env", "node_modules", "temp", "tmp", "dist", "build", "state", "reports")
+            and os.path.isdir(os.path.join(ws, d))
+        ]
+        for sub in candidate_subdirs:
+            sub_path = os.path.join(ws, sub)
+            if (
+                os.path.isdir(os.path.join(sub_path, "tests"))
+                or os.path.isfile(os.path.join(sub_path, "conftest.py"))
+                or os.path.isfile(os.path.join(sub_path, "pytest.ini"))
+                or any(f.startswith("test_") and f.endswith(".py") for f in _safe_listdir(sub_path))
+            ):
+                commands.append({
+                    "name": f"pytest:{sub}",
+                    "argv": [sys.executable, "-m", "pytest", sub, "-q", "--no-header", "-p", "no:cacheprovider"],
+                    "command": f"python -m pytest {sub} -q",
+                })
+                break
 
     # 2. Node (npm test) — package.json 에 실제 test 스크립트가 있을 때만
     pkg_json = os.path.join(ws, "package.json")
