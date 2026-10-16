@@ -1181,7 +1181,7 @@ class ImageCreatorHub:
             target = used_bot.get_channel(channel_id) if channel_id else None
             if target is None and channel_id and hasattr(used_bot, "fetch_channel"):
                 try:
-                    target = await used_bot.fetch_channel(channel_id)
+                    target = await asyncio.wait_for(used_bot.fetch_channel(channel_id), timeout=2.0)
                 except Exception as _fc_err:
                     logger.debug(f"[ImageCreatorHub] fetch_channel notice: {_fc_err}")
 
@@ -1212,7 +1212,7 @@ class ImageCreatorHub:
                     origin_target = used_bot.get_channel(origin_channel_id)
                     if origin_target is None and hasattr(used_bot, "fetch_channel"):
                         try:
-                            origin_target = await used_bot.fetch_channel(origin_channel_id)
+                            origin_target = await asyncio.wait_for(used_bot.fetch_channel(origin_channel_id), timeout=2.0)
                         except Exception as _f_err:
                             logger.debug(f"[ImageCreatorHub] origin fetch_channel notice: {_f_err}")
 

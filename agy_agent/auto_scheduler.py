@@ -712,12 +712,28 @@ class AutoMetricsHistory:
                 except Exception:
                     pass
 
-            # 4. 가설 / 차기 개선점 추출
+            # 4. 가설 / 차기 개선점 추출 (정규식 섹션 정밀 파싱 + 라인 폴백)
             hypothesis_delta = "기능 정상 배포 및 성능 지표 모니터링"
-            for line in resp_lines:
-                if any(k in line for k in ("가설", "개선", "보완", "다음", "차기", "향후", "TODO", "권장")):
-                    hypothesis_delta = line[:150]
-                    break
+            section_match = re.search(
+                r'###[^\n]*?(?:차기|다음|개선|가설|향후|todo)[^\n]*?\n(.*?)(?=\n###|\Z)',
+                clean_resp,
+                re.DOTALL | re.IGNORECASE
+            )
+            if section_match:
+                block_lines = [
+                    l.strip().lstrip("-*•123456789. ")
+                    for l in section_match.group(1).splitlines()
+                    if l.strip() and not l.strip().startswith(("|", "---", "#", "[STATUS:"))
+                ]
+                if block_lines:
+                    hypothesis_delta = " ".join(block_lines[:2])[:150]
+            else:
+                for line in resp_lines:
+                    if line.startswith(("|", "---", "#")):
+                        continue
+                    if any(k in line for k in ("가설", "개선", "보완", "다음", "차기", "향후", "TODO", "권장")):
+                        hypothesis_delta = line.lstrip("-*•123456789. ")[:150]
+                        break
 
             return cls.record_cycle(
                 channel_id=cid,

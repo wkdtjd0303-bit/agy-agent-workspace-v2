@@ -5229,7 +5229,7 @@ async def dispatch_next_in_queue(channel_id: int):
 
 qa_hub_manager.set_on_complete_callback(dispatch_next_in_queue)
 
-async def execute_channel_prompt(message: discord.Message, prompt: str):
+async def execute_channel_prompt(message: discord.Message, prompt: str, is_internal_auto_chain: bool = False):
     """
     [📺 채널 모델 스코프 진입점]
 
@@ -5244,7 +5244,7 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
     except Exception:
         _tok = None
     try:
-        return await _execute_channel_prompt_impl(message, prompt)
+        return await _execute_channel_prompt_impl(message, prompt, is_internal_auto_chain=is_internal_auto_chain)
     finally:
         try:
             if _tok is not None:
@@ -5254,20 +5254,23 @@ async def execute_channel_prompt(message: discord.Message, prompt: str):
             pass
 
 
-async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
+async def _execute_channel_prompt_impl(message: discord.Message, prompt: str, is_internal_auto_chain: bool = False):
     session = session_manager.get_session(message.channel.id)
     session.set_busy(True, "⏳ 작업 준비 중...")
     session.current_task = asyncio.current_task()
 
     # [Commander Epic Cycle] 사용자가 새로운 최상위 작업/요청을 시작할 때 사이클 카운트 초기화
     # (Mode 3 자율 순환 내부 호출이 아닌 일반 사용자 입력일 때 0으로 리셋)
-    is_internal_auto_chain = (
-        prompt.strip().startswith("🎯 [Commander 사령관 5W1H 개발 지침")
+    effective_internal_chain = (
+        is_internal_auto_chain
+        or getattr(session, "_is_in_auto_chain", False)
+        or prompt.strip().startswith("🎯 [Commander 사령관 5W1H 개발 지침")
         or prompt.strip().startswith("🎯 [Commander")
     )
-    if not is_internal_auto_chain:
+    if not effective_internal_chain:
         session._commander_cycle_count = 0
         session._last_milestone_diff_lines = None
+        session._is_in_auto_chain = False
 
     # Check ThermalGuard before starting execution
     await ThermalGuard.check_task_start_cooldown(message.channel)
@@ -6449,8 +6452,9 @@ async def _execute_channel_prompt_impl(message: discord.Message, prompt: str):
                             except Exception:
                                 from contextlib import nullcontext
                                 _qfw_exec_ctx = nullcontext()
+                            session._is_in_auto_chain = True
                             with _qfw_exec_ctx:
-                                await execute_channel_prompt(message, current_prompt)
+                                await execute_channel_prompt(message, current_prompt, is_internal_auto_chain=True)
 
                         asyncio.create_task(_delayed_next_milestone())
             except Exception as m3_err:

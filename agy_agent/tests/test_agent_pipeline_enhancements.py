@@ -6,13 +6,12 @@
 4. ImageCreatorHub pre-hook notification and channel resolution
 """
 import os
+import sys
 import json
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import MagicMock, AsyncMock, patch
-
-import os
-import sys
 
 # Ensure agy_agent root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -320,6 +319,69 @@ class TestAgentPipelineEnhancements(unittest.TestCase):
                 self.assertIn("인스타그램 릴스", entry["action_taken"])
                 self.assertIn("릴스 썸네일", entry["observed_result"])
                 self.assertIn("개선", entry["hypothesis_delta"])
+
+    def test_evidence_validator_framework_system_files_whitelist(self):
+        """Rule 6c 오탐 방지를 위해 visual_craft_loop 등 핵심 엔진 파일이 화이트리스트에 등록되었는지 검증"""
+        import inspect
+        from evidence_validator import EvidenceValidator
+        src = inspect.getsource(EvidenceValidator.detect_script_reference_tracing_and_extraction)
+        for fname in ["visual_craft_loop.py", "image_generation_backend.py", "image_creator_hub.py", "autonomous_e2e_loop.py"]:
+            self.assertIn(f'"{fname}"', src, f"{fname} must be in FRAMEWORK_SYSTEM_FILES whitelist")
+
+    def test_auto_metrics_history_regex_section_extraction(self):
+        """마크다운 테이블이나 노이즈 헤더가 섞여 있어도 ### 차기 가설 섹션 블록이 정밀 파싱되는지 검증"""
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_history_file = Path(tmpdir) / "test_regex_history.json"
+            AutoMetricsHistory._cache = None
+            with patch("auto_scheduler.METRICS_HISTORY_FILE", test_history_file), \
+                 patch("auto_scheduler.STATE_DIR", Path(tmpdir)):
+                sample_resp = (
+                    "### 📊 결과 보고\n"
+                    "| 지표 | 이전 | 현재 |\n"
+                    "| --- | --- | --- |\n"
+                    "| 개선률 | 10% | 25% |\n\n"
+                    "### 💡 차기 개선 및 가설\n"
+                    "- 1단계: 온디바이스 토큰 최적화를 적용하면 처리 속도가 20% 향상될 것이다.\n"
+                    "- 2단계: 캐시 미스 대응 로직을 보강한다.\n\n"
+                    "### 부록\n"
+                    "참고 자료 링크"
+                )
+                entry = AutoMetricsHistory.record_turn_output(
+                    channel_id=88888,
+                    prompt="정기 최적화",
+                    response=sample_resp
+                )
+                self.assertIsNotNone(entry)
+                self.assertNotIn("|", entry["hypothesis_delta"])
+                self.assertIn("온디바이스 토큰 최적화", entry["hypothesis_delta"])
+
+    def test_image_pre_hook_fetch_channel_timeout(self):
+        """스튜디오 채널 fetch_channel 시 타임아웃 격리 및 origin_channel 폴백 검증"""
+        mock_used_bot = MagicMock()
+        mock_used_bot.is_ready.return_value = True
+        mock_used_bot.get_channel.return_value = None
+
+        # fetch_channel이 5초 이상 지연(Timeout)될 때 2초 이내 타임아웃 발생 시뮬레이션
+        async def slow_fetch(cid):
+            await asyncio.sleep(5.0)
+            return MagicMock()
+
+        mock_used_bot.fetch_channel = slow_fetch
+
+        mock_origin_channel = MagicMock()
+        mock_origin_channel.send = AsyncMock()
+
+        sent = asyncio.run(ImageCreatorHub.send_pre_hook_notification(
+            bot_client=mock_used_bot,
+            prompt="테스트 배너 생성",
+            model_display="Gemini 3.8 Flash",
+            asset_name="banner",
+            origin_channel=mock_origin_channel,
+            origin_channel_id=12345,
+        ))
+        self.assertTrue(sent)
+        mock_origin_channel.send.assert_awaited_once()
 
 
 if __name__ == "__main__":

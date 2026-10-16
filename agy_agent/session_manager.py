@@ -302,6 +302,9 @@ class ChannelSession:
         # 한 번 전달된 이미지는 동일 채널 세션에서 다시 첨부·전송될 수 없다(재사용 불가).
         self.delivered_image_hashes: List[str] = []
         self.delivered_image_dhashes: List[str] = []
+        self._commander_cycle_count: int = 0
+        self._last_milestone_diff_lines: Optional[int] = None
+        self._is_in_auto_chain: bool = False
         self._on_change = on_change
 
     def get_user_directive(self) -> Optional[str]:
@@ -509,6 +512,7 @@ class ChannelSession:
         self.commander_macro_history = []
         self._commander_cycle_count = 0
         self._last_milestone_diff_lines = None
+        self._is_in_auto_chain = False
 
     def reset_cycle_workers(self):
         """

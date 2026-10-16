@@ -1341,7 +1341,10 @@ class EvidenceValidator:
             "agent_runner.py", "evidence_validator.py", "trio_agent_runner.py",
             "bot.py", "session_manager.py", "commander.py", "engine_manager.py",
             "config.py", "hot_reload_bridge.py", "help_manager.py", "roadmap_manager.py",
-            "git_manager.py", "mode_classifier.py"
+            "git_manager.py", "mode_classifier.py", "visual_craft_loop.py",
+            "image_generation_backend.py", "image_creator_hub.py", "autonomous_e2e_loop.py",
+            "cross_platform_e2e_runner.py", "auto_scheduler.py", "model_manager.py",
+            "role_authority.py", "qa_hub.py", "setup_manager.py"
         }
 
         for root, dirs, files in os.walk(workspace):
